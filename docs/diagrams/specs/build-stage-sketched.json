@@ -1,0 +1,182 @@
+{
+  "title": "构建阶段",
+  "direction": "LR",
+  "pageWidth": 1540,
+  "pageHeight": 760,
+  "nodes": [
+    {
+      "id": "title",
+      "label": "构建阶段（退化版）",
+      "kind": "title",
+      "x": 40,
+      "y": 30,
+      "width": 340,
+      "height": 50
+    },
+    {
+      "id": "workTxt",
+      "label": "工单 txt\n784 个短文档",
+      "kind": "document",
+      "x": 60,
+      "y": 140,
+      "width": 180,
+      "height": 90
+    },
+    {
+      "id": "workParse",
+      "label": "字段化解析\n报修 / 方案 / 备件",
+      "kind": "module",
+      "x": 330,
+      "y": 130,
+      "width": 220,
+      "height": 110
+    },
+    {
+      "id": "workIndex",
+      "label": "工单索引\nreported_issue\nsolution\nparts\nraw_text",
+      "kind": "storage",
+      "x": 670,
+      "y": 105,
+      "width": 230,
+      "height": 140
+    },
+    {
+      "id": "partsEvidence",
+      "label": "工单备件证据索引\n备件编号 / 名称 / 编码 / 数量",
+      "kind": "storage",
+      "x": 990,
+      "y": 105,
+      "width": 250,
+      "height": 140
+    },
+    {
+      "id": "manualHtml",
+      "label": "典型故障 html\n故障现象文件名",
+      "kind": "document",
+      "x": 60,
+      "y": 335,
+      "width": 190,
+      "height": 95
+    },
+    {
+      "id": "manualToMd",
+      "label": "HTML 转 Markdown\n去除样式/字体/导航",
+      "kind": "module",
+      "x": 310,
+      "y": 325,
+      "width": 230,
+      "height": 110
+    },
+    {
+      "id": "manualParse",
+      "label": "基于 Markdown 解析\n保留目录与文件名",
+      "kind": "module",
+      "x": 600,
+      "y": 325,
+      "width": 240,
+      "height": 110
+    },
+    {
+      "id": "manualIndex",
+      "label": "典型故障索引\nfault_title\nfile_name\nchunk_text\nsystem_dir",
+      "kind": "storage",
+      "x": 930,
+      "y": 310,
+      "width": 250,
+      "height": 150
+    },
+    {
+      "id": "codeHtml",
+      "label": "故障代码 html\n代码 + 描述",
+      "kind": "document",
+      "x": 60,
+      "y": 535,
+      "width": 190,
+      "height": 95
+    },
+    {
+      "id": "codeToMd",
+      "label": "HTML 转 Markdown\n去除样式/字体/导航",
+      "kind": "module",
+      "x": 310,
+      "y": 525,
+      "width": 230,
+      "height": 110
+    },
+    {
+      "id": "codeParse",
+      "label": "基于 Markdown 解析\n提取故障码与描述",
+      "kind": "module",
+      "x": 600,
+      "y": 525,
+      "width": 230,
+      "height": 110
+    },
+    {
+      "id": "codeIndex",
+      "label": "故障代码索引\nfault_code\ndescription\nchunk_text",
+      "kind": "storage",
+      "x": 930,
+      "y": 515,
+      "width": 240,
+      "height": 130
+    },
+    {
+      "id": "metadata",
+      "label": "仅保留元数据\n机型 / 系统目录 / 文件路径\n不用于默认过滤",
+      "kind": "artifact",
+      "x": 1230,
+      "y": 335,
+      "width": 240,
+      "height": 130
+    }
+  ],
+  "edges": [
+    {
+      "from": "workTxt",
+      "to": "workParse"
+    },
+    {
+      "from": "workParse",
+      "to": "workIndex"
+    },
+    {
+      "from": "workIndex",
+      "to": "partsEvidence"
+    },
+    {
+      "from": "manualHtml",
+      "to": "manualToMd"
+    },
+    {
+      "from": "manualToMd",
+      "to": "manualParse"
+    },
+    {
+      "from": "manualParse",
+      "to": "manualIndex"
+    },
+    {
+      "from": "manualIndex",
+      "to": "metadata"
+    },
+    {
+      "from": "codeHtml",
+      "to": "codeToMd"
+    },
+    {
+      "from": "codeToMd",
+      "to": "codeParse"
+    },
+    {
+      "from": "codeParse",
+      "to": "codeIndex"
+    }
+  ],
+  "notes": [
+    "退化版只构建非结构化文本索引，不接入用户设备表或设备备件表。",
+    "备件信息来自工单文本抽取的证据索引，不能视为当前设备适配结果。",
+    "手册 html 先转换为干净 Markdown，再进行解析、切块和建索引。",
+    "手册目录和机型信息保留为证据元数据，但默认不做过滤。"
+  ]
+}

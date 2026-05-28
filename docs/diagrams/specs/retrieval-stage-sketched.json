@@ -1,0 +1,149 @@
+{
+  "title": "检索阶段",
+  "direction": "TD",
+  "pageWidth": 1120,
+  "pageHeight": 1280,
+  "nodes": [
+    {
+      "id": "title",
+      "label": "检索阶段（退化版）",
+      "kind": "title",
+      "x": 40,
+      "y": 30,
+      "width": 340,
+      "height": 50
+    },
+    {
+      "id": "enhancedJson",
+      "label": "退化版 Query JSON",
+      "kind": "artifact",
+      "x": 410,
+      "y": 100,
+      "width": 230,
+      "height": 95
+    },
+    {
+      "id": "codeLookup",
+      "label": "故障码精确检索\n有显式故障码时",
+      "kind": "optional",
+      "x": 720,
+      "y": 110,
+      "width": 240,
+      "height": 90
+    },
+    {
+      "id": "workOrderSearch",
+      "label": "工单检索\n故障现象 / 部件+异常类型",
+      "kind": "module",
+      "x": 380,
+      "y": 265,
+      "width": 280,
+      "height": 105
+    },
+    {
+      "id": "partsExtract",
+      "label": "读取命中工单备件\n编号 / 名称 / 编码 / 数量",
+      "kind": "module",
+      "x": 380,
+      "y": 445,
+      "width": 280,
+      "height": 105
+    },
+    {
+      "id": "manualSearch",
+      "label": "典型故障手册检索\n跨机型 / 跨系统\n标题 / 文件名 / 正文",
+      "kind": "module",
+      "x": 365,
+      "y": 625,
+      "width": 310,
+      "height": 130
+    },
+    {
+      "id": "noFilter",
+      "label": "不按设备过滤\n不按机型过滤\n不按系统预过滤",
+      "kind": "optional",
+      "x": 720,
+      "y": 635,
+      "width": 240,
+      "height": 105
+    },
+    {
+      "id": "evidencePack",
+      "label": "证据包整理\n工单 / 手册 / 故障码",
+      "kind": "artifact",
+      "x": 390,
+      "y": 835,
+      "width": 270,
+      "height": 120
+    },
+    {
+      "id": "partsMark",
+      "label": "备件证据标注\n未做设备适配校验",
+      "kind": "module",
+      "x": 720,
+      "y": 845,
+      "width": 240,
+      "height": 95
+    },
+    {
+      "id": "finalAnswer",
+      "label": "故障候选\n解决方案\n有证据的备件信息",
+      "kind": "artifact",
+      "x": 390,
+      "y": 1040,
+      "width": 270,
+      "height": 130
+    }
+  ],
+  "edges": [
+    {
+      "from": "enhancedJson",
+      "to": "workOrderSearch"
+    },
+    {
+      "from": "enhancedJson",
+      "to": "codeLookup",
+      "label": "有故障码",
+      "optional": true
+    },
+    {
+      "from": "codeLookup",
+      "to": "evidencePack",
+      "optional": true
+    },
+    {
+      "from": "workOrderSearch",
+      "to": "partsExtract"
+    },
+    {
+      "from": "partsExtract",
+      "to": "manualSearch"
+    },
+    {
+      "from": "noFilter",
+      "to": "manualSearch",
+      "optional": true
+    },
+    {
+      "from": "manualSearch",
+      "to": "evidencePack"
+    },
+    {
+      "from": "partsExtract",
+      "to": "partsMark"
+    },
+    {
+      "from": "evidencePack",
+      "to": "partsMark"
+    },
+    {
+      "from": "partsMark",
+      "to": "finalAnswer"
+    }
+  ],
+  "notes": [
+    "退化版优先检索工单，因为备件编号和编码最可能来自历史工单。",
+    "没有设备备件表，因此备件信息只能作为历史证据引用，不能确认适配当前设备。",
+    "典型故障手册默认跨机型、跨系统检索。"
+  ]
+}
