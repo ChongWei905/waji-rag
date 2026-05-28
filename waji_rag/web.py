@@ -11,6 +11,12 @@ from urllib.parse import urlparse
 
 from waji_rag import __version__
 from waji_rag.html_batch import ConvertOptions, HtmlToMarkdownBatch, format_report_summary
+from waji_rag.work_order import (
+    WorkOrderBatchOptions,
+    WorkOrderBatchParser,
+    format_report_summary as format_work_order_report_summary,
+    write_report as write_work_order_report,
+)
 
 
 INDEX_HTML = """<!doctype html>
@@ -156,25 +162,45 @@ INDEX_HTML = """<!doctype html>
     <div class="meta" id="version">loading</div>
   </header>
   <main>
-    <section>
-      <h2>HTML 转 Markdown</h2>
-      <label for="inputDir">HTML 目录</label>
-      <input id="inputDir" placeholder="D:\\waji\\manual_html">
-      <label for="outDir">Markdown 输出目录</label>
-      <input id="outDir" placeholder="D:\\waji\\outputs\\manual_md">
-      <div class="row">
-        <div>
-          <label for="limit">数量上限</label>
-          <input id="limit" type="number" min="0" placeholder="留空表示全量">
+    <div>
+      <section>
+        <h2>HTML 转 Markdown</h2>
+        <label for="inputDir">HTML 目录</label>
+        <input id="inputDir" placeholder="D:\\waji\\manual_html">
+        <label for="outDir">Markdown 输出目录</label>
+        <input id="outDir" placeholder="D:\\waji\\outputs\\manual_md">
+        <div class="row">
+          <div>
+            <label for="limit">数量上限</label>
+            <input id="limit" type="number" min="0" placeholder="留空表示全量">
+          </div>
+          <div>
+            <label for="reportJson">报告文件</label>
+            <input id="reportJson" placeholder="可选 report.json">
+          </div>
         </div>
-        <div>
-          <label for="reportJson">报告文件</label>
-          <input id="reportJson" placeholder="可选 report.json">
+        <button id="convertBtn">运行转换</button>
+        <button id="doctorBtn" class="secondary">环境检查</button>
+      </section>
+      <section style="margin-top: 16px;">
+        <h2>工单 TXT 解析</h2>
+        <label for="workOrderInputDir">工单 TXT 目录</label>
+        <input id="workOrderInputDir" placeholder="D:\\waji\\data\\work_orders">
+        <label for="workOrderOutDir">解析输出目录</label>
+        <input id="workOrderOutDir" placeholder="D:\\waji\\outputs\\work_orders">
+        <div class="row">
+          <div>
+            <label for="workOrderLimit">数量上限</label>
+            <input id="workOrderLimit" type="number" min="0" placeholder="留空表示全量">
+          </div>
+          <div>
+            <label for="workOrderReportJson">报告文件</label>
+            <input id="workOrderReportJson" placeholder="可选 report.json">
+          </div>
         </div>
-      </div>
-      <button id="convertBtn">运行转换</button>
-      <button id="doctorBtn" class="secondary">环境检查</button>
-    </section>
+        <button id="parseWorkOrdersBtn">解析工单</button>
+      </section>
+    </div>
     <section>
       <h2>运行结果</h2>
       <div id="status" class="status">ready</div>
@@ -243,6 +269,26 @@ INDEX_HTML = """<!doctype html>
         button.disabled = false;
       }
     });
+    $("parseWorkOrdersBtn").addEventListener("click", async () => {
+      const button = $("parseWorkOrdersBtn");
+      button.disabled = true;
+      $("status").className = "status";
+      $("status").textContent = "running";
+      try {
+        const payload = {
+          input_dir: $("workOrderInputDir").value.trim(),
+          out_dir: $("workOrderOutDir").value.trim(),
+          limit: $("workOrderLimit").value ? Number($("workOrderLimit").value) : null,
+          report_json: $("workOrderReportJson").value.trim() || null
+        };
+        const data = await postJson("/api/parse-workorders", payload);
+        show(data);
+      } catch (error) {
+        show({}, error);
+      } finally {
+        button.disabled = false;
+      }
+    });
     loadDoctor();
   </script>
 </body>
@@ -273,6 +319,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/html-to-md":
             self._handle_html_to_md()
+            return
+        if parsed.path == "/api/parse-workorders":
+            self._handle_parse_workorders()
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -306,6 +355,37 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "summary": format_report_summary(report),
+                    "report": report.to_dict(),
+                },
+                status=HTTPStatus.OK if not report.failed_files else HTTPStatus.MULTI_STATUS,
+            )
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json(
+                {"error": f"{type(exc).__name__}: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_parse_workorders(self) -> None:
+        payload = self._read_json()
+        input_dir = str(payload.get("input_dir") or "").strip()
+        out_dir = str(payload.get("out_dir") or "").strip()
+        if not input_dir or not out_dir:
+            self._send_json({"error": "input_dir and out_dir are required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        options = WorkOrderBatchOptions(
+            input_dir=Path(input_dir),
+            output_dir=Path(out_dir),
+            limit=payload.get("limit"),
+        )
+        try:
+            report = WorkOrderBatchParser(options).parse_directory()
+            report_json = payload.get("report_json")
+            if report_json:
+                write_work_order_report(report, Path(str(report_json)))
+            self._send_json(
+                {
+                    "summary": format_work_order_report_summary(report),
                     "report": report.to_dict(),
                 },
                 status=HTTPStatus.OK if not report.failed_files else HTTPStatus.MULTI_STATUS,

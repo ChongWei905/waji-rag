@@ -82,11 +82,30 @@ macOS 或 Linux 下把换行符替换为 `\` 即可。
 
 建议 Windows 首次验证先加 `--limit 10`，确认 Markdown 清洗效果后再跑全量。
 
+命令行解析工单 TXT：
+
+```bash
+python -m waji_rag.cli parse-workorders ^
+  --input-dir D:\waji\data\work_orders ^
+  --out-dir D:\waji\outputs\work_orders ^
+  --report-json D:\waji\outputs\work_order_report.json ^
+  --debug
+```
+
+该命令会输出：
+
+- `work_orders.jsonl`：每条工单的报修内容、解决方法、备件列表和原文；
+- `parts_evidence.jsonl`：从工单中抽取出的备件证据；
+- `parts_evidence.csv`：便于在 Windows Excel 中检查的备件证据表；
+- `work_order_report.json`：解析统计、失败文件和字段缺失告警。
+
 需要反馈的问题材料包括：
 
 - `doctor` 输出；
 - `html_to_md_report.json`；
+- `work_order_report.json`；
 - 抽样转换后的 Markdown；
+- 抽样解析后的 `parts_evidence.csv`；
 - 命令行报错或 Web 页面中的 JSON 输出。
 
 ## 2. 可用数据
