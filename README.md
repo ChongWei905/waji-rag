@@ -108,7 +108,9 @@ Open:
 http://127.0.0.1:8765
 ```
 
-The page can run the RAG workflow end to end. For the included demo data, click `加载 Demo 配置`, then `一键跑全流程`. The page initializes PostgreSQL, ingests work-order TXT and manual HTML, runs retrieval/answer generation, and shows the final answer, stage trace, recalled evidence, part candidates, and raw JSON in separate tabs.
+The page can run the RAG workflow end to end. For the included demo data, click `加载 Demo 配置`, then `一键跑全流程`. The page initializes PostgreSQL, ingests work-order TXT and manual HTML, runs retrieval/answer generation, and shows the final answer, stage trace, recalled evidence, part candidates, and raw JSON in separate panels.
+
+The web UI also persists build/search/answer runs in PostgreSQL as task records. After ingesting a document batch once, you can repeatedly run new retrieval or answer tasks from the same database, then reload any previous task from the left-side task list to inspect its status, request, result, retrieval channels, selected evidence, and generated answer.
 
 ## Environment Verification Scripts
 
@@ -123,6 +125,12 @@ python scripts\verify_embedding.py ^
   --model text-embedding-v4 ^
   --base-url https://dashscope.aliyuncs.com/compatible-mode/v1 ^
   --dimensions 1024
+
+python scripts\verify_embedding.py ^
+  --provider vllm ^
+  --base-url http://127.0.0.1:8888/v1 ^
+  --dimensions 0 ^
+  --no-proxy-hosts localhost,127.0.0.1,127.0.0.0/8,::1,10.30.4.5,192.168.0.0/16
 
 python scripts\verify_llm.py ^
   --api-key "<llm-api-key>" ^
@@ -141,6 +149,8 @@ All three scripts return JSON and exit with code `0` only when the check passes.
 
 By default, `embedding.enabled=false`, so retrieval uses BM25. If an embedding provider is enabled and embeddings are stored in PostgreSQL, retrieval uses hybrid BM25 + pgvector. If the model call fails, the pipeline records the failure in `warnings` / `debug.retrieval_events` and degrades to BM25.
 
+For local vLLM/OpenAI-compatible embedding services, use `--embedding-provider vllm` and a base URL such as `http://127.0.0.1:8888/v1`. API key and model can be left empty for local vLLM, and `--embedding-dimensions 0` means the client will not send a `dimensions` field. Embedding calls bypass proxies for `localhost`, `127.0.0.1`, `127.0.0.0/8`, and `::1` by default; add more hosts or ranges with `--embedding-no-proxy-hosts` or `DOCARBOR_EMBEDDING_NO_PROXY_HOSTS`, for example `10.30.4.5,192.168.0.0/16,*.company.local`.
+
 With a DocArbor-style `.env` file:
 
 ```bash
@@ -150,20 +160,27 @@ python -m waji_rag.cli ingest-db \
   --reset \
   --env-file /path/to/.env \
   --enable-embedding \
+  --embedding-provider dashscope \
   --embedding-model text-embedding-v4 \
   --embedding-dimensions 1024 \
   --debug
 
 python -m waji_rag.cli ask-db \
   --query "风扇皮带异响，可能是什么故障，需要更换什么备件" \
-  --env-file /path/to/.env \
   --enable-embedding \
   --enable-rerank \
   --enable-llm \
+  --embedding-provider dashscope \
   --embedding-model text-embedding-v4 \
+  --embedding-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
+  --embedding-api-key "<embedding-api-key>" \
   --embedding-dimensions 1024 \
   --rerank-model qwen3-rerank \
+  --rerank-base-url https://dashscope.aliyuncs.com/compatible-api/v1 \
+  --rerank-api-key "<rerank-api-key>" \
   --llm-model qwen3.5-plus \
+  --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
+  --llm-api-key "<llm-api-key>" \
   --debug
 ```
 

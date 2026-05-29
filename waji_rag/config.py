@@ -14,6 +14,7 @@ DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_DASHSCOPE_RERANK_BASE_URL = "https://dashscope.aliyuncs.com/compatible-api/v1"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_DOCARBOR_ENV_PATH = "/Users/weichong/Documents/new_working_area/file_tree/DocArbor/.env"
+DEFAULT_EMBEDDING_NO_PROXY_HOSTS = ("localhost", "127.0.0.1", "127.0.0.0/8", "::1")
 SECRET_KEY_PATTERN = re.compile(
     r"^(api[_-]?key|secret|password|bearer[_-]?token|access[_-]?token|refresh[_-]?token)$",
     re.IGNORECASE,
@@ -31,9 +32,10 @@ class EmbeddingConfig:
     api_key: str = ""
     api_key_env: str = "DOCARBOR_EMBEDDING_API_KEY"
     command: list[str] = field(default_factory=list)
-    dimensions: int | None = 1024
+    dimensions: int | None = None
     batch_size: int = 10
     timeout_seconds: float = 180.0
+    no_proxy_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
 
     def is_available(self) -> bool:
         """Return whether this config can create embeddings."""
@@ -43,6 +45,10 @@ class EmbeddingConfig:
         provider = self.provider.lower().strip()
         if provider == "command":
             return bool(self.command)
+        if provider == "vllm":
+            return bool(self.base_url)
+        if provider == "openai":
+            return bool(self.model and self.base_url)
         return bool(self.api_key and self.model and self.base_url)
 
 
@@ -198,9 +204,13 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
             ),
             api_key_env=embedding_api_key_env,
             command=[str(item) for item in embedding_payload.get("command", [])],
-            dimensions=optional_int(embedding_payload.get("dimensions"), default=1024),
+            dimensions=optional_int(embedding_payload.get("dimensions"), default=None),
             batch_size=max(1, int(embedding_payload.get("batch_size", 10))),
             timeout_seconds=float(embedding_payload.get("timeout_seconds", 180.0)),
+            no_proxy_hosts=parse_string_list(
+                embedding_payload.get("no_proxy_hosts", embedding_payload.get("no_proxy")),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         ),
         rerank=RerankConfig(
             enabled=as_bool(rerank_payload.get("enabled", False)),
@@ -248,7 +258,11 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
             "model": env_values.get("DOCARBOR_RETRIEVAL_EMBEDDING_MODEL", "text-embedding-v4"),
             "base_url": env_values.get("DOCARBOR_EMBEDDING_BASE_URL", DEFAULT_DASHSCOPE_BASE_URL),
             "api_key_env": "DOCARBOR_EMBEDDING_API_KEY",
-            "dimensions": optional_int(env_values.get("DOCARBOR_EMBEDDING_DIMENSIONS"), default=1024),
+            "dimensions": optional_int(env_values.get("DOCARBOR_EMBEDDING_DIMENSIONS"), default=None),
+            "no_proxy_hosts": parse_string_list(
+                env_values.get("DOCARBOR_EMBEDDING_NO_PROXY_HOSTS"),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         },
         "rerank": {
             "provider": "dashscope",
@@ -347,6 +361,18 @@ def optional_int(value: object, *, default: int | None = None) -> int | None:
     if value in (None, ""):
         return default
     return int(value)
+
+
+def parse_string_list(value: object, *, default: list[str] | None = None) -> list[str]:
+    """Parse a comma-separated string or JSON-like list into strings."""
+
+    if value in (None, ""):
+        return list(default or [])
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
 
 
 def as_bool(value: object) -> bool:

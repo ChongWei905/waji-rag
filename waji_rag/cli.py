@@ -115,8 +115,15 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_db.add_argument("--config", help="Optional retrieval config JSON path.")
     ingest_db.add_argument("--env-file", help="Optional dotenv path for API keys and default models.")
     ingest_db.add_argument("--enable-embedding", action="store_true", help="Enable configured embeddings during ingest.")
+    ingest_db.add_argument("--embedding-provider", choices=["dashscope", "openai", "vllm", "command"], help="Embedding provider.")
     ingest_db.add_argument("--embedding-model", help="Embedding model name.")
+    ingest_db.add_argument("--embedding-base-url", help="Embedding API base URL.")
+    ingest_db.add_argument("--embedding-api-key", help="Embedding API key. Takes precedence over env/config values.")
     ingest_db.add_argument("--embedding-dimensions", type=int, help="Embedding dimensions.")
+    ingest_db.add_argument(
+        "--embedding-no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for embedding calls.",
+    )
     ingest_db.add_argument("--reset", action="store_true", help="Reset schema before ingesting.")
     ingest_db.add_argument("--work-order-limit", type=int, help="Optional maximum number of work-order files.")
     ingest_db.add_argument("--manual-limit", type=int, help="Optional maximum number of manual files.")
@@ -136,6 +143,15 @@ def build_parser() -> argparse.ArgumentParser:
     search_db.add_argument("--config", help="Optional retrieval config JSON path.")
     search_db.add_argument("--env-file", help="Optional dotenv path for API keys and default models.")
     search_db.add_argument("--enable-embedding", action="store_true", help="Enable hybrid retrieval when embeddings exist.")
+    search_db.add_argument("--embedding-provider", choices=["dashscope", "openai", "vllm", "command"], help="Embedding provider.")
+    search_db.add_argument("--embedding-model", help="Embedding model name.")
+    search_db.add_argument("--embedding-base-url", help="Embedding API base URL.")
+    search_db.add_argument("--embedding-api-key", help="Embedding API key. Takes precedence over env/config values.")
+    search_db.add_argument("--embedding-dimensions", type=int, help="Embedding dimensions.")
+    search_db.add_argument(
+        "--embedding-no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for embedding calls.",
+    )
     search_db.add_argument("--enable-rerank", action="store_true", help="Reserved for full ask-db; search-db returns retrieval only.")
     search_db.add_argument("--top-k", type=int, default=8, help="Hits per channel. Defaults to 8.")
     search_db.add_argument("--out-json", help="Optional JSON output path.")
@@ -152,10 +168,21 @@ def build_parser() -> argparse.ArgumentParser:
     ask_db.add_argument("--enable-embedding", action="store_true", help="Enable hybrid retrieval when embeddings exist.")
     ask_db.add_argument("--enable-rerank", action="store_true", help="Enable configured reranker.")
     ask_db.add_argument("--enable-llm", action="store_true", help="Enable configured LLM answer generation.")
+    ask_db.add_argument("--embedding-provider", choices=["dashscope", "openai", "vllm", "command"], help="Embedding provider.")
     ask_db.add_argument("--embedding-model", help="Embedding model name.")
+    ask_db.add_argument("--embedding-base-url", help="Embedding API base URL.")
+    ask_db.add_argument("--embedding-api-key", help="Embedding API key. Takes precedence over env/config values.")
     ask_db.add_argument("--embedding-dimensions", type=int, help="Embedding dimensions.")
+    ask_db.add_argument(
+        "--embedding-no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for embedding calls.",
+    )
     ask_db.add_argument("--rerank-model", help="Rerank model name.")
+    ask_db.add_argument("--rerank-base-url", help="Rerank API base URL.")
+    ask_db.add_argument("--rerank-api-key", help="Rerank API key. Takes precedence over env/config values.")
     ask_db.add_argument("--llm-model", help="LLM model name.")
+    ask_db.add_argument("--llm-base-url", help="LLM API base URL.")
+    ask_db.add_argument("--llm-api-key", help="LLM API key. Takes precedence over env/config values.")
     ask_db.add_argument("--debug", action="store_true", help="Include trace and scoring settings.")
     ask_db.set_defaults(func=run_ask_db)
 
@@ -375,10 +402,18 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
     embedding: dict[str, object] = {}
     if getattr(args, "enable_embedding", False):
         embedding["enabled"] = True
+    if getattr(args, "embedding_provider", None):
+        embedding["provider"] = args.embedding_provider
     if getattr(args, "embedding_model", None):
         embedding["model"] = args.embedding_model
-    if getattr(args, "embedding_dimensions", None):
+    if getattr(args, "embedding_base_url", None):
+        embedding["base_url"] = args.embedding_base_url
+    if getattr(args, "embedding_api_key", None):
+        embedding["api_key"] = args.embedding_api_key
+    if getattr(args, "embedding_dimensions", None) is not None:
         embedding["dimensions"] = args.embedding_dimensions
+    if getattr(args, "embedding_no_proxy_hosts", None):
+        embedding["no_proxy_hosts"] = args.embedding_no_proxy_hosts
     if embedding:
         overrides["embedding"] = embedding
 
@@ -387,6 +422,10 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         rerank["enabled"] = True
     if getattr(args, "rerank_model", None):
         rerank["model"] = args.rerank_model
+    if getattr(args, "rerank_base_url", None):
+        rerank["base_url"] = args.rerank_base_url
+    if getattr(args, "rerank_api_key", None):
+        rerank["api_key"] = args.rerank_api_key
     if rerank:
         overrides["rerank"] = rerank
 
@@ -395,6 +434,10 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         llm["enabled"] = True
     if getattr(args, "llm_model", None):
         llm["model"] = args.llm_model
+    if getattr(args, "llm_base_url", None):
+        llm["base_url"] = args.llm_base_url
+    if getattr(args, "llm_api_key", None):
+        llm["api_key"] = args.llm_api_key
     if llm:
         overrides["llm"] = llm
     return overrides

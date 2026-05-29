@@ -11,7 +11,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from waji_rag import __version__
-from waji_rag.config import DEFAULT_DASHSCOPE_BASE_URL, DEFAULT_DASHSCOPE_RERANK_BASE_URL, DEFAULT_DOCARBOR_ENV_PATH, load_config
+from waji_rag.config import (
+    DEFAULT_DASHSCOPE_BASE_URL,
+    DEFAULT_DASHSCOPE_RERANK_BASE_URL,
+    DEFAULT_DOCARBOR_ENV_PATH,
+    DEFAULT_OPENAI_BASE_URL,
+    load_config,
+    redact_secrets,
+)
 from waji_rag.pg_index import (
     DatabaseOptions,
     PgIngestBuilder,
@@ -19,8 +26,11 @@ from waji_rag.pg_index import (
     PgPipelineOptions,
     PgSchemaManager,
     PgSearchOptions,
+    connect,
+    create_task_schema,
     format_ingest_report_summary,
     format_search_summary,
+    json_param,
     redact_database_url,
     run_pg_pipeline,
     run_pg_search,
@@ -794,7 +804,7 @@ def build_redesigned_index_html() -> str:
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow-x: hidden;
     }
-    button, input, textarea {
+    button, input, select, textarea {
       font: inherit;
     }
     button {
@@ -819,13 +829,16 @@ def build_redesigned_index_html() -> str:
       background: transparent;
       border-color: var(--line);
     }
-    input, textarea {
+    input, select, textarea {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: #fff;
       color: var(--ink);
       padding: 8px 10px;
+    }
+    select {
+      min-height: 38px;
     }
     textarea {
       min-height: 86px;
@@ -937,6 +950,86 @@ def build_redesigned_index_html() -> str:
       position: sticky;
       top: 12px;
       overflow: hidden;
+    }
+    .rail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .rail-head h2 {
+      margin: 0;
+    }
+    .rail-head button {
+      min-height: 30px;
+      padding: 0 9px;
+      font-size: 12px;
+    }
+    .rail-divider {
+      height: 1px;
+      margin: 12px 0;
+      background: var(--line);
+    }
+    .task-list {
+      display: grid;
+      gap: 8px;
+      max-height: 300px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .task-card {
+      width: 100%;
+      min-width: 0;
+      min-height: 72px;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 10px;
+      display: grid;
+      gap: 5px;
+      overflow: hidden;
+    }
+    .task-card.active {
+      border-color: #5eead4;
+      background: var(--accent-soft);
+    }
+    .task-card.failed {
+      border-color: #fecdd3;
+      background: #fff1f2;
+    }
+    .task-card.running {
+      border-color: #bfdbfe;
+      background: #eff6ff;
+    }
+    .task-card.completed_with_errors {
+      border-color: #fed7aa;
+      background: #fffbeb;
+    }
+    .task-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+    .task-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .task-subtitle {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      max-height: 32px;
+      overflow: hidden;
+      overflow-wrap: anywhere;
     }
     .stage-list {
       display: grid;
@@ -1233,6 +1326,12 @@ def build_redesigned_index_html() -> str:
 
     <div class="workspace">
       <aside class="stage-rail">
+        <div class="rail-head">
+          <h2>任务记录</h2>
+          <button id="refreshTasksBtn" class="ghost">刷新</button>
+        </div>
+        <div id="taskList" class="task-list"><div class="empty">暂无任务</div></div>
+        <div class="rail-divider"></div>
         <h2>执行阶段</h2>
         <div id="stageList" class="stage-list"></div>
       </aside>
@@ -1312,12 +1411,20 @@ def build_redesigned_index_html() -> str:
           <span>启用 embedding / hybrid</span>
         </label>
         <div>
+          <label for="embeddingProvider">Embedding Provider</label>
+          <select id="embeddingProvider">
+            <option value="vllm">vLLM / local</option>
+            <option value="openai">OpenAI compatible</option>
+            <option value="dashscope">DashScope</option>
+          </select>
+        </div>
+        <div>
           <label for="embeddingModel">Embedding 模型</label>
-          <input id="embeddingModel" value="text-embedding-v4">
+          <input id="embeddingModel" placeholder="vLLM 可留空；云模型填写模型名">
         </div>
         <div>
           <label for="embeddingDimensions">向量维度</label>
-          <input id="embeddingDimensions" type="number" min="1" value="1024">
+          <input id="embeddingDimensions" type="number" min="0" placeholder="留空则不发送 dimensions">
         </div>
         <div>
           <label for="embeddingBatchSize">批量大小</label>
@@ -1325,7 +1432,15 @@ def build_redesigned_index_html() -> str:
         </div>
         <div class="full">
           <label for="embeddingBaseUrl">Embedding Base URL</label>
-          <input id="embeddingBaseUrl" value="__DASHSCOPE_BASE_URL__">
+          <input id="embeddingBaseUrl" value="http://127.0.0.1:8888/v1">
+        </div>
+        <div class="full">
+          <label for="embeddingNoProxyHosts">Embedding No Proxy Hosts</label>
+          <input id="embeddingNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
+        </div>
+        <div class="full">
+          <label for="embeddingApiKey">Embedding API Key</label>
+          <input id="embeddingApiKey" type="password" placeholder="本地 vLLM 可留空；云服务填写 key">
         </div>
 
         <label class="checkline" for="enableRerank">
@@ -1340,6 +1455,10 @@ def build_redesigned_index_html() -> str:
           <label for="rerankBaseUrl">Rerank Base URL</label>
           <input id="rerankBaseUrl" value="__DASHSCOPE_RERANK_BASE_URL__">
         </div>
+        <div class="full">
+          <label for="rerankApiKey">Rerank API Key</label>
+          <input id="rerankApiKey" type="password" placeholder="可留空，留空时读取 DOCARBOR_RERANK_API_KEY 或兜底 key">
+        </div>
 
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
@@ -1352,6 +1471,10 @@ def build_redesigned_index_html() -> str:
         <div class="full">
           <label for="llmBaseUrl">LLM Base URL</label>
           <input id="llmBaseUrl" value="__DASHSCOPE_BASE_URL__">
+        </div>
+        <div class="full">
+          <label for="llmApiKey">LLM API Key</label>
+          <input id="llmApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
         </div>
       </div>
       <div class="modal-foot">
@@ -1369,6 +1492,9 @@ def build_redesigned_index_html() -> str:
     const demoManualDir = __DEMO_MANUAL_DIR_JSON__;
     const docArborEnvPath = __DOCARBOR_ENV_PATH_JSON__;
     const defaultQuery = __DEFAULT_QUERY_JSON__;
+    const dashscopeBaseUrl = __DASHSCOPE_BASE_URL_JSON__;
+    const openaiBaseUrl = __OPENAI_BASE_URL_JSON__;
+    const localEmbeddingBaseUrl = "http://127.0.0.1:8888/v1";
     const channels = [
       ["work_orders", "历史工单", "doc_type=work_order；字段权重优先 reported_issue，再看 solution/raw_text。"],
       ["manual_typical_faults", "典型故障手册", "doc_type=manual_typical_fault；优先 fault_title/file_name，再看正文 chunk。"],
@@ -1386,24 +1512,29 @@ def build_redesigned_index_html() -> str:
     let appState = {
       stages: {},
       selectedStage: "config",
-      lastResult: null
+      lastResult: null,
+      currentTaskId: null,
+      tasks: []
     };
 
     function configOverrides() {
       return {
         embedding: {
           enabled: $("enableEmbedding").checked,
-          provider: "dashscope",
+          provider: $("embeddingProvider").value,
           model: $("embeddingModel").value.trim(),
           base_url: $("embeddingBaseUrl").value.trim(),
+          api_key: $("embeddingApiKey").value.trim(),
           dimensions: $("embeddingDimensions").value ? Number($("embeddingDimensions").value) : null,
-          batch_size: $("embeddingBatchSize").value ? Number($("embeddingBatchSize").value) : 10
+          batch_size: $("embeddingBatchSize").value ? Number($("embeddingBatchSize").value) : 10,
+          no_proxy_hosts: parseCsv($("embeddingNoProxyHosts").value)
         },
         rerank: {
           enabled: $("enableRerank").checked,
           provider: "dashscope",
           model: $("rerankModel").value.trim(),
           base_url: $("rerankBaseUrl").value.trim(),
+          api_key: $("rerankApiKey").value.trim(),
           top_n: $("evidenceTopK").value ? Number($("evidenceTopK").value) : 8
         },
         llm: {
@@ -1411,6 +1542,7 @@ def build_redesigned_index_html() -> str:
           provider: "dashscope",
           model: $("llmModel").value.trim(),
           base_url: $("llmBaseUrl").value.trim(),
+          api_key: $("llmApiKey").value.trim(),
           max_tokens: 1400,
           temperature: 0
         },
@@ -1428,6 +1560,17 @@ def build_redesigned_index_html() -> str:
         env_file: $("envFile").value.trim() || null,
         config_overrides: configOverrides()
       };
+    }
+
+    function taskPayload(extra = {}) {
+      return {
+        database_url: $("databaseUrl").value.trim() || null,
+        ...extra
+      };
+    }
+
+    function parseCsv(value) {
+      return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
     }
 
     function ingestPayload() {
@@ -1522,6 +1665,96 @@ def build_redesigned_index_html() -> str:
         </div>
       `;
       $("stageJson").textContent = JSON.stringify(state.data || {}, null, 2);
+    }
+
+    async function refreshTasks(options = {}) {
+      try {
+        const data = await postJson("/api/tasks", taskPayload({limit: 40}));
+        appState.tasks = data.tasks || [];
+        renderTaskList();
+        return data;
+      } catch (error) {
+        if (!options.quiet) setStatus(String(error), "error");
+        appState.tasks = [];
+        renderTaskList();
+        return {tasks: []};
+      }
+    }
+
+    function renderTaskList() {
+      if (!appState.tasks.length) {
+        $("taskList").innerHTML = '<div class="empty">暂无任务</div>';
+        return;
+      }
+      $("taskList").innerHTML = "";
+      for (const task of appState.tasks) {
+        const button = document.createElement("button");
+        button.className = `task-card ${task.status || ""} ${appState.currentTaskId === task.id ? "active" : ""}`;
+        button.innerHTML = `
+          <div class="task-line">
+            <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(taskTypeLabel(task.task_type))}</span>
+            <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
+          </div>
+          <div class="task-subtitle">${escapeHtml(task.query || task.summary || "知识库构建任务")}</div>
+          <div class="row-meta">${escapeHtml(compactTime(task.created_at))}</div>
+        `;
+        button.addEventListener("click", () => loadTask(task.id));
+        $("taskList").appendChild(button);
+      }
+    }
+
+    async function loadTask(taskId) {
+      try {
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        renderStoredTask(data.task);
+      } catch (error) {
+        setStatus(String(error), "error");
+      }
+    }
+
+    function renderStoredTask(task) {
+      if (!task) return;
+      appState.currentTaskId = task.id;
+      renderTaskList();
+      resetStages();
+      if (task.query) $("query").value = task.query;
+      setStage("config", "done", task.request || {}, "已载入任务请求");
+      if (task.task_type === "build") {
+        renderBuildTaskResult(task);
+      } else if (task.task_type === "search") {
+        renderSearchResult(task.result || {});
+      } else {
+        renderPipelineResult(task.result || {});
+      }
+      if (task.status === "failed") {
+        const failedStage = task.task_type === "build" ? "ingest" : task.task_type === "search" ? "retrieval" : "answer";
+        setStage(failedStage, "error", task, task.error || "任务失败");
+      }
+      setStatus(`已载入任务 #${task.id} · ${taskTypeLabel(task.task_type)} · ${task.status}`, task.status === "failed" ? "error" : "success");
+    }
+
+    function renderBuildTaskResult(task) {
+      const status = task.status === "failed" ? "error" : task.status === "completed_with_errors" ? "fallback" : "done";
+      setStage("ingest", status, task.result || {}, task.summary || "构建任务已完成");
+      $("answer").textContent = task.summary || "构建任务已完成。可以继续发起检索或回答任务。";
+      renderParts([]);
+      renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
+      renderSelectedEvidence([]);
+    }
+
+    function taskTypeLabel(taskType) {
+      return {
+        build: "构建",
+        search: "检索",
+        answer: "回答"
+      }[taskType] || taskType || "任务";
+    }
+
+    function compactTime(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return date.toLocaleString();
     }
 
     function renderPipelineResult(response) {
@@ -1664,11 +1897,13 @@ def build_redesigned_index_html() -> str:
         setStatus("构建索引中");
         setStage("ingest", "active", ingestPayload(), "解析工单、清洗 HTML、写入索引");
         const ingestResult = await postJson("/api/ingest-db", ingestPayload());
+        appState.currentTaskId = ingestResult.task_id || null;
         setStage("ingest", "done", ingestResult, ingestResult.summary || "入库完成");
         $("answer").textContent = "构建完成。下一步可以点击“检索”查看多路召回结果，或点击“回答”生成最终答案。";
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
         renderSelectedEvidence([]);
+        await refreshTasks({quiet: true});
         setStatus("构建完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -1699,13 +1934,16 @@ def build_redesigned_index_html() -> str:
         setStatus("构建索引中");
         setStage("ingest", "active", ingestPayload(), "解析工单、清洗 HTML、写入索引");
         const ingestResult = await postJson("/api/ingest-db", ingestPayload());
+        appState.currentTaskId = ingestResult.task_id || null;
         setStage("ingest", "done", ingestResult, ingestResult.summary || "入库完成");
 
         setStatus("多路召回与答案生成中");
         setStage("retrieval", "active", queryPayload(), "分路召回证据");
         const askResult = await postJson("/api/ask-db", queryPayload());
+        appState.currentTaskId = askResult.task_id || appState.currentTaskId;
         askResult.workflow = {config: preview, init: initResult, ingest: ingestResult};
         renderPipelineResult(askResult);
+        await refreshTasks({quiet: true});
         setStatus("全流程完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -1722,7 +1960,9 @@ def build_redesigned_index_html() -> str:
         setStatus("检索中");
         setStage("retrieval", "active", queryPayload(), "分路召回证据");
         const result = await postJson("/api/search-db", queryPayload());
+        appState.currentTaskId = result.task_id || null;
         renderSearchResult(result);
+        await refreshTasks({quiet: true});
         setStatus("检索完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -1737,7 +1977,9 @@ def build_redesigned_index_html() -> str:
       try {
         setStatus("问答中");
         const result = await postJson("/api/ask-db", queryPayload());
+        appState.currentTaskId = result.task_id || null;
         renderPipelineResult(result);
+        await refreshTasks({quiet: true});
         setStatus("问答完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -1760,6 +2002,29 @@ def build_redesigned_index_html() -> str:
       }
     }
 
+    function applyEmbeddingProviderDefaults(force = false) {
+      const provider = $("embeddingProvider").value;
+      const baseInput = $("embeddingBaseUrl");
+      const modelInput = $("embeddingModel");
+      const dimensionInput = $("embeddingDimensions");
+      const shouldReplaceBase = force || !baseInput.value || [dashscopeBaseUrl, openaiBaseUrl, localEmbeddingBaseUrl].includes(baseInput.value.trim());
+      if (provider === "vllm") {
+        if (shouldReplaceBase) baseInput.value = localEmbeddingBaseUrl;
+        if (force) {
+          modelInput.value = "";
+          dimensionInput.value = "";
+          $("embeddingApiKey").value = "";
+        }
+      } else if (provider === "openai") {
+        if (shouldReplaceBase) baseInput.value = openaiBaseUrl;
+        if (force) dimensionInput.value = "";
+      } else if (provider === "dashscope") {
+        if (shouldReplaceBase) baseInput.value = dashscopeBaseUrl;
+        if (force && !modelInput.value.trim()) modelInput.value = "text-embedding-v4";
+        if (force && !dimensionInput.value.trim()) dimensionInput.value = "1024";
+      }
+    }
+
     function applyDemoDefaults() {
       $("workOrderDir").value = demoWorkOrderDir;
       $("manualDir").value = demoManualDir;
@@ -1771,8 +2036,16 @@ def build_redesigned_index_html() -> str:
       $("ingestReset").checked = true;
       $("envFile").value = "";
       $("enableEmbedding").checked = false;
+      $("embeddingProvider").value = "vllm";
+      $("embeddingModel").value = "";
+      $("embeddingDimensions").value = "";
+      $("embeddingBaseUrl").value = localEmbeddingBaseUrl;
+      $("embeddingNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("enableRerank").checked = false;
       $("enableLlm").checked = false;
+      $("embeddingApiKey").value = "";
+      $("rerankApiKey").value = "";
+      $("llmApiKey").value = "";
       setStatus("已加载 Demo 配置", "success");
     }
 
@@ -1796,7 +2069,9 @@ def build_redesigned_index_html() -> str:
       $("envFile").value = docArborEnvPath;
       setStatus("已填入 DocArbor Env 路径", "success");
     });
+    $("embeddingProvider").addEventListener("change", () => applyEmbeddingProviderDefaults(true));
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
+    $("refreshTasksBtn").addEventListener("click", () => refreshTasks());
     $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
     $("runSearchBtn").addEventListener("click", () => runSearch($("runSearchBtn")));
     $("runAnswerBtn").addEventListener("click", () => runAsk($("runAnswerBtn")));
@@ -1816,6 +2091,7 @@ def build_redesigned_index_html() -> str:
     }).catch(() => {});
     resetStages();
     applyDemoDefaults();
+    refreshTasks({quiet: true});
   </script>
 </body>
 </html>
@@ -1831,7 +2107,9 @@ def build_redesigned_index_html() -> str:
         "__DOCARBOR_ENV_PATH__": html.escape(DEFAULT_DOCARBOR_ENV_PATH),
         "__DOCARBOR_ENV_PATH_JSON__": json.dumps(DEFAULT_DOCARBOR_ENV_PATH, ensure_ascii=False),
         "__DASHSCOPE_BASE_URL__": html.escape(DEFAULT_DASHSCOPE_BASE_URL),
+        "__DASHSCOPE_BASE_URL_JSON__": json.dumps(DEFAULT_DASHSCOPE_BASE_URL, ensure_ascii=False),
         "__DASHSCOPE_RERANK_BASE_URL__": html.escape(DEFAULT_DASHSCOPE_RERANK_BASE_URL),
+        "__OPENAI_BASE_URL_JSON__": json.dumps(DEFAULT_OPENAI_BASE_URL, ensure_ascii=False),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
@@ -1877,6 +2155,12 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/ask-db":
             self._handle_ask_db()
             return
+        if parsed.path == "/api/tasks":
+            self._handle_tasks()
+            return
+        if parsed.path == "/api/task":
+            self._handle_task()
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def log_message(self, format: str, *args: object) -> None:
@@ -1906,9 +2190,12 @@ class RagDebugHandler(BaseHTTPRequestHandler):
 
     def _handle_ingest_db(self) -> None:
         payload = self._read_json()
+        database = database_from_payload(payload)
+        task_id: int | None = None
         try:
+            task_id = create_task(database, "build", None, task_request_payload(payload))
             options = PgIngestOptions(
-                database=database_from_payload(payload),
+                database=database,
                 work_order_dir=optional_path(payload.get("work_order_dir")),
                 manual_dir=optional_path(payload.get("manual_dir")),
                 config_path=optional_path(payload.get("config")),
@@ -1920,12 +2207,24 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 max_manual_chars=int(payload.get("max_manual_chars") or 1800),
             )
             report = PgIngestBuilder(options).ingest()
+            response = {"task_id": task_id, "summary": format_ingest_report_summary(report), "report": report.to_dict()}
+            finish_task(
+                database,
+                task_id,
+                "completed_with_errors" if report.failed_items else "completed",
+                response,
+                str(response["summary"]),
+            )
             self._send_json(
-                {"summary": format_ingest_report_summary(report), "report": report.to_dict()},
+                response,
                 status=HTTPStatus.OK if not report.failed_items else HTTPStatus.MULTI_STATUS,
             )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            task_update_error = mark_task_failed(database, task_id, exc)
+            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            if task_update_error:
+                body["task_update_error"] = task_update_error
+            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_search_db(self) -> None:
         payload = self._read_json()
@@ -1933,10 +2232,13 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if not query:
             self._send_json({"error": "query is required"}, status=HTTPStatus.BAD_REQUEST)
             return
+        database = database_from_payload(payload)
+        task_id: int | None = None
         try:
+            task_id = create_task(database, "search", query, task_request_payload(payload))
             result = run_pg_search(
                 PgSearchOptions(
-                    database=database_from_payload(payload),
+                    database=database,
                     query=query,
                     config_path=optional_path(payload.get("config")),
                     config_overrides=object_payload(payload.get("config_overrides")),
@@ -1945,9 +2247,15 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                     include_debug=bool(payload.get("debug")),
                 )
             )
-            self._send_json({"summary": format_search_summary(result), "result": result})
+            response = {"task_id": task_id, "summary": format_search_summary(result), "result": result}
+            finish_task(database, task_id, "completed", response, str(response["summary"]))
+            self._send_json(response)
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            task_update_error = mark_task_failed(database, task_id, exc)
+            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            if task_update_error:
+                body["task_update_error"] = task_update_error
+            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_ask_db(self) -> None:
         payload = self._read_json()
@@ -1955,10 +2263,13 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if not query:
             self._send_json({"error": "query is required"}, status=HTTPStatus.BAD_REQUEST)
             return
+        database = database_from_payload(payload)
+        task_id: int | None = None
         try:
+            task_id = create_task(database, "answer", query, task_request_payload(payload))
             result = run_pg_pipeline(
                 PgPipelineOptions(
-                    database=database_from_payload(payload),
+                    database=database,
                     query=query,
                     config_path=optional_path(payload.get("config")),
                     config_overrides=object_payload(payload.get("config_overrides")),
@@ -1968,7 +2279,36 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 )
             )
             answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
-            self._send_json({"summary": str(answer.get("status") or "ok"), "result": result})
+            response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
+            finish_task(database, task_id, "completed", response, str(response["summary"]))
+            self._send_json(response)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            task_update_error = mark_task_failed(database, task_id, exc)
+            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            if task_update_error:
+                body["task_update_error"] = task_update_error
+            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_tasks(self) -> None:
+        payload = self._read_json()
+        try:
+            tasks = list_tasks(database_from_payload(payload), limit=int(payload.get("limit") or 40))
+            self._send_json({"tasks": tasks})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_task(self) -> None:
+        payload = self._read_json()
+        try:
+            task_id = int(payload.get("task_id") or 0)
+            if task_id <= 0:
+                self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            task = get_task(database_from_payload(payload), task_id)
+            if task is None:
+                self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"task": task})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -2027,6 +2367,155 @@ def object_payload(value: object) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         raise ValueError("payload section must be an object")
     return value
+
+
+def task_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a redacted task request safe to persist in PostgreSQL."""
+
+    safe_payload = redact_secrets(payload)
+    if not isinstance(safe_payload, dict):
+        return {}
+    database_url = safe_payload.get("database_url")
+    if database_url:
+        safe_payload["database_url"] = redact_database_url(str(database_url))
+    return safe_payload
+
+
+def create_task(database: DatabaseOptions, task_type: str, query: str | None, request: dict[str, Any]) -> int:
+    """Create a persistent workbench task and return its task ID."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                INSERT INTO rag_tasks(task_type, status, query, request)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id
+                """,
+                (task_type, "running", query, json_param(redact_secrets(request))),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError("failed to create task")
+        conn.commit()
+    return int(row[0])
+
+
+def finish_task(
+    database: DatabaseOptions,
+    task_id: int,
+    status: str,
+    result: dict[str, Any],
+    summary: str,
+    *,
+    error: str | None = None,
+) -> None:
+    """Persist the final state, result payload, and summary for a task."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                UPDATE rag_tasks
+                SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
+                WHERE id = %s
+                """,
+                (status, json_param(redact_secrets(result)), summary, error, task_id),
+            )
+            if cur.rowcount != 1:
+                raise LookupError(f"task not found: {task_id}")
+        conn.commit()
+
+
+def mark_task_failed(database: DatabaseOptions, task_id: int | None, exc: Exception) -> str | None:
+    """Mark a task as failed and return any task-update error."""
+
+    if task_id is None:
+        return None
+    message = f"{type(exc).__name__}: {exc}"
+    try:
+        finish_task(database, task_id, "failed", {"error": message}, message, error=message)
+    except Exception as update_exc:  # noqa: BLE001 - surface both errors in debug UI.
+        return f"{type(update_exc).__name__}: {update_exc}"
+    return None
+
+
+def list_tasks(database: DatabaseOptions, *, limit: int = 40) -> list[dict[str, Any]]:
+    """Return recent workbench tasks without large request/result payloads."""
+
+    safe_limit = max(1, min(limit, 200))
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                SELECT id, task_type, status, query, summary, error, created_at, updated_at
+                FROM rag_tasks
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+    return [
+        {
+            "id": int(row[0]),
+            "task_type": row[1],
+            "status": row[2],
+            "query": row[3],
+            "summary": row[4],
+            "error": row[5],
+            "created_at": iso_datetime(row[6]),
+            "updated_at": iso_datetime(row[7]),
+        }
+        for row in rows
+    ]
+
+
+def get_task(database: DatabaseOptions, task_id: int) -> dict[str, Any] | None:
+    """Return one workbench task with its stored request and result payloads."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                SELECT id, task_type, status, query, summary, request, result, error, created_at, updated_at
+                FROM rag_tasks
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if row is None:
+        return None
+    return {
+        "id": int(row[0]),
+        "task_type": row[1],
+        "status": row[2],
+        "query": row[3],
+        "summary": row[4],
+        "request": row[5] or {},
+        "result": row[6] or {},
+        "error": row[7],
+        "created_at": iso_datetime(row[8]),
+        "updated_at": iso_datetime(row[9]),
+    }
+
+
+def iso_datetime(value: object) -> str | None:
+    """Return an ISO string for datetime-like values from PostgreSQL."""
+
+    if value is None:
+        return None
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
+    return str(value)
 
 
 def doctor_payload() -> dict[str, str]:

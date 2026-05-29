@@ -24,6 +24,20 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(payload["llm"]["api_key_env"], "DOCARBOR_LLM_API_KEY")
         self.assertEqual(payload["llm"]["max_tokens"], 777)
 
+    def test_embedding_no_proxy_hosts_parse_from_comma_string(self) -> None:
+        config = config_from_payload(
+            {
+                "embedding": {
+                    "enabled": True,
+                    "provider": "vllm",
+                    "base_url": "http://10.30.4.5:8888/v1",
+                    "no_proxy_hosts": "10.30.4.5,192.168.0.0/16,*.company.local",
+                }
+            }
+        )
+
+        self.assertEqual(config.embedding.no_proxy_hosts, ["10.30.4.5", "192.168.0.0/16", "*.company.local"])
+
 
 if __name__ == "__main__":
     unittest.main()

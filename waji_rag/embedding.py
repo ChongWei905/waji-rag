@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import subprocess
 import time
@@ -9,8 +10,9 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
-from waji_rag.config import EmbeddingConfig
+from waji_rag.config import DEFAULT_EMBEDDING_NO_PROXY_HOSTS, EmbeddingConfig
 
 
 @dataclass(slots=True)
@@ -100,19 +102,23 @@ class OpenAICompatibleEmbeddingProvider:
         """Embed one batch and validate the response."""
 
         payload: dict[str, object] = {
-            "model": self.config.model,
             "input": texts,
-            "encoding_format": "float",
         }
+        provider = self.config.provider.lower().strip()
+        if self.config.model:
+            payload["model"] = self.config.model
+        if provider != "vllm":
+            payload["encoding_format"] = "float"
         if self.config.dimensions:
             payload["dimensions"] = self.config.dimensions
-        if self.config.provider.lower().strip() == "dashscope":
+        if provider == "dashscope":
             payload["text_type"] = text_type
         response = post_json(
             f"{self.config.base_url.rstrip('/')}/embeddings",
             payload=payload,
             api_key=self.config.api_key,
             timeout_seconds=self.config.timeout_seconds,
+            no_proxy_hosts=self.config.no_proxy_hosts,
         )
         return validate_embedding_payload(response, texts=texts)
 
@@ -143,22 +149,36 @@ def validate_embedding_payload(payload: object, *, texts: list[str]) -> list[lis
     return vectors
 
 
-def post_json(url: str, *, payload: dict[str, object], api_key: str, timeout_seconds: float) -> dict[str, Any]:
-    """POST JSON to a bearer-token endpoint and parse the JSON response."""
+def post_json(
+    url: str,
+    *,
+    payload: dict[str, object],
+    api_key: str,
+    timeout_seconds: float,
+    no_proxy_hosts: list[str] | None = None,
+) -> dict[str, Any]:
+    """POST JSON to an embedding endpoint and parse the JSON response."""
 
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     start = time.time()
+    opener = (
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        if should_bypass_proxy(url, no_proxy_hosts or [])
+        else urllib.request.build_opener()
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -173,3 +193,42 @@ def post_json(url: str, *, payload: dict[str, object], api_key: str, timeout_sec
     if not isinstance(parsed, dict):
         raise EmbeddingProviderError("embedding endpoint returned a non-object JSON payload")
     return parsed
+
+
+def is_local_url(url: str) -> bool:
+    """Return whether a URL targets the built-in local no-proxy hosts."""
+
+    return should_bypass_proxy(url, list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
+
+
+def should_bypass_proxy(url: str, no_proxy_hosts: list[str]) -> bool:
+    """Return whether a URL host matches configured no-proxy host patterns."""
+
+    host = (urlparse(url).hostname or "").strip().lower()
+    if not host:
+        return False
+    for raw_pattern in no_proxy_hosts:
+        pattern = str(raw_pattern).strip().lower()
+        if not pattern:
+            continue
+        if matches_no_proxy_pattern(host, pattern):
+            return True
+    return False
+
+
+def matches_no_proxy_pattern(host: str, pattern: str) -> bool:
+    """Match one host against exact, wildcard, suffix, or CIDR no-proxy patterns."""
+
+    if pattern == "*":
+        return True
+    if pattern.startswith("*."):
+        suffix = pattern[1:]
+        return host.endswith(suffix)
+    if pattern.startswith("."):
+        return host == pattern[1:] or host.endswith(pattern)
+    if "/" in pattern:
+        try:
+            return ipaddress.ip_address(host) in ipaddress.ip_network(pattern, strict=False)
+        except ValueError:
+            return False
+    return host == pattern

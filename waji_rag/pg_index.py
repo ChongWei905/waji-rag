@@ -717,6 +717,30 @@ def drop_schema_objects(cur: Any) -> None:
     )
 
 
+def create_task_schema(cur: Any) -> None:
+    """Create persistent task-history tables used by the workbench."""
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rag_tasks (
+            id bigserial PRIMARY KEY,
+            created_at timestamptz NOT NULL DEFAULT now(),
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            task_type text NOT NULL,
+            status text NOT NULL,
+            query text,
+            summary text,
+            request jsonb NOT NULL DEFAULT '{}'::jsonb,
+            result jsonb NOT NULL DEFAULT '{}'::jsonb,
+            error text
+        );
+        CREATE INDEX IF NOT EXISTS rag_tasks_created_at_idx ON rag_tasks(created_at DESC);
+        CREATE INDEX IF NOT EXISTS rag_tasks_status_idx ON rag_tasks(status);
+        CREATE INDEX IF NOT EXISTS rag_tasks_task_type_idx ON rag_tasks(task_type);
+        """
+    )
+
+
 def create_schema(cur: Any) -> None:
     """Create tables and indexes for evidence storage and retrieval."""
 
@@ -840,6 +864,7 @@ def create_schema(cur: Any) -> None:
             ON document_embeddings(provider, model);
         """
     )
+    create_task_schema(cur)
 
 
 def validate_ingest_inputs(work_order_dir: Path | None, manual_dir: Path | None) -> None:

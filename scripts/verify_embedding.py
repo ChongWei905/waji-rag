@@ -23,8 +23,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify the configured embedding endpoint.")
     parser.add_argument("--env-file", help="Dotenv file containing embedding API key and model defaults.")
     parser.add_argument("--config", help="Optional JSON config file.")
-    parser.add_argument("--provider", default="dashscope", help="Embedding provider name. Defaults to dashscope.")
-    parser.add_argument("--model", default="text-embedding-v4", help="Embedding model name.")
+    parser.add_argument(
+        "--provider",
+        choices=["dashscope", "openai", "vllm", "command"],
+        default="dashscope",
+        help="Embedding provider name. Defaults to dashscope.",
+    )
+    parser.add_argument("--model", help="Embedding model name. vLLM/local endpoints may leave this empty.")
     parser.add_argument("--base-url", help="Embedding base URL.")
     parser.add_argument("--api-key", help="Embedding API key. When set, this takes precedence over env/config values.")
     parser.add_argument("--api-key-env", default="DOCARBOR_EMBEDDING_API_KEY", help="API key env var name.")
@@ -33,9 +38,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="DOCARBOR_LLM_API_KEY",
         help="Fallback API key env var name when --api-key-env is absent. Defaults to DOCARBOR_LLM_API_KEY.",
     )
-    parser.add_argument("--dimensions", type=int, default=1024, help="Expected embedding dimensions. Defaults to 1024.")
+    parser.add_argument(
+        "--dimensions",
+        type=int,
+        help="Expected/requested embedding dimensions. Omit or pass 0 to avoid sending dimensions.",
+    )
     parser.add_argument("--batch-size", type=int, default=2, help="Embedding batch size. Defaults to 2.")
     parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP timeout in seconds.")
+    parser.add_argument(
+        "--no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies. Defaults include localhost and loopback.",
+    )
     parser.add_argument("--retries", type=int, default=2, help="Retry count for transient network failures. Defaults to 2.")
     parser.add_argument(
         "--command",
@@ -78,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             "base_url": config.embedding.base_url,
             "api_key_source": api_key_source(args),
             "api_key_env": config.embedding.api_key_env,
+            "no_proxy_hosts": config.embedding.no_proxy_hosts,
             "document_vectors": len(document_vectors),
             "query_vectors": len(query_vectors),
             "document_dim": document_dim,
@@ -111,15 +125,21 @@ def load_embedding_config(args: argparse.Namespace) -> Any:
     embedding_overrides: dict[str, object] = {
         "enabled": True,
         "provider": args.provider,
-        "model": args.model,
         "api_key_env": args.api_key_env,
-        "dimensions": args.dimensions,
         "batch_size": args.batch_size,
         "timeout_seconds": args.timeout_seconds,
     }
+    if args.model is not None:
+        embedding_overrides["model"] = args.model
+    elif args.provider == "vllm":
+        embedding_overrides["model"] = ""
+    if args.dimensions is not None:
+        embedding_overrides["dimensions"] = args.dimensions
+    if args.no_proxy_hosts:
+        embedding_overrides["no_proxy_hosts"] = args.no_proxy_hosts
     if args.api_key:
         embedding_overrides["api_key"] = args.api_key
-    fallback_key = "" if args.api_key else load_fallback_api_key(args)
+    fallback_key = "" if args.api_key or args.provider == "vllm" else load_fallback_api_key(args)
     if fallback_key:
         embedding_overrides["api_key"] = fallback_key
         embedding_overrides["api_key_env"] = args.fallback_api_key_env
@@ -140,7 +160,8 @@ def load_embedding_config(args: argparse.Namespace) -> Any:
     )
     if not config.embedding.is_available():
         raise RuntimeError(
-            "embedding config is not available. Check env file, API key env var, provider, model, and base URL."
+            "embedding config is not available. Check env file, API key env var, provider, model, and base URL. "
+            "For vLLM/local endpoints, API key and model may be empty but base URL is required."
         )
     return config
 
@@ -150,6 +171,8 @@ def api_key_source(args: argparse.Namespace) -> str:
 
     if args.api_key:
         return "cli"
+    if args.provider == "vllm":
+        return "none"
     if args.env_file:
         values = load_env_file(Path(args.env_file))
         if values.get(args.api_key_env):
