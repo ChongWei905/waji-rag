@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: waji-rag-pg
+    environment:
+      POSTGRES_USER: waji
+      POSTGRES_PASSWORD: waji
+      POSTGRES_DB: waji_rag
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waji -d waji_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - waji_pg_data:/var/lib/postgresql/data
+
+volumes:
+  waji_pg_data:

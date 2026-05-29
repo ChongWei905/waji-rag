@@ -22,6 +22,20 @@ from waji_rag.index_build import (
     format_report_summary as format_index_report_summary,
     write_report as write_index_report,
 )
+from waji_rag.config import write_default_config
+from waji_rag.pg_index import (
+    DatabaseOptions,
+    PgIngestBuilder,
+    PgIngestOptions,
+    PgPipelineOptions,
+    PgSchemaManager,
+    PgSearchOptions,
+    format_ingest_report_summary,
+    format_search_summary,
+    run_pg_pipeline,
+    run_pg_search,
+    write_json,
+)
 from waji_rag.work_order import (
     WorkOrderBatchOptions,
     WorkOrderBatchParser,
@@ -42,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="Print environment diagnostics.")
     doctor.set_defaults(func=run_doctor)
+
+    config = subparsers.add_parser("write-default-config", help="Write a default retrieval config JSON file.")
+    config.add_argument("--out", required=True, help="Config JSON path to write.")
+    config.set_defaults(func=run_write_default_config)
 
     html_to_md = subparsers.add_parser("html-to-md", help="Convert a directory of HTML files to Markdown.")
     html_to_md.add_argument("--input-dir", required=True, help="Directory containing .html/.htm files.")
@@ -85,6 +103,62 @@ def build_parser() -> argparse.ArgumentParser:
     build_index.add_argument("--debug", action="store_true", help="Print failed item details and warnings.")
     build_index.set_defaults(func=run_build_index)
 
+    init_db = subparsers.add_parser("init-db", help="Create PostgreSQL/pgvector schema.")
+    init_db.add_argument("--database-url", help="PostgreSQL URL. Defaults to WAJI_DATABASE_URL or local Docker default.")
+    init_db.add_argument("--reset", action="store_true", help="Drop and recreate application tables.")
+    init_db.set_defaults(func=run_init_db)
+
+    ingest_db = subparsers.add_parser("ingest-db", help="Ingest raw TXT/HTML/Markdown evidence into PostgreSQL.")
+    ingest_db.add_argument("--database-url", help="PostgreSQL URL. Defaults to WAJI_DATABASE_URL or local Docker default.")
+    ingest_db.add_argument("--work-order-dir", help="Directory containing work-order .txt files.")
+    ingest_db.add_argument("--manual-dir", help="Directory containing manual .html/.htm/.md files.")
+    ingest_db.add_argument("--config", help="Optional retrieval config JSON path.")
+    ingest_db.add_argument("--env-file", help="Optional dotenv path for API keys and default models.")
+    ingest_db.add_argument("--enable-embedding", action="store_true", help="Enable configured embeddings during ingest.")
+    ingest_db.add_argument("--embedding-model", help="Embedding model name.")
+    ingest_db.add_argument("--embedding-dimensions", type=int, help="Embedding dimensions.")
+    ingest_db.add_argument("--reset", action="store_true", help="Reset schema before ingesting.")
+    ingest_db.add_argument("--work-order-limit", type=int, help="Optional maximum number of work-order files.")
+    ingest_db.add_argument("--manual-limit", type=int, help="Optional maximum number of manual files.")
+    ingest_db.add_argument(
+        "--max-manual-chars",
+        type=int,
+        default=1800,
+        help="Maximum characters per manual chunk. Defaults to 1800.",
+    )
+    ingest_db.add_argument("--report-json", help="Optional JSON report output path.")
+    ingest_db.add_argument("--debug", action="store_true", help="Print failed item details and warnings.")
+    ingest_db.set_defaults(func=run_ingest_db)
+
+    search_db = subparsers.add_parser("search-db", help="Retrieve an evidence package from PostgreSQL.")
+    search_db.add_argument("--database-url", help="PostgreSQL URL. Defaults to WAJI_DATABASE_URL or local Docker default.")
+    search_db.add_argument("--query", required=True, help="User diagnostic question.")
+    search_db.add_argument("--config", help="Optional retrieval config JSON path.")
+    search_db.add_argument("--env-file", help="Optional dotenv path for API keys and default models.")
+    search_db.add_argument("--enable-embedding", action="store_true", help="Enable hybrid retrieval when embeddings exist.")
+    search_db.add_argument("--enable-rerank", action="store_true", help="Reserved for full ask-db; search-db returns retrieval only.")
+    search_db.add_argument("--top-k", type=int, default=8, help="Hits per channel. Defaults to 8.")
+    search_db.add_argument("--out-json", help="Optional JSON output path.")
+    search_db.add_argument("--debug", action="store_true", help="Include query terms and scoring settings.")
+    search_db.set_defaults(func=run_search_db)
+
+    ask_db = subparsers.add_parser("ask-db", help="Retrieve evidence, optionally rerank it, and generate an answer.")
+    ask_db.add_argument("--database-url", help="PostgreSQL URL. Defaults to WAJI_DATABASE_URL or local Docker default.")
+    ask_db.add_argument("--query", required=True, help="User diagnostic question.")
+    ask_db.add_argument("--config", help="Optional retrieval config JSON path.")
+    ask_db.add_argument("--env-file", help="Optional dotenv path for API keys and default models.")
+    ask_db.add_argument("--top-k", type=int, default=8, help="Hits per channel. Defaults to 8.")
+    ask_db.add_argument("--out-json", help="Optional JSON output path.")
+    ask_db.add_argument("--enable-embedding", action="store_true", help="Enable hybrid retrieval when embeddings exist.")
+    ask_db.add_argument("--enable-rerank", action="store_true", help="Enable configured reranker.")
+    ask_db.add_argument("--enable-llm", action="store_true", help="Enable configured LLM answer generation.")
+    ask_db.add_argument("--embedding-model", help="Embedding model name.")
+    ask_db.add_argument("--embedding-dimensions", type=int, help="Embedding dimensions.")
+    ask_db.add_argument("--rerank-model", help="Rerank model name.")
+    ask_db.add_argument("--llm-model", help="LLM model name.")
+    ask_db.add_argument("--debug", action="store_true", help="Include trace and scoring settings.")
+    ask_db.set_defaults(func=run_ask_db)
+
     serve = subparsers.add_parser("serve", help="Start the local web debugging UI.")
     serve.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
     serve.add_argument("--port", type=int, default=8765, help="Port to bind. Defaults to 8765.")
@@ -104,6 +178,15 @@ def run_doctor(_args: argparse.Namespace) -> int:
         "cwd": str(Path.cwd()),
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_write_default_config(args: argparse.Namespace) -> int:
+    """Write a default config JSON file."""
+
+    output_path = Path(args.out)
+    write_default_config(output_path)
+    print(f"config={output_path.resolve()}")
     return 0
 
 
@@ -172,6 +255,149 @@ def run_build_index(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
     return 1 if report.failed_items else 0
+
+
+def run_init_db(args: argparse.Namespace) -> int:
+    """Initialize the PostgreSQL schema."""
+
+    try:
+        payload = PgSchemaManager(DatabaseOptions.from_env(args.database_url)).initialize(reset=args.reset)
+    except Exception as exc:  # noqa: BLE001 - top-level CLI diagnostics.
+        print(f"init-db failed: {exc}", file=sys.stderr)
+        if getattr(args, "debug", False):
+            print(failure_trace(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def run_ingest_db(args: argparse.Namespace) -> int:
+    """Ingest raw evidence into PostgreSQL."""
+
+    options = PgIngestOptions(
+        database=DatabaseOptions.from_env(args.database_url),
+        work_order_dir=Path(args.work_order_dir) if args.work_order_dir else None,
+        manual_dir=Path(args.manual_dir) if args.manual_dir else None,
+        config_path=Path(args.config) if args.config else None,
+        config_overrides=config_overrides_from_args(args),
+        env_path=Path(args.env_file) if args.env_file else None,
+        reset=args.reset,
+        work_order_limit=args.work_order_limit,
+        manual_limit=args.manual_limit,
+        max_manual_chars=args.max_manual_chars,
+    )
+    try:
+        report = PgIngestBuilder(options).ingest()
+    except Exception as exc:  # noqa: BLE001 - top-level CLI diagnostics.
+        print(f"ingest-db failed: {exc}", file=sys.stderr)
+        if args.debug:
+            print(failure_trace(exc), file=sys.stderr)
+        return 1
+
+    print(format_ingest_report_summary(report))
+    if args.report_json:
+        write_json(report.to_dict(), Path(args.report_json))
+        print(f"report_json={Path(args.report_json).resolve()}")
+
+    if args.debug:
+        for warning in report.warnings:
+            print(f"WARN {warning}", file=sys.stderr)
+        for failed_item in report.failed_items:
+            print(
+                f"FAILED {failed_item.get('stage')} {failed_item.get('input')}: {failed_item.get('error')}",
+                file=sys.stderr,
+            )
+    return 1 if report.failed_items else 0
+
+
+def run_search_db(args: argparse.Namespace) -> int:
+    """Search PostgreSQL and print a retrieval evidence package."""
+
+    options = PgSearchOptions(
+        database=DatabaseOptions.from_env(args.database_url),
+        query=args.query,
+        config_path=Path(args.config) if args.config else None,
+        config_overrides=config_overrides_from_args(args),
+        env_path=Path(args.env_file) if args.env_file else None,
+        top_k=args.top_k,
+        include_debug=args.debug,
+    )
+    try:
+        payload = run_pg_search(options)
+    except Exception as exc:  # noqa: BLE001 - top-level CLI diagnostics.
+        print(f"search-db failed: {exc}", file=sys.stderr)
+        if args.debug:
+            print(failure_trace(exc), file=sys.stderr)
+        return 1
+
+    print(format_search_summary(payload))
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    if args.out_json:
+        write_json(payload, Path(args.out_json))
+        print(f"out_json={Path(args.out_json).resolve()}")
+    return 0
+
+
+def run_ask_db(args: argparse.Namespace) -> int:
+    """Run full retrieve-rerank-answer pipeline."""
+
+    options = PgPipelineOptions(
+        database=DatabaseOptions.from_env(args.database_url),
+        query=args.query,
+        config_path=Path(args.config) if args.config else None,
+        config_overrides=config_overrides_from_args(args),
+        env_path=Path(args.env_file) if args.env_file else None,
+        top_k=args.top_k,
+        include_debug=args.debug,
+    )
+    try:
+        payload = run_pg_pipeline(options)
+    except Exception as exc:  # noqa: BLE001 - top-level CLI diagnostics.
+        print(f"ask-db failed: {exc}", file=sys.stderr)
+        if args.debug:
+            print(failure_trace(exc), file=sys.stderr)
+        return 1
+
+    answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else {}
+    print(str(answer.get("text") or ""))
+    if args.out_json:
+        write_json(payload, Path(args.out_json))
+        print(f"out_json={Path(args.out_json).resolve()}")
+    elif args.debug:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
+    """Build config overrides from common CLI flags."""
+
+    overrides: dict[str, object] = {}
+    embedding: dict[str, object] = {}
+    if getattr(args, "enable_embedding", False):
+        embedding["enabled"] = True
+    if getattr(args, "embedding_model", None):
+        embedding["model"] = args.embedding_model
+    if getattr(args, "embedding_dimensions", None):
+        embedding["dimensions"] = args.embedding_dimensions
+    if embedding:
+        overrides["embedding"] = embedding
+
+    rerank: dict[str, object] = {}
+    if getattr(args, "enable_rerank", False):
+        rerank["enabled"] = True
+    if getattr(args, "rerank_model", None):
+        rerank["model"] = args.rerank_model
+    if rerank:
+        overrides["rerank"] = rerank
+
+    llm: dict[str, object] = {}
+    if getattr(args, "enable_llm", False):
+        llm["enabled"] = True
+    if getattr(args, "llm_model", None):
+        llm["model"] = args.llm_model
+    if llm:
+        overrides["llm"] = llm
+    return overrides
 
 
 def run_parse_workorders(args: argparse.Namespace) -> int:

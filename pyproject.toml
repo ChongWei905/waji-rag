@@ -3,7 +3,9 @@ name = "waji-rag"
 version = "0.1.0"
 description = "Local RAG debugging tools for excavator after-sales diagnosis."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "psycopg[binary]>=3.2",
+]
 
 [project.scripts]
 waji-rag = "waji_rag.cli:main"
