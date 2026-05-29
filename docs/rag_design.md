@@ -46,14 +46,26 @@ Mac 环境开发和轻量调试
 
 因此，后续实现不只做一个黑盒问答入口，还需要配套开发可观测、可复现的命令行调试工具。
 
-### 1.2 当前可执行入口
+### 1.2 当前正式可执行入口
 
-当前第一阶段提供两个入口：CLI 和本地 Web 调试页。二者调用同一套核心逻辑。
+当前正式链路提供两个入口：CLI 和本地 Web 调试页。二者调用同一套 PostgreSQL / pgvector 核心逻辑。
+
+本地 PostgreSQL 使用 `pgvector/pgvector:pg16`：
+
+```bash
+docker compose up -d postgres
+```
 
 环境检查：
 
 ```bash
 python -m waji_rag.cli doctor
+```
+
+初始化数据库：
+
+```bash
+python -m waji_rag.cli init-db
 ```
 
 启动本地 Web 调试页：
@@ -68,68 +80,67 @@ python -m waji_rag.cli serve --host 127.0.0.1 --port 8765
 http://127.0.0.1:8765
 ```
 
-命令行执行 HTML 转 Markdown：
+正式入库命令直接读取原始工单 TXT 和手册 HTML/Markdown：
 
 ```bash
-python -m waji_rag.cli html-to-md ^
-  --input-dir D:\waji\data\manual_html ^
-  --out-dir D:\waji\outputs\manual_md ^
-  --report-json D:\waji\outputs\html_to_md_report.json ^
+python -m waji_rag.cli ingest-db ^
+  --work-order-dir D:\waji\data\work_orders ^
+  --manual-dir D:\waji\data\manuals ^
+  --reset ^
+  --report-json D:\waji\outputs\ingest_report.json ^
   --debug
 ```
 
-macOS 或 Linux 下把换行符替换为 `\` 即可。
-
-建议 Windows 首次验证先加 `--limit 10`，确认 Markdown 清洗效果后再跑全量。
-
-命令行解析工单 TXT：
+检索证据包：
 
 ```bash
-python -m waji_rag.cli parse-workorders ^
-  --input-dir D:\waji\data\work_orders ^
-  --out-dir D:\waji\outputs\work_orders ^
-  --report-json D:\waji\outputs\work_order_report.json ^
+python -m waji_rag.cli search-db ^
+  --query "用户报修机器风扇皮带异响，请回答有可能是哪些故障导致的，如何解决，相应故障需要更换备件的详细信息" ^
+  --top-k 5 ^
   --debug
 ```
 
-该命令会输出：
-
-- `work_orders.jsonl`：每条工单的报修内容、解决方法、备件列表和原文；
-- `parts_evidence.jsonl`：从工单中抽取出的备件证据；
-- `parts_evidence.csv`：便于在 Windows Excel 中检查的备件证据表；
-- `work_order_report.json`：解析统计、失败文件和字段缺失告警。
-
-命令行构建本地关键词索引：
+完整问答命令：
 
 ```bash
-python -m waji_rag.cli build-index ^
-  --work-orders-jsonl D:\waji\outputs\work_orders\work_orders.jsonl ^
-  --parts-jsonl D:\waji\outputs\work_orders\parts_evidence.jsonl ^
-  --manual-md-dir D:\waji\outputs\manual_md ^
-  --out-dir D:\waji\outputs\index ^
-  --report-json D:\waji\outputs\index\index_report.json ^
+python -m waji_rag.cli ask-db ^
+  --query "用户报修机器风扇皮带异响，请回答有可能是哪些故障导致的，如何解决，相应故障需要更换备件的详细信息（备件的编号及名称，备件编码，备件数量）" ^
+  --top-k 5 ^
   --debug
 ```
 
-该命令会输出：
+如果有 DocArbor 风格的 `.env`，可以启用 embedding、rerank 和 LLM：
 
-- `index_manifest.json`：索引版本、输入路径、输出路径、字段权重和分词策略；
-- `documents.jsonl`：统一后的全部可检索文档；
-- `work_order_docs.jsonl`：工单文档；
-- `part_docs.jsonl`：备件证据文档；
-- `manual_docs.jsonl`：手册切块文档；
-- `inverted_index.json`：字段级倒排索引；
-- `index_report.json`：构建统计、字段缺失告警和失败项。
+```bash
+python -m waji_rag.cli ask-db ^
+  --query "风扇皮带异响，可能是什么故障，需要更换什么备件" ^
+  --env-file D:\path\to\.env ^
+  --enable-embedding ^
+  --enable-rerank ^
+  --enable-llm ^
+  --embedding-model text-embedding-v4 ^
+  --embedding-dimensions 1024 ^
+  --rerank-model qwen3-rerank ^
+  --llm-model qwen3.5-plus ^
+  --debug
+```
+
+正式链路的关键输出：
+
+- `ingest_report.json`：读取、解析、HTML 转 Markdown、切块、入库和索引统计；
+- `search-db` JSON：多路检索命中、匹配字段、分数、来源路径和备件候选；
+- `ask-db` JSON：检索、rerank、答案生成、阶段日志、最终证据包；
+- PostgreSQL 表：原始解析记录、手册 Markdown 切块、BM25 词项表、可选 pgvector 向量表。
+
+兼容调试命令仍然保留：`html-to-md`、`parse-workorders`、`build-index`。它们适合小样本人工检查，不作为正式生产式流程。
 
 需要反馈的问题材料包括：
 
 - `doctor` 输出；
-- `html_to_md_report.json`；
-- `work_order_report.json`；
-- `index_report.json`；
-- 抽样转换后的 Markdown；
-- 抽样解析后的 `parts_evidence.csv`；
-- 抽样索引文档 `documents.jsonl`；
+- `ingest_report.json`；
+- `search-db --debug` 输出；
+- `ask-db --debug --out-json ...` 输出；
+- PostgreSQL 表计数或 Web 页面中的 JSON 输出；
 - 命令行报错或 Web 页面中的 JSON 输出。
 
 ## 2. 可用数据
@@ -278,26 +289,24 @@ Query 增强阶段最终输出：
 
 ## 5. 构建阶段
 
-退化版构建阶段只围绕非结构化文本建立可检索索引。
+退化版构建阶段只围绕非结构化文本建立可检索索引。正式实现使用 PostgreSQL 持久化证据、字段和词项，使用 `pgvector` 保存可选向量。
 
-最小可执行版本可以先使用关键词检索。若已有向量检索能力，再补充向量索引做混合召回。
+当前正式入库命令是 `ingest-db`，它直接读取原始工单 TXT 和手册 HTML/Markdown，不要求用户手动传递 JSONL 文件。
 
-当前可执行版本已经提供 `build-index` 命令，负责读取清洗后的工单、备件证据和 Markdown 手册，输出本地 JSONL 文档库和 JSON 倒排索引。
-
-输出目录结构：
+核心表：
 
 ```text
-index/
-├── index_manifest.json
-├── documents.jsonl
-├── work_order_docs.jsonl
-├── part_docs.jsonl
-├── manual_docs.jsonl
-├── inverted_index.json
-└── index_report.json
+postgresql/
+├── work_orders              # 工单解析结果
+├── part_evidence            # 从工单抽取的备件证据
+├── manual_chunks            # HTML 转 Markdown 后的手册切块
+├── documents                # 统一可检索文档
+├── document_fields          # 字段文本、字段权重、字段长度
+├── document_terms           # BM25 词项、词频、字段长度
+└── document_embeddings      # 可选 pgvector 向量
 ```
 
-当前索引仍是关键词索引，不依赖向量库、数据库或外部服务，便于先在 Windows 正式数据上验证召回链路。
+BM25 采用标准公式，字段权重用于提升 `reported_issue`、`fault_title`、`fault_code`、`part_code` 等高价值字段。若配置了 embedding provider，入库阶段会额外写入 `document_embeddings`，检索阶段自动启用 hybrid；否则自动使用 BM25。
 
 分词策略：
 
@@ -305,7 +314,7 @@ index/
 - 中文连续文本生成 2-gram 和 3-gram，例如 `行走单边慢` 会产生 `行走`、`单边`、`行走单`、`单边慢`；
 - 12 字以内的中文连续短语会额外保留原短语，用于增强完整故障现象匹配。
 
-字段级倒排索引会记录命中的 `doc_id`、字段名和词频，后续 `search` 阶段可按字段权重重排，例如 `reported_issue`、`fault_title`、`part_code` 权重高于正文兜底字段。
+字段级词项表会记录命中的 `document_id`、字段名、词频、字段长度和字段权重，后续 `search-db` 阶段在 PostgreSQL 内计算 BM25 分数。
 
 ### 5.1 工单诊断记录索引
 
@@ -369,8 +378,8 @@ html 原文件
 → 移除样式、脚本、字体、布局和导航噪声
 → 保留标题、段落、列表、表格和排查步骤
 → 转换为 Markdown
-→ 保存为 md 中间文件
-→ 基于 md 解析、切块和建索引
+→ 基于 Markdown 解析、切块
+→ 将 Markdown 切块和来源元数据存入 PostgreSQL
 ```
 
 转换时需要保留的信息：
@@ -389,23 +398,24 @@ html 原文件
 - 页面导航、按钮、面包屑、版权页脚等模板内容；
 - 空标签、重复换行、无意义占位字符。
 
-中间产物建议结构：
+入库记录建议结构：
 
 ```json
 {
   "source_format": "html",
   "normalized_format": "markdown",
   "original_html_path": "原始 html 路径",
-  "markdown_path": "转换后的 md 路径",
-  "markdown_text": "清洗后的 Markdown 正文"
+  "chunk_text": "清洗后的 Markdown 片段",
+  "chunk_index": 0,
+  "chunk_count": 1
 }
 ```
 
-后续典型故障解析手册索引和机器故障代码解析手册索引都基于 Markdown 中间文件构建，而不是直接基于 html 原文构建。
+后续典型故障解析手册索引和机器故障代码解析手册索引都基于 Markdown 文本构建，而不是直接基于 html 原文构建。兼容调试命令 `html-to-md` 仍可把 Markdown 保存到文件，便于人工抽查清洗质量。
 
 ### 5.3 典型故障解析手册索引
 
-典型故障解析手册来自 html 文件，但索引构建应基于清洗后的 Markdown 中间文件。
+典型故障解析手册来自 html 文件时，索引构建应基于清洗后的 Markdown 文本。
 
 构建时仍需保留原始目录层级和文件名信息。
 
@@ -420,7 +430,7 @@ html 原文件
   "file_name": "故障现象：xxxx.html",
   "fault_title": "xxxx",
   "chunk_text": "手册正文片段",
-  "source_path": "Markdown 文件路径",
+  "source_path": "原始 html 或 md 文件路径",
   "original_html_path": "原始 html 文件路径"
 }
 ```
@@ -442,7 +452,7 @@ html 原文件
 
 ### 5.4 机器故障代码解析手册索引
 
-机器故障代码解析手册应单独建索引，索引构建同样基于清洗后的 Markdown 中间文件。
+机器故障代码解析手册应单独建索引，索引构建同样基于清洗后的 Markdown 文本。
 
 构建时建议解析为：
 
@@ -455,7 +465,7 @@ html 原文件
   "fault_description": "GPS一级锁车",
   "file_name": "E00131 GPS一级锁车.html",
   "chunk_text": "手册正文片段",
-  "source_path": "Markdown 文件路径",
+  "source_path": "原始 html 或 md 文件路径",
   "original_html_path": "原始 html 文件路径"
 }
 ```
@@ -608,6 +618,15 @@ html 原文件
 - 工单：BM25 + 向量混合召回；
 - 手册正文：BM25 + 向量混合召回；
 - 召回后用重排序模型或规则重排。
+
+当前正式代码采用：
+
+- PostgreSQL 作为统一证据库；
+- 字段加权 BM25 作为基础召回；
+- `pgvector` 存储向量，embedding 可用时走 BM25 + pgvector hybrid；
+- rerank 可选，失败时保留原始召回顺序；
+- LLM 可选，失败或未启用时用确定性模板答案兜底；
+- 所有退化会进入 `warnings`、`debug.retrieval_events` 或 `trace`，方便 Windows 环境反馈问题。
 
 推荐重排规则：
 
