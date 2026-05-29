@@ -28,6 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", help="LLM API key. When set, this takes precedence over env/config values.")
     parser.add_argument("--api-key-env", default="DOCARBOR_LLM_API_KEY", help="API key env var name.")
     parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP timeout in seconds.")
+    parser.add_argument(
+        "--no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies. Defaults include localhost and loopback.",
+    )
     parser.add_argument("--retries", type=int, default=2, help="Retry count for transient network failures. Defaults to 2.")
     parser.add_argument("--max-tokens", type=int, default=120, help="Max output tokens. Defaults to 120.")
     parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature. Defaults to 0.")
@@ -65,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             "base_url": config.llm.base_url,
             "api_key_source": "cli" if args.api_key else config.llm.api_key_env,
             "api_key_env": config.llm.api_key_env,
+            "no_proxy_hosts": config.llm.no_proxy_hosts,
             "text": result.text,
             "debug": result.debug,
             "elapsed_ms": int((time.time() - started_at) * 1000),
@@ -104,6 +109,8 @@ def load_llm_config(args: argparse.Namespace) -> Any:
     }
     if args.api_key:
         overrides["llm"]["api_key"] = args.api_key  # type: ignore[index]
+    if args.no_proxy_hosts:
+        overrides["llm"]["no_proxy_hosts"] = args.no_proxy_hosts  # type: ignore[index]
     if args.base_url:
         overrides["llm"]["base_url"] = args.base_url  # type: ignore[index]
     config = load_config(

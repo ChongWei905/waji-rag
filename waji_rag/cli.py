@@ -180,9 +180,18 @@ def build_parser() -> argparse.ArgumentParser:
     ask_db.add_argument("--rerank-model", help="Rerank model name.")
     ask_db.add_argument("--rerank-base-url", help="Rerank API base URL.")
     ask_db.add_argument("--rerank-api-key", help="Rerank API key. Takes precedence over env/config values.")
+    ask_db.add_argument(
+        "--rerank-no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for rerank calls.",
+    )
+    ask_db.add_argument("--llm-provider", choices=["dashscope", "openai", "vllm"], help="LLM provider.")
     ask_db.add_argument("--llm-model", help="LLM model name.")
     ask_db.add_argument("--llm-base-url", help="LLM API base URL.")
     ask_db.add_argument("--llm-api-key", help="LLM API key. Takes precedence over env/config values.")
+    ask_db.add_argument(
+        "--llm-no-proxy-hosts",
+        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for LLM calls.",
+    )
     ask_db.add_argument("--debug", action="store_true", help="Include trace and scoring settings.")
     ask_db.set_defaults(func=run_ask_db)
 
@@ -426,18 +435,24 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         rerank["base_url"] = args.rerank_base_url
     if getattr(args, "rerank_api_key", None):
         rerank["api_key"] = args.rerank_api_key
+    if getattr(args, "rerank_no_proxy_hosts", None):
+        rerank["no_proxy_hosts"] = args.rerank_no_proxy_hosts
     if rerank:
         overrides["rerank"] = rerank
 
     llm: dict[str, object] = {}
     if getattr(args, "enable_llm", False):
         llm["enabled"] = True
+    if getattr(args, "llm_provider", None):
+        llm["provider"] = args.llm_provider
     if getattr(args, "llm_model", None):
         llm["model"] = args.llm_model
     if getattr(args, "llm_base_url", None):
         llm["base_url"] = args.llm_base_url
     if getattr(args, "llm_api_key", None):
         llm["api_key"] = args.llm_api_key
+    if getattr(args, "llm_no_proxy_hosts", None):
+        llm["no_proxy_hosts"] = args.llm_no_proxy_hosts
     if llm:
         overrides["llm"] = llm
     return overrides

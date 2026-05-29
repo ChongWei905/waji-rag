@@ -1456,6 +1456,10 @@ def build_redesigned_index_html() -> str:
           <input id="rerankBaseUrl" value="__DASHSCOPE_RERANK_BASE_URL__">
         </div>
         <div class="full">
+          <label for="rerankNoProxyHosts">Rerank No Proxy Hosts</label>
+          <input id="rerankNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
+        </div>
+        <div class="full">
           <label for="rerankApiKey">Rerank API Key</label>
           <input id="rerankApiKey" type="password" placeholder="可留空，留空时读取 DOCARBOR_RERANK_API_KEY 或兜底 key">
         </div>
@@ -1465,12 +1469,24 @@ def build_redesigned_index_html() -> str:
           <span>启用 LLM 答案生成</span>
         </label>
         <div>
+          <label for="llmProvider">LLM Provider</label>
+          <select id="llmProvider">
+            <option value="dashscope">DashScope</option>
+            <option value="openai">OpenAI compatible</option>
+            <option value="vllm">vLLM / local</option>
+          </select>
+        </div>
+        <div>
           <label for="llmModel">LLM 模型</label>
           <input id="llmModel" value="qwen3.5-plus">
         </div>
         <div class="full">
           <label for="llmBaseUrl">LLM Base URL</label>
           <input id="llmBaseUrl" value="__DASHSCOPE_BASE_URL__">
+        </div>
+        <div class="full">
+          <label for="llmNoProxyHosts">LLM No Proxy Hosts</label>
+          <input id="llmNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
         </div>
         <div class="full">
           <label for="llmApiKey">LLM API Key</label>
@@ -1535,14 +1551,16 @@ def build_redesigned_index_html() -> str:
           model: $("rerankModel").value.trim(),
           base_url: $("rerankBaseUrl").value.trim(),
           api_key: $("rerankApiKey").value.trim(),
+          no_proxy_hosts: parseCsv($("rerankNoProxyHosts").value),
           top_n: $("evidenceTopK").value ? Number($("evidenceTopK").value) : 8
         },
         llm: {
           enabled: $("enableLlm").checked,
-          provider: "dashscope",
+          provider: $("llmProvider").value,
           model: $("llmModel").value.trim(),
           base_url: $("llmBaseUrl").value.trim(),
           api_key: $("llmApiKey").value.trim(),
+          no_proxy_hosts: parseCsv($("llmNoProxyHosts").value),
           max_tokens: 1400,
           temperature: 0
         },
@@ -2043,7 +2061,10 @@ def build_redesigned_index_html() -> str:
       $("embeddingNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("enableRerank").checked = false;
       $("enableLlm").checked = false;
+      $("llmProvider").value = "dashscope";
       $("embeddingApiKey").value = "";
+      $("rerankNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
+      $("llmNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("rerankApiKey").value = "";
       $("llmApiKey").value = "";
       setStatus("已加载 Demo 配置", "success");

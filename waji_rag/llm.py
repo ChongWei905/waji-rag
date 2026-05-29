@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from waji_rag.config import LLMConfig, RerankConfig
+from waji_rag.embedding import should_bypass_proxy
 
 
 @dataclass(slots=True)
@@ -58,6 +59,7 @@ class OpenAICompatibleChatClient:
             api_key=self.config.api_key,
             timeout_seconds=self.config.timeout_seconds,
             error_prefix="chat",
+            no_proxy_hosts=self.config.no_proxy_hosts,
         )
         elapsed_ms = int((time.time() - started_at) * 1000)
         choices = response.get("choices") if isinstance(response, dict) else None
@@ -107,6 +109,7 @@ class DashScopeRerankClient:
             api_key=self.config.api_key,
             timeout_seconds=self.config.timeout_seconds,
             error_prefix="rerank",
+            no_proxy_hosts=self.config.no_proxy_hosts,
         )
         elapsed_ms = int((time.time() - started_at) * 1000)
         results = extract_rerank_results(response)
@@ -239,21 +242,29 @@ def post_json(
     api_key: str,
     timeout_seconds: float,
     error_prefix: str,
+    no_proxy_hosts: list[str] | None = None,
 ) -> dict[str, Any]:
-    """POST JSON to a bearer-token endpoint and parse the JSON response."""
+    """POST JSON to a model endpoint and parse the JSON response."""
 
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
+    opener = (
+        urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        if should_bypass_proxy(url, no_proxy_hosts or [])
+        else urllib.request.build_opener()
+    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with opener.open(request, timeout=timeout_seconds) as response:
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")

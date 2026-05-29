@@ -75,6 +75,7 @@ class RerankConfig:
     top_n: int = 8
     doc_char_limit: int = 1200
     timeout_seconds: float = 180.0
+    no_proxy_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
 
     def is_available(self) -> bool:
         """Return whether this config can rerank retrieved evidence."""
@@ -96,10 +97,13 @@ class LLMConfig:
     max_tokens: int = 1400
     timeout_seconds: float = 180.0
     disable_thinking: bool = True
+    no_proxy_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
 
     def is_available(self) -> bool:
         """Return whether this config can generate final answers."""
 
+        if self.provider.lower().strip() == "vllm":
+            return self.enabled and bool(self.model and self.base_url)
         return self.enabled and bool(self.api_key and self.model and self.base_url)
 
 
@@ -222,6 +226,10 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
             top_n=max(1, int(rerank_payload.get("top_n", 8))),
             doc_char_limit=max(100, int(rerank_payload.get("doc_char_limit", 1200))),
             timeout_seconds=float(rerank_payload.get("timeout_seconds", 180.0)),
+            no_proxy_hosts=parse_string_list(
+                rerank_payload.get("no_proxy_hosts", rerank_payload.get("no_proxy")),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         ),
         llm=LLMConfig(
             enabled=as_bool(llm_payload.get("enabled", False)),
@@ -240,6 +248,10 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
             max_tokens=max(1, int(llm_payload.get("max_tokens", 1400))),
             timeout_seconds=float(llm_payload.get("timeout_seconds", 180.0)),
             disable_thinking=as_bool(llm_payload.get("disable_thinking", True)),
+            no_proxy_hosts=parse_string_list(
+                llm_payload.get("no_proxy_hosts", llm_payload.get("no_proxy")),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         ),
         answer=AnswerConfig(
             enabled=as_bool(answer_payload.get("enabled", True)),
@@ -269,6 +281,10 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
             "model": env_values.get("DOCARBOR_STAGE3_RERANK_MODEL", "qwen3-rerank"),
             "base_url": env_values.get("DOCARBOR_RERANK_BASE_URL", DEFAULT_DASHSCOPE_RERANK_BASE_URL),
             "api_key_env": "DOCARBOR_RERANK_API_KEY",
+            "no_proxy_hosts": parse_string_list(
+                env_values.get("DOCARBOR_RERANK_NO_PROXY_HOSTS", env_values.get("DOCARBOR_MODEL_NO_PROXY_HOSTS")),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         },
         "llm": {
             "provider": env_values.get("DOCARBOR_LLM_API_PROVIDER", "dashscope"),
@@ -278,6 +294,10 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
             ),
             "base_url": env_values.get("DOCARBOR_LLM_BASE_URL", DEFAULT_DASHSCOPE_BASE_URL),
             "api_key_env": "DOCARBOR_LLM_API_KEY",
+            "no_proxy_hosts": parse_string_list(
+                env_values.get("DOCARBOR_LLM_NO_PROXY_HOSTS", env_values.get("DOCARBOR_MODEL_NO_PROXY_HOSTS")),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
         },
     }
 

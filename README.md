@@ -137,6 +137,12 @@ python scripts\verify_llm.py ^
   --provider dashscope ^
   --model qwen3.5-plus ^
   --base-url https://dashscope.aliyuncs.com/compatible-mode/v1
+
+python scripts\verify_llm.py ^
+  --provider vllm ^
+  --model qwen-local ^
+  --base-url http://10.30.4.5:8000/v1 ^
+  --no-proxy-hosts localhost,127.0.0.1,127.0.0.0/8,::1,10.30.4.5,192.168.0.0/16
 ```
 
 All three scripts return JSON and exit with code `0` only when the check passes. They verify:
@@ -149,7 +155,7 @@ All three scripts return JSON and exit with code `0` only when the check passes.
 
 By default, `embedding.enabled=false`, so retrieval uses BM25. If an embedding provider is enabled and embeddings are stored in PostgreSQL, retrieval uses hybrid BM25 + pgvector. If the model call fails, the pipeline records the failure in `warnings` / `debug.retrieval_events` and degrades to BM25.
 
-For local vLLM/OpenAI-compatible embedding services, use `--embedding-provider vllm` and a base URL such as `http://127.0.0.1:8888/v1`. API key and model can be left empty for local vLLM, and `--embedding-dimensions 0` means the client will not send a `dimensions` field. Embedding calls bypass proxies for `localhost`, `127.0.0.1`, `127.0.0.0/8`, and `::1` by default; add more hosts or ranges with `--embedding-no-proxy-hosts` or `DOCARBOR_EMBEDDING_NO_PROXY_HOSTS`, for example `10.30.4.5,192.168.0.0/16,*.company.local`.
+For local vLLM/OpenAI-compatible embedding services, use `--embedding-provider vllm` and a base URL such as `http://127.0.0.1:8888/v1`. API key and model can be left empty for local vLLM, and `--embedding-dimensions 0` means the client will not send a `dimensions` field. Model calls bypass proxies for `localhost`, `127.0.0.1`, `127.0.0.0/8`, and `::1` by default; add more hosts or ranges with `--embedding-no-proxy-hosts`, `--llm-no-proxy-hosts`, `--rerank-no-proxy-hosts`, `DOCARBOR_MODEL_NO_PROXY_HOSTS`, `DOCARBOR_EMBEDDING_NO_PROXY_HOSTS`, or `DOCARBOR_LLM_NO_PROXY_HOSTS`, for example `10.30.4.5,192.168.0.0/16,*.company.local`.
 
 With a DocArbor-style `.env` file:
 
@@ -178,9 +184,12 @@ python -m waji_rag.cli ask-db \
   --rerank-model qwen3-rerank \
   --rerank-base-url https://dashscope.aliyuncs.com/compatible-api/v1 \
   --rerank-api-key "<rerank-api-key>" \
+  --rerank-no-proxy-hosts localhost,127.0.0.1,127.0.0.0/8,::1 \
+  --llm-provider dashscope \
   --llm-model qwen3.5-plus \
   --llm-base-url https://dashscope.aliyuncs.com/compatible-mode/v1 \
   --llm-api-key "<llm-api-key>" \
+  --llm-no-proxy-hosts localhost,127.0.0.1,127.0.0.0/8,::1 \
   --debug
 ```
 
