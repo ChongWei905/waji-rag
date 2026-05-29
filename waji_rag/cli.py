@@ -16,6 +16,12 @@ from waji_rag.html_batch import (
     format_report_summary,
     write_report,
 )
+from waji_rag.index_build import (
+    IndexBuildOptions,
+    LocalIndexBuilder,
+    format_report_summary as format_index_report_summary,
+    write_report as write_index_report,
+)
 from waji_rag.work_order import (
     WorkOrderBatchOptions,
     WorkOrderBatchParser,
@@ -62,6 +68,22 @@ def build_parser() -> argparse.ArgumentParser:
     work_orders.add_argument("--report-json", help="Optional JSON report output path.")
     work_orders.add_argument("--debug", action="store_true", help="Print failed file details and warnings.")
     work_orders.set_defaults(func=run_parse_workorders)
+
+    build_index = subparsers.add_parser("build-index", help="Build a local keyword index.")
+    build_index.add_argument("--work-orders-jsonl", required=True, help="Parsed work_orders.jsonl path.")
+    build_index.add_argument("--parts-jsonl", required=True, help="Parsed parts_evidence.jsonl path.")
+    build_index.add_argument("--manual-md-dir", required=True, help="Directory containing cleaned Markdown manuals.")
+    build_index.add_argument("--out-dir", required=True, help="Directory where index files will be written.")
+    build_index.add_argument("--manual-limit", type=int, help="Optional maximum number of Markdown files to index.")
+    build_index.add_argument(
+        "--max-manual-chars",
+        type=int,
+        default=1800,
+        help="Maximum characters per manual chunk. Defaults to 1800.",
+    )
+    build_index.add_argument("--report-json", help="Optional extra JSON report output path.")
+    build_index.add_argument("--debug", action="store_true", help="Print failed item details and warnings.")
+    build_index.set_defaults(func=run_build_index)
 
     serve = subparsers.add_parser("serve", help="Start the local web debugging UI.")
     serve.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
@@ -113,6 +135,43 @@ def run_html_to_md(args: argparse.Namespace) -> int:
             if result.status == "failed":
                 print(f"FAILED {result.input_path}: {result.error}", file=sys.stderr)
     return 1 if report.failed_files else 0
+
+
+def run_build_index(args: argparse.Namespace) -> int:
+    """Run the local keyword index build command."""
+
+    options = IndexBuildOptions(
+        work_orders_jsonl=Path(args.work_orders_jsonl),
+        parts_jsonl=Path(args.parts_jsonl),
+        manual_md_dir=Path(args.manual_md_dir),
+        output_dir=Path(args.out_dir),
+        manual_limit=args.manual_limit,
+        max_manual_chars=args.max_manual_chars,
+    )
+    try:
+        report = LocalIndexBuilder(options).build()
+    except Exception as exc:  # noqa: BLE001 - top-level CLI diagnostics.
+        print(f"build-index failed: {exc}", file=sys.stderr)
+        if args.debug:
+            print(failure_trace(exc), file=sys.stderr)
+        return 1
+
+    print(format_index_report_summary(report))
+    for key, output_path in report.output_paths.items():
+        print(f"{key}={Path(output_path).resolve()}")
+    if args.report_json:
+        write_index_report(report, Path(args.report_json))
+        print(f"report_json={Path(args.report_json).resolve()}")
+
+    if args.debug:
+        for warning in report.warnings:
+            print(f"WARN {warning}", file=sys.stderr)
+        for failed_item in report.failed_items:
+            print(
+                f"FAILED {failed_item.get('stage')} {failed_item.get('input')}: {failed_item.get('error')}",
+                file=sys.stderr,
+            )
+    return 1 if report.failed_items else 0
 
 
 def run_parse_workorders(args: argparse.Namespace) -> int:

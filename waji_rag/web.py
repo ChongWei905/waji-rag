@@ -11,6 +11,12 @@ from urllib.parse import urlparse
 
 from waji_rag import __version__
 from waji_rag.html_batch import ConvertOptions, HtmlToMarkdownBatch, format_report_summary
+from waji_rag.index_build import (
+    IndexBuildOptions,
+    LocalIndexBuilder,
+    format_report_summary as format_index_report_summary,
+    write_report as write_index_report,
+)
 from waji_rag.work_order import (
     WorkOrderBatchOptions,
     WorkOrderBatchParser,
@@ -200,6 +206,30 @@ INDEX_HTML = """<!doctype html>
         </div>
         <button id="parseWorkOrdersBtn">解析工单</button>
       </section>
+      <section style="margin-top: 16px;">
+        <h2>构建关键词索引</h2>
+        <label for="indexWorkOrdersJsonl">工单 JSONL</label>
+        <input id="indexWorkOrdersJsonl" placeholder="D:\\waji\\outputs\\work_orders\\work_orders.jsonl">
+        <label for="indexPartsJsonl">备件证据 JSONL</label>
+        <input id="indexPartsJsonl" placeholder="D:\\waji\\outputs\\work_orders\\parts_evidence.jsonl">
+        <label for="indexManualMdDir">Markdown 手册目录</label>
+        <input id="indexManualMdDir" placeholder="D:\\waji\\outputs\\manual_md">
+        <label for="indexOutDir">索引输出目录</label>
+        <input id="indexOutDir" placeholder="D:\\waji\\outputs\\index">
+        <div class="row">
+          <div>
+            <label for="indexManualLimit">手册数量上限</label>
+            <input id="indexManualLimit" type="number" min="0" placeholder="留空表示全量">
+          </div>
+          <div>
+            <label for="indexMaxManualChars">手册块字符数</label>
+            <input id="indexMaxManualChars" type="number" min="200" placeholder="默认 1800">
+          </div>
+        </div>
+        <label for="indexReportJson">报告文件</label>
+        <input id="indexReportJson" placeholder="可选 index_report.json">
+        <button id="buildIndexBtn">构建索引</button>
+      </section>
     </div>
     <section>
       <h2>运行结果</h2>
@@ -289,6 +319,29 @@ INDEX_HTML = """<!doctype html>
         button.disabled = false;
       }
     });
+    $("buildIndexBtn").addEventListener("click", async () => {
+      const button = $("buildIndexBtn");
+      button.disabled = true;
+      $("status").className = "status";
+      $("status").textContent = "running";
+      try {
+        const payload = {
+          work_orders_jsonl: $("indexWorkOrdersJsonl").value.trim(),
+          parts_jsonl: $("indexPartsJsonl").value.trim(),
+          manual_md_dir: $("indexManualMdDir").value.trim(),
+          out_dir: $("indexOutDir").value.trim(),
+          manual_limit: $("indexManualLimit").value ? Number($("indexManualLimit").value) : null,
+          max_manual_chars: $("indexMaxManualChars").value ? Number($("indexMaxManualChars").value) : null,
+          report_json: $("indexReportJson").value.trim() || null
+        };
+        const data = await postJson("/api/build-index", payload);
+        show(data);
+      } catch (error) {
+        show({}, error);
+      } finally {
+        button.disabled = false;
+      }
+    });
     loadDoctor();
   </script>
 </body>
@@ -322,6 +375,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/parse-workorders":
             self._handle_parse_workorders()
+            return
+        if parsed.path == "/api/build-index":
+            self._handle_build_index()
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -389,6 +445,45 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                     "report": report.to_dict(),
                 },
                 status=HTTPStatus.OK if not report.failed_files else HTTPStatus.MULTI_STATUS,
+            )
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json(
+                {"error": f"{type(exc).__name__}: {exc}"},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def _handle_build_index(self) -> None:
+        payload = self._read_json()
+        work_orders_jsonl = str(payload.get("work_orders_jsonl") or "").strip()
+        parts_jsonl = str(payload.get("parts_jsonl") or "").strip()
+        manual_md_dir = str(payload.get("manual_md_dir") or "").strip()
+        out_dir = str(payload.get("out_dir") or "").strip()
+        if not work_orders_jsonl or not parts_jsonl or not manual_md_dir or not out_dir:
+            self._send_json(
+                {"error": "work_orders_jsonl, parts_jsonl, manual_md_dir and out_dir are required"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        options = IndexBuildOptions(
+            work_orders_jsonl=Path(work_orders_jsonl),
+            parts_jsonl=Path(parts_jsonl),
+            manual_md_dir=Path(manual_md_dir),
+            output_dir=Path(out_dir),
+            manual_limit=payload.get("manual_limit"),
+            max_manual_chars=int(payload.get("max_manual_chars") or 1800),
+        )
+        try:
+            report = LocalIndexBuilder(options).build()
+            report_json = payload.get("report_json")
+            if report_json:
+                write_index_report(report, Path(str(report_json)))
+            self._send_json(
+                {
+                    "summary": format_index_report_summary(report),
+                    "report": report.to_dict(),
+                },
+                status=HTTPStatus.OK if not report.failed_items else HTTPStatus.MULTI_STATUS,
             )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json(

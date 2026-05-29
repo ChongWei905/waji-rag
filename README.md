@@ -8,6 +8,7 @@ The current implementation focuses on the first executable stage:
 - local web debugging UI;
 - HTML to Markdown cleaning for diagnosis manuals;
 - work-order TXT parsing and part evidence export;
+- local keyword index building;
 - JSON conversion reports for Windows validation.
 
 ## Quick Start
@@ -71,6 +72,30 @@ python -m waji_rag.cli parse-workorders ^
   --out-dir D:\waji\outputs\work_orders ^
   --limit 10 ^
   --report-json D:\waji\outputs\work_order_report.json ^
+  --debug
+```
+
+Build the local keyword index:
+
+```bash
+python -m waji_rag.cli build-index \
+  --work-orders-jsonl /path/to/work_orders.jsonl \
+  --parts-jsonl /path/to/parts_evidence.jsonl \
+  --manual-md-dir /path/to/manual_md \
+  --out-dir /path/to/index \
+  --report-json /path/to/index_report.json \
+  --debug
+```
+
+On Windows:
+
+```bat
+python -m waji_rag.cli build-index ^
+  --work-orders-jsonl D:\waji\outputs\work_orders\work_orders.jsonl ^
+  --parts-jsonl D:\waji\outputs\work_orders\parts_evidence.jsonl ^
+  --manual-md-dir D:\waji\outputs\manual_md ^
+  --out-dir D:\waji\outputs\index ^
+  --report-json D:\waji\outputs\index\index_report.json ^
   --debug
 ```
 

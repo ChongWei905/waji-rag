@@ -99,13 +99,37 @@ python -m waji_rag.cli parse-workorders ^
 - `parts_evidence.csv`：便于在 Windows Excel 中检查的备件证据表；
 - `work_order_report.json`：解析统计、失败文件和字段缺失告警。
 
+命令行构建本地关键词索引：
+
+```bash
+python -m waji_rag.cli build-index ^
+  --work-orders-jsonl D:\waji\outputs\work_orders\work_orders.jsonl ^
+  --parts-jsonl D:\waji\outputs\work_orders\parts_evidence.jsonl ^
+  --manual-md-dir D:\waji\outputs\manual_md ^
+  --out-dir D:\waji\outputs\index ^
+  --report-json D:\waji\outputs\index\index_report.json ^
+  --debug
+```
+
+该命令会输出：
+
+- `index_manifest.json`：索引版本、输入路径、输出路径、字段权重和分词策略；
+- `documents.jsonl`：统一后的全部可检索文档；
+- `work_order_docs.jsonl`：工单文档；
+- `part_docs.jsonl`：备件证据文档；
+- `manual_docs.jsonl`：手册切块文档；
+- `inverted_index.json`：字段级倒排索引；
+- `index_report.json`：构建统计、字段缺失告警和失败项。
+
 需要反馈的问题材料包括：
 
 - `doctor` 输出；
 - `html_to_md_report.json`；
 - `work_order_report.json`；
+- `index_report.json`；
 - 抽样转换后的 Markdown；
 - 抽样解析后的 `parts_evidence.csv`；
+- 抽样索引文档 `documents.jsonl`；
 - 命令行报错或 Web 页面中的 JSON 输出。
 
 ## 2. 可用数据
@@ -257,6 +281,31 @@ Query 增强阶段最终输出：
 退化版构建阶段只围绕非结构化文本建立可检索索引。
 
 最小可执行版本可以先使用关键词检索。若已有向量检索能力，再补充向量索引做混合召回。
+
+当前可执行版本已经提供 `build-index` 命令，负责读取清洗后的工单、备件证据和 Markdown 手册，输出本地 JSONL 文档库和 JSON 倒排索引。
+
+输出目录结构：
+
+```text
+index/
+├── index_manifest.json
+├── documents.jsonl
+├── work_order_docs.jsonl
+├── part_docs.jsonl
+├── manual_docs.jsonl
+├── inverted_index.json
+└── index_report.json
+```
+
+当前索引仍是关键词索引，不依赖向量库、数据库或外部服务，便于先在 Windows 正式数据上验证召回链路。
+
+分词策略：
+
+- 英文、数字、故障码、物料编码按连续 token 保留，例如 `E00131`、`310705565`、`BELT-001`；
+- 中文连续文本生成 2-gram 和 3-gram，例如 `行走单边慢` 会产生 `行走`、`单边`、`行走单`、`单边慢`；
+- 12 字以内的中文连续短语会额外保留原短语，用于增强完整故障现象匹配。
+
+字段级倒排索引会记录命中的 `doc_id`、字段名和词频，后续 `search` 阶段可按字段权重重排，例如 `reported_issue`、`fault_title`、`part_code` 权重高于正文兜底字段。
 
 ### 5.1 工单诊断记录索引
 
