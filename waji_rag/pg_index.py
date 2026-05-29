@@ -36,6 +36,7 @@ DEFAULT_DATABASE_URL = "postgresql://waji:waji@127.0.0.1:55432/waji_rag"
 SCHEMA_VERSION = 1
 DEFAULT_BM25_K1 = 1.5
 DEFAULT_BM25_B = 0.75
+DEFAULT_BM25_BATCH_TERM_ROWS = 100_000
 MANUAL_SUFFIXES = {".html", ".htm", ".md", ".markdown"}
 FAULT_CODE_IN_QUERY = re.compile(r"\b[A-Za-z]\d{3,}[A-Za-z0-9_-]*\b")
 APPLICATION_DATA_TABLES = (
@@ -78,6 +79,7 @@ class PgIngestOptions:
     work_order_limit: int | None = None
     manual_limit: int | None = None
     max_manual_chars: int = 1800
+    bm25_batch_term_rows: int = DEFAULT_BM25_BATCH_TERM_ROWS
     encodings: tuple[str, ...] = DEFAULT_ENCODINGS
     progress_callback: Callable[[dict[str, object]], None] | None = None
 
@@ -160,6 +162,17 @@ class RetrievalHit:
         return asdict(self)
 
 
+@dataclass(slots=True)
+class SearchDocumentUpsertResult:
+    """Search document upsert output plus deferred BM25 rows."""
+
+    document_id: int
+    term_rows: int
+    timings: dict[str, float]
+    field_rows: list[tuple[object, ...]]
+    term_row_values: list[tuple[object, ...]]
+
+
 class PgSchemaManager:
     """Create and reset the PostgreSQL schema used by the RAG pipeline."""
 
@@ -211,6 +224,9 @@ class PgIngestBuilder:
         )
         self.embedding_provider = build_embedding_provider(self.config)
         self.pending_embeddings: list[tuple[int, IndexDocument]] = []
+        self.pending_bm25_field_rows: list[tuple[object, ...]] = []
+        self.pending_bm25_term_rows: list[tuple[object, ...]] = []
+        self.bm25_batch_term_rows = max(1, options.bm25_batch_term_rows)
         self.processed_file_count = 0
 
     def ingest(self) -> PgIngestReport:
@@ -256,9 +272,11 @@ class PgIngestBuilder:
                 run_id = create_ingest_run(cur, self.config)
                 if work_order_dir is not None:
                     self._ingest_work_orders(cur, work_order_dir, report)
+                    self._flush_bm25_batch(cur, report)
                     self._flush_embedding_batch(cur, report)
                 if manual_dir is not None:
                     self._ingest_manuals(cur, manual_dir, report)
+                    self._flush_bm25_batch(cur, report)
                     self._flush_embedding_batch(cur, report)
                 finish_ingest_run(cur, run_id, report)
             conn.commit()
@@ -315,11 +333,12 @@ class PgIngestBuilder:
                 documents = build_documents_for_work_order(record)
                 self.processed_file_count = file_index
                 for document in documents:
-                    document_id, term_rows, timings = upsert_search_document(cur, document)
-                    merge_timings(report, timings)
+                    result = upsert_search_document(cur, document, write_bm25=False)
+                    merge_timings(report, result.timings)
                     report.total_documents += 1
-                    report.term_rows += term_rows
-                    self._queue_embedding(cur, document_id, document, report)
+                    report.term_rows += result.term_rows
+                    self._queue_bm25_rows(cur, result, report)
+                    self._queue_embedding(cur, result.document_id, document, report)
                 report.part_records += len(record.parts)
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
                 report.failed_items.append(
@@ -399,14 +418,15 @@ class PgIngestBuilder:
                     pg_started = time.perf_counter()
                     insert_manual_chunk(cur, document, chunk_metadata)
                     add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
-                    document_id, term_rows, timings = upsert_search_document(cur, document)
-                    merge_timings(report, timings)
+                    result = upsert_search_document(cur, document, write_bm25=False)
+                    merge_timings(report, result.timings)
                     report.manual_chunks += 1
                     report.total_documents += 1
-                    report.term_rows += term_rows
+                    report.term_rows += result.term_rows
                     if converted_from_html:
                         report.html_converted_in_memory += 1 if chunk_index == 0 else 0
-                    self._queue_embedding(cur, document_id, document, report)
+                    self._queue_bm25_rows(cur, result, report)
+                    self._queue_embedding(cur, result.document_id, document, report)
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
                 report.failed_items.append(
                     {"stage": "manual", "input": str(manual_path), "error": f"{type(exc).__name__}: {exc}"}
@@ -423,6 +443,37 @@ class PgIngestBuilder:
                         current_total=len(manual_files),
                     )
                 )
+
+    def _queue_bm25_rows(self, cur: Any, result: SearchDocumentUpsertResult, report: PgIngestReport) -> None:
+        self.pending_bm25_field_rows.extend(result.field_rows)
+        self.pending_bm25_term_rows.extend(result.term_row_values)
+        if len(self.pending_bm25_term_rows) >= self.bm25_batch_term_rows:
+            self._flush_bm25_batch(cur, report)
+
+    def _flush_bm25_batch(self, cur: Any, report: PgIngestReport) -> None:
+        if not self.pending_bm25_field_rows and not self.pending_bm25_term_rows:
+            return
+        field_rows = self.pending_bm25_field_rows
+        term_rows = self.pending_bm25_term_rows
+        self.pending_bm25_field_rows = []
+        self.pending_bm25_term_rows = []
+        self._emit_progress(
+            self._progress_payload(
+                phase="bm25",
+                message=f"批量写入 BM25 词项 {len(term_rows)} 行",
+                report=report,
+            )
+        )
+        started_at = time.perf_counter()
+        insert_bm25_rows(cur, field_rows=field_rows, term_rows=term_rows)
+        add_timing(report, "bm25_seconds", time.perf_counter() - started_at)
+        self._emit_progress(
+            self._progress_payload(
+                phase="bm25",
+                message=f"已写入 BM25 词项 {report.term_rows} 行",
+                report=report,
+            )
+        )
 
     def _queue_embedding(self, cur: Any, document_id: int, document: IndexDocument, report: PgIngestReport) -> None:
         if self.embedding_provider is None:
@@ -484,7 +535,7 @@ class PgIngestBuilder:
             processed_files = current_index
         elif phase == "manuals" and current_index is not None:
             processed_files = report.work_order_files + current_index
-        elif phase == "embedding":
+        elif phase in {"bm25", "embedding"}:
             processed_files = min(total_files, self.processed_file_count)
         percent = round((processed_files / total_files) * 100, 1) if total_files else 0.0
         if phase == "completed":
@@ -1384,7 +1435,7 @@ def insert_manual_chunk(cur: Any, document: IndexDocument, metadata: dict[str, o
     )
 
 
-def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int, dict[str, float]]:
+def upsert_search_document(cur: Any, document: IndexDocument, *, write_bm25: bool = True) -> SearchDocumentUpsertResult:
     """Insert one searchable document and its BM25 term statistics."""
 
     timings: dict[str, float] = {}
@@ -1425,28 +1476,69 @@ def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int,
 
     term_rows = 0
     bm25_started = time.perf_counter()
+    field_rows: list[tuple[object, ...]] = []
+    term_row_values: list[tuple[object, ...]] = []
     for field_name, field_text in document.fields.items():
         terms = tokenize_text(field_text)
         field_length = len(terms)
         field_weight = float(FIELD_WEIGHTS.get(field_name, 1.0))
-        cur.execute(
-            """
-            INSERT INTO document_fields(document_id, field_name, field_text, field_weight, field_length)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (document_id, field_name, clean_string(field_text), field_weight, field_length),
-        )
+        field_rows.append((document_id, field_name, clean_string(field_text), field_weight, field_length))
         for term, tf in Counter(terms).items():
-            cur.execute(
-                """
-                INSERT INTO document_terms(term, document_id, field_name, tf, field_weight, field_length)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (term, document_id, field_name, tf, field_weight, field_length),
-            )
+            term_row_values.append((term, document_id, field_name, tf, field_weight, field_length))
             term_rows += 1
+    if write_bm25:
+        insert_bm25_rows(cur, field_rows=field_rows, term_rows=term_row_values)
     add_timing_value(timings, "bm25_seconds", time.perf_counter() - bm25_started)
-    return document_id, term_rows, timings
+    return SearchDocumentUpsertResult(
+        document_id=document_id,
+        term_rows=term_rows,
+        timings=timings,
+        field_rows=field_rows,
+        term_row_values=term_row_values,
+    )
+
+
+def insert_bm25_rows(cur: Any, *, field_rows: list[tuple[object, ...]], term_rows: list[tuple[object, ...]]) -> None:
+    """Bulk insert BM25 field and term statistics."""
+
+    bulk_insert_rows(
+        cur,
+        copy_sql=(
+            "COPY document_fields(document_id, field_name, field_text, field_weight, field_length) "
+            "FROM STDIN"
+        ),
+        insert_sql=(
+            "INSERT INTO document_fields(document_id, field_name, field_text, field_weight, field_length) "
+            "VALUES (%s, %s, %s, %s, %s)"
+        ),
+        rows=field_rows,
+    )
+    bulk_insert_rows(
+        cur,
+        copy_sql=(
+            "COPY document_terms(term, document_id, field_name, tf, field_weight, field_length) "
+            "FROM STDIN"
+        ),
+        insert_sql=(
+            "INSERT INTO document_terms(term, document_id, field_name, tf, field_weight, field_length) "
+            "VALUES (%s, %s, %s, %s, %s, %s)"
+        ),
+        rows=term_rows,
+    )
+
+
+def bulk_insert_rows(cur: Any, *, copy_sql: str, insert_sql: str, rows: list[tuple[object, ...]]) -> None:
+    """Bulk insert simple rows with PostgreSQL COPY, falling back to executemany for test doubles."""
+
+    if not rows:
+        return
+    copy_method = getattr(cur, "copy", None)
+    if callable(copy_method):
+        with copy_method(copy_sql) as copy:
+            for row in rows:
+                copy.write_row(row)
+        return
+    cur.executemany(insert_sql, rows)
 
 
 def maybe_store_embedding(

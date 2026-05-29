@@ -7,6 +7,7 @@ from waji_rag.pg_index import (
     APPLICATION_DATA_TABLES,
     PgIngestReport,
     build_documents_for_work_order,
+    bulk_insert_rows,
     clear_application_data_with_cursor,
     store_embedding_batch,
     unique_terms,
@@ -89,15 +90,33 @@ class PgIndexHelpersTests(unittest.TestCase):
         for table_name in APPLICATION_DATA_TABLES:
             self.assertIn(table_name, sql)
 
+    def test_bulk_insert_rows_uses_executemany_when_copy_is_unavailable(self) -> None:
+        cursor = FakeCursor()
+
+        bulk_insert_rows(
+            cursor,
+            copy_sql="COPY demo_table(value) FROM STDIN",
+            insert_sql="INSERT INTO demo_table(value) VALUES (%s)",
+            rows=[("a",), ("b",)],
+        )
+
+        self.assertEqual(cursor.executemany_calls, [("INSERT INTO demo_table(value) VALUES (%s)", [("a",), ("b",)])])
+
 
 class FakeCursor:
     def __init__(self) -> None:
         self.executions: list[tuple[str, object]] = []
+        self.executemany_calls: list[tuple[str, list[tuple[object, ...]]]] = []
 
     def execute(self, sql: str, params: object = None) -> None:
         """Record SQL execution parameters for assertions."""
 
         self.executions.append((sql, params))
+
+    def executemany(self, sql: str, rows: list[tuple[object, ...]]) -> None:
+        """Record bulk SQL execution parameters for assertions."""
+
+        self.executemany_calls.append((sql, rows))
 
 
 class FakeEmbeddingProvider:
