@@ -16,10 +16,6 @@ from waji_rag.html_batch import DEFAULT_ENCODINGS, read_text_with_fallback
 FIELD_LABELS = {
     "work_order_id": (
         "工单ID",
-        "工单编号",
-        "工单号",
-        "服务单号",
-        "单号",
     ),
     "reported_issue": (
         "用户报修内容",
@@ -52,6 +48,9 @@ FIELD_LABELS = {
         "配件信息",
         "配件明细",
         "物料信息",
+    ),
+    "remarks": (
+        "备注",
     ),
 }
 
@@ -107,6 +106,7 @@ class WorkOrderRecord:
     work_order_id: str | None = None
     reported_issue: str | None = None
     solution: str | None = None
+    remarks: str | None = None
     parts: list[PartRecord] = field(default_factory=list)
     raw_text: str = ""
     source_path: str = ""
@@ -166,7 +166,6 @@ class WorkOrderParser:
         work_order_id = first_non_empty(
             sections.get("work_order_id"),
             extract_label_value(normalized, FIELD_LABELS["work_order_id"]),
-            infer_id_from_filename(source_path),
         )
         reported_issue = first_non_empty(
             sections.get("reported_issue"),
@@ -179,6 +178,10 @@ class WorkOrderParser:
         parts_text = first_non_empty(
             sections.get("parts"),
             extract_label_value(normalized, FIELD_LABELS["parts"]),
+        )
+        remarks = first_non_empty(
+            sections.get("remarks"),
+            extract_label_value(normalized, FIELD_LABELS["remarks"]),
         )
         parts = parse_parts(parts_text or "")
 
@@ -196,6 +199,7 @@ class WorkOrderParser:
             work_order_id=work_order_id,
             reported_issue=reported_issue,
             solution=solution,
+            remarks=remarks,
             parts=parts,
             raw_text=normalized,
             source_path=str(source_path),
@@ -643,16 +647,6 @@ def clean_value(value: str) -> str:
     return value.strip(" \t\n:：,，;；")
 
 
-def infer_id_from_filename(path: Path) -> str | None:
-    """Infer a work-order id from the file stem as a fallback."""
-
-    stem = path.stem.strip()
-    if not stem:
-        return None
-    match = re.search(r"[A-Za-z]*\d[\w-]*", stem)
-    return match.group(0) if match else stem
-
-
 def iter_txt_files(root: Path) -> Iterable[Path]:
     """Yield TXT files under root in deterministic order."""
 
@@ -687,6 +681,7 @@ def write_parts_csv(records: list[WorkOrderRecord], path: Path) -> None:
         "work_order_id",
         "reported_issue",
         "solution",
+        "remarks",
         "part_number_name",
         "part_number",
         "part_name",
@@ -713,6 +708,7 @@ def iter_part_evidence(records: list[WorkOrderRecord]) -> Iterable[dict[str, str
                 "work_order_id": record.work_order_id,
                 "reported_issue": record.reported_issue,
                 "solution": record.solution,
+                "remarks": record.remarks,
                 "part_number_name": part.part_number_name,
                 "part_number": part.part_number,
                 "part_name": part.part_name,

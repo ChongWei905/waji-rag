@@ -50,6 +50,27 @@ class WorkOrderParserTests(unittest.TestCase):
 
         self.assertEqual(parts, [])
 
+    def test_remark_field_does_not_override_work_order_id(self) -> None:
+        text = """
+工单ID: 01A33183-E69E-4B9C-ACEF-5F57FDB926BF
+用户报修内容: 行走单边慢
+人员落实及解决方法: 用户反馈该机单边行走慢，服务人员现场判断马达内泄过大导致，试机正常，故障排除。
+备注：客户报错机号，已做变更，数据变更申请单号：SJBG2023031100001。[2023-03-11 09:28:20]
+"""
+
+        record = WorkOrderParser().parse(text, source_path=Path("sample.txt"))
+
+        self.assertEqual(record.work_order_id, "01A33183-E69E-4B9C-ACEF-5F57FDB926BF")
+        self.assertEqual(record.reported_issue, "行走单边慢")
+        self.assertEqual(
+            record.solution,
+            "用户反馈该机单边行走慢，服务人员现场判断马达内泄过大导致，试机正常，故障排除。",
+        )
+        self.assertEqual(
+            record.remarks,
+            "客户报错机号，已做变更，数据变更申请单号:SJBG2023031100001。[2023-03-11 09:28:20]",
+        )
+
     def test_inline_multiple_parts_still_group_fields(self) -> None:
         parts = parse_parts(
             "备件名称: 风扇皮带; 备件编码: BELT-009; 数量: 1; "
