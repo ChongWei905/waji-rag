@@ -10,7 +10,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from html_to_markdown import MarkdownConverter, detect_table_count
 
@@ -68,6 +68,7 @@ class PgIngestOptions:
     manual_limit: int | None = None
     max_manual_chars: int = 1800
     encodings: tuple[str, ...] = DEFAULT_ENCODINGS
+    progress_callback: Callable[[dict[str, object]], None] | None = None
 
 
 @dataclass(slots=True)
@@ -200,10 +201,20 @@ class PgIngestBuilder:
         """Run schema initialization, parse files, and write searchable records."""
 
         start_time = time.time()
+        self._emit_progress({"phase": "init", "message": "初始化 PostgreSQL schema", "percent": 0})
         PgSchemaManager(self.options.database).initialize(reset=self.options.reset)
         work_order_dir = self.options.work_order_dir.resolve() if self.options.work_order_dir else None
         manual_dir = self.options.manual_dir.resolve() if self.options.manual_dir else None
         validate_ingest_inputs(work_order_dir, manual_dir)
+        self._emit_progress(
+            {
+                "phase": "scan_inputs",
+                "message": "输入目录校验完成，准备扫描文件",
+                "work_order_dir": str(work_order_dir) if work_order_dir else None,
+                "manual_dir": str(manual_dir) if manual_dir else None,
+                "percent": 1,
+            }
+        )
 
         report = PgIngestReport(
             started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -211,6 +222,17 @@ class PgIngestBuilder:
             database_url=redact_database_url(self.options.database.database_url),
             work_order_dir=str(work_order_dir) if work_order_dir else None,
             manual_dir=str(manual_dir) if manual_dir else None,
+        )
+        if work_order_dir is not None:
+            report.work_order_files = len(limited_paths(list(iter_txt_files(work_order_dir)), self.options.work_order_limit))
+        if manual_dir is not None:
+            report.manual_files = len(limited_paths(list(iter_manual_files(manual_dir)), self.options.manual_limit))
+        self._emit_progress(
+            self._progress_payload(
+                phase="plan",
+                message=f"发现工单 {report.work_order_files} 个，手册 {report.manual_files} 个",
+                report=report,
+            )
         )
 
         with connect(self.options.database.database_url) as conn:
@@ -224,16 +246,41 @@ class PgIngestBuilder:
             conn.commit()
 
         report.elapsed_seconds = round(time.time() - start_time, 3)
+        self._emit_progress(
+            self._progress_payload(
+                phase="completed",
+                message="索引构建完成",
+                report=report,
+                elapsed_seconds=report.elapsed_seconds,
+            )
+        )
         return report
 
     def _ingest_work_orders(self, cur: Any, root: Path, report: PgIngestReport) -> None:
-        txt_files = list(iter_txt_files(root))
-        if self.options.work_order_limit is not None:
-            txt_files = txt_files[: max(self.options.work_order_limit, 0)]
+        txt_files = limited_paths(list(iter_txt_files(root)), self.options.work_order_limit)
         report.work_order_files = len(txt_files)
+        self._emit_progress(
+            self._progress_payload(
+                phase="work_orders",
+                message=f"开始处理工单 TXT，共 {len(txt_files)} 个文件",
+                report=report,
+                current_index=0,
+                current_total=len(txt_files),
+            )
+        )
 
-        for txt_path in txt_files:
+        for file_index, txt_path in enumerate(txt_files, start=1):
             try:
+                self._emit_progress(
+                    self._progress_payload(
+                        phase="work_orders",
+                        message=f"处理工单 {file_index}/{len(txt_files)}",
+                        report=report,
+                        current_file=str(txt_path),
+                        current_index=file_index,
+                        current_total=len(txt_files),
+                    )
+                )
                 text, encoding = read_text_with_fallback(txt_path, self.options.encodings)
                 record = self.parser.parse(text, source_path=txt_path, encoding=encoding)
                 delete_source_records(cur, str(txt_path))
@@ -254,15 +301,43 @@ class PgIngestBuilder:
                 report.failed_items.append(
                     {"stage": "work_order", "input": str(txt_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
+            finally:
+                self._emit_progress(
+                    self._progress_payload(
+                        phase="work_orders",
+                        message=f"已处理工单 {file_index}/{len(txt_files)}",
+                        report=report,
+                        current_file=str(txt_path),
+                        current_index=file_index,
+                        current_total=len(txt_files),
+                    )
+                )
 
     def _ingest_manuals(self, cur: Any, root: Path, report: PgIngestReport) -> None:
-        manual_files = list(iter_manual_files(root))
-        if self.options.manual_limit is not None:
-            manual_files = manual_files[: max(self.options.manual_limit, 0)]
+        manual_files = limited_paths(list(iter_manual_files(root)), self.options.manual_limit)
         report.manual_files = len(manual_files)
+        self._emit_progress(
+            self._progress_payload(
+                phase="manuals",
+                message=f"开始处理手册 HTML/MD，共 {len(manual_files)} 个文件",
+                report=report,
+                current_index=0,
+                current_total=len(manual_files),
+            )
+        )
 
-        for manual_path in manual_files:
+        for file_index, manual_path in enumerate(manual_files, start=1):
             try:
+                self._emit_progress(
+                    self._progress_payload(
+                        phase="manuals",
+                        message=f"处理手册 {file_index}/{len(manual_files)}",
+                        report=report,
+                        current_file=str(manual_path),
+                        current_index=file_index,
+                        current_total=len(manual_files),
+                    )
+                )
                 markdown_text, encoding, converted_from_html, table_count = read_manual_as_markdown(
                     manual_path,
                     encodings=self.options.encodings,
@@ -304,6 +379,64 @@ class PgIngestBuilder:
                 report.failed_items.append(
                     {"stage": "manual", "input": str(manual_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
+            finally:
+                self._emit_progress(
+                    self._progress_payload(
+                        phase="manuals",
+                        message=f"已处理手册 {file_index}/{len(manual_files)}",
+                        report=report,
+                        current_file=str(manual_path),
+                        current_index=file_index,
+                        current_total=len(manual_files),
+                    )
+                )
+
+    def _emit_progress(self, progress: dict[str, object]) -> None:
+        """Emit ingest progress when a callback was configured."""
+
+        if self.options.progress_callback is None:
+            return
+        self.options.progress_callback(progress)
+
+    def _progress_payload(
+        self,
+        *,
+        phase: str,
+        message: str,
+        report: PgIngestReport,
+        current_file: str | None = None,
+        current_index: int | None = None,
+        current_total: int | None = None,
+        elapsed_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """Build a compact progress payload for UI polling."""
+
+        total_files = report.work_order_files + report.manual_files
+        processed_files = 0
+        if phase == "work_orders" and current_index is not None:
+            processed_files = current_index
+        elif phase == "manuals" and current_index is not None:
+            processed_files = report.work_order_files + current_index
+        percent = round((processed_files / total_files) * 100, 1) if total_files else 0.0
+        if phase == "completed":
+            processed_files = total_files
+            percent = 100.0
+        return {
+            "phase": phase,
+            "message": message,
+            "current_file": current_file,
+            "current_index": current_index,
+            "current_total": current_total,
+            "percent": percent,
+            "processed_files": processed_files,
+            "total_files": total_files,
+            "counts": ingest_report_counts(report),
+            "failed_count": len(report.failed_items),
+            "recent_failures": report.failed_items[-5:],
+            "warnings": report.warnings[-5:],
+            "elapsed_seconds": elapsed_seconds,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
 
 class PgRetriever:
@@ -897,16 +1030,7 @@ def create_ingest_run(cur: Any, config: AppConfig) -> int:
 def finish_ingest_run(cur: Any, run_id: int, report: PgIngestReport) -> None:
     """Mark an ingest run as complete with summary counts."""
 
-    counts = {
-        "work_orders": report.work_orders,
-        "part_records": report.part_records,
-        "manual_files": report.manual_files,
-        "manual_chunks": report.manual_chunks,
-        "total_documents": report.total_documents,
-        "term_rows": report.term_rows,
-        "embeddings": report.embeddings,
-        "failed_items": len(report.failed_items),
-    }
+    counts = ingest_report_counts(report)
     cur.execute(
         """
         UPDATE ingest_runs
@@ -915,6 +1039,23 @@ def finish_ingest_run(cur: Any, run_id: int, report: PgIngestReport) -> None:
         """,
         ("completed_with_errors" if report.failed_items else "completed", json_param(counts), json_param(report.warnings), run_id),
     )
+
+
+def ingest_report_counts(report: PgIngestReport) -> dict[str, int]:
+    """Return the core numeric ingest counters."""
+
+    return {
+        "work_order_files": report.work_order_files,
+        "work_orders": report.work_orders,
+        "part_records": report.part_records,
+        "manual_files": report.manual_files,
+        "manual_chunks": report.manual_chunks,
+        "total_documents": report.total_documents,
+        "term_rows": report.term_rows,
+        "embeddings": report.embeddings,
+        "html_converted_in_memory": report.html_converted_in_memory,
+        "failed_items": len(report.failed_items),
+    }
 
 
 def delete_source_records(cur: Any, source_path: str) -> None:
@@ -1525,6 +1666,14 @@ def iter_manual_files(root: Path) -> Iterable[Path]:
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix.lower() in MANUAL_SUFFIXES:
             yield path
+
+
+def limited_paths(paths: list[Path], limit: int | None) -> list[Path]:
+    """Return paths clipped to a non-negative optional limit."""
+
+    if limit is None:
+        return paths
+    return paths[: max(limit, 0)]
 
 
 def unique_terms(terms: Iterable[str], *, limit: int = 200) -> list[str]:

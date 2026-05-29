@@ -108,7 +108,7 @@ Open:
 http://127.0.0.1:8765
 ```
 
-The page can run the RAG workflow end to end. For the included demo data, click `加载 Demo 配置`, then `一键跑全流程`. The page initializes PostgreSQL, ingests work-order TXT and manual HTML, runs retrieval/answer generation, and shows the final answer, stage trace, recalled evidence, part candidates, and raw JSON in separate panels.
+The page separates `索引构建` from `检索与回答`. The build page starts large ingest jobs in the background, polls task progress, and shows source directories, file progress, current file, document counts, term rows, embeddings, and failures. The QA page focuses on retrieval and answer generation. Selecting a stage in the left rail changes the main content to the corresponding stage details instead of showing every panel at once.
 
 The web UI also persists build/search/answer runs in PostgreSQL as task records. After ingesting a document batch once, you can repeatedly run new retrieval or answer tasks from the same database, then reload any previous task from the left-side task list to inspect its status, request, result, retrieval channels, selected evidence, and generated answer.
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import html
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -932,6 +934,71 @@ def build_redesigned_index_html() -> str:
       background: #fff1f2;
       border-color: #fecdd3;
     }
+    .view-tabs {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+      flex-wrap: wrap;
+    }
+    .view-tab {
+      color: var(--ink);
+      background: #fff;
+      border-color: var(--line-strong);
+    }
+    .view-tab.active {
+      color: #fff;
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .view {
+      display: none;
+    }
+    .view.active {
+      display: block;
+    }
+    .build-dashboard {
+      display: grid;
+      grid-template-columns: minmax(0, .9fr) minmax(320px, 1.1fr);
+      gap: 12px;
+    }
+    .progress-track {
+      height: 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      overflow: hidden;
+      background: #fff;
+      margin: 12px 0;
+    }
+    .progress-bar {
+      width: 0%;
+      height: 100%;
+      background: var(--accent);
+      transition: width .2s ease;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .stat-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+      min-width: 0;
+    }
+    .stat-value {
+      font-weight: 800;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+    .doc-info {
+      display: grid;
+      gap: 8px;
+    }
+    .panel.hidden {
+      display: none;
+    }
     .workspace {
       margin-top: 14px;
       display: grid;
@@ -1277,7 +1344,7 @@ def build_redesigned_index_html() -> str:
       padding: 0;
     }
     @media (max-width: 1180px) {
-      .query-band, .workspace, .answer-layout, .inspector { grid-template-columns: 1fr; }
+      .query-band, .workspace, .answer-layout, .inspector, .build-dashboard { grid-template-columns: 1fr; }
       .stage-rail { position: static; }
       .retrieval-board { grid-template-columns: 1fr 1fr; }
     }
@@ -1305,24 +1372,56 @@ def build_redesigned_index_html() -> str:
   </header>
 
   <main>
-    <section class="query-band">
-      <div>
-        <label for="query">用户问题</label>
-        <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
-      </div>
-      <div class="query-tools">
-        <div>
-          <label for="topK">每路 Top K</label>
-          <input id="topK" type="number" min="1" value="1">
-        </div>
-        <div>
-          <label for="evidenceTopK">答案证据数</label>
-          <input id="evidenceTopK" type="number" min="1" value="4">
+    <div class="view-tabs">
+      <button id="buildViewBtn" class="view-tab active">索引构建</button>
+      <button id="qaViewBtn" class="view-tab">检索与回答</button>
+    </div>
+
+    <div id="status" class="status">页面已载入。可以单独运行“构建 / 检索 / 回答”，也可以运行“全流程”。</div>
+
+    <section id="buildView" class="view active">
+      <div class="panel">
+        <h2>索引构建</h2>
+        <div class="build-dashboard">
+          <div>
+            <div class="doc-info">
+              <div class="evidence-row">
+                <div class="row-title">文档来源</div>
+                <div id="buildSources" class="row-meta">尚未运行。</div>
+              </div>
+              <div class="evidence-row">
+                <div class="row-title">当前进度</div>
+                <div id="buildProgressText" class="row-meta">等待构建任务。</div>
+                <div class="progress-track"><div id="buildProgressBar" class="progress-bar"></div></div>
+                <div id="buildCurrentFile" class="row-meta"></div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div id="buildStats" class="stat-grid"></div>
+          </div>
         </div>
       </div>
     </section>
 
-    <div id="status" class="status">页面已载入。可以单独运行“构建 / 检索 / 回答”，也可以运行“全流程”。</div>
+    <section id="qaView" class="view">
+      <section class="query-band">
+        <div>
+          <label for="query">用户问题</label>
+          <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
+        </div>
+        <div class="query-tools">
+          <div>
+            <label for="topK">每路 Top K</label>
+            <input id="topK" type="number" min="1" value="1">
+          </div>
+          <div>
+            <label for="evidenceTopK">答案证据数</label>
+            <input id="evidenceTopK" type="number" min="1" value="4">
+          </div>
+        </div>
+      </section>
+    </section>
 
     <div class="workspace">
       <aside class="stage-rail">
@@ -1337,7 +1436,7 @@ def build_redesigned_index_html() -> str:
       </aside>
 
       <div class="content-grid">
-        <section class="panel">
+        <section id="answerPanel" class="panel">
           <h2>答案与备件</h2>
           <div class="answer-layout">
             <div id="answer" class="answer-box">尚未运行。</div>
@@ -1345,12 +1444,12 @@ def build_redesigned_index_html() -> str:
           </div>
         </section>
 
-        <section class="panel">
+        <section id="retrievalPanel" class="panel hidden">
           <h2>多路召回</h2>
           <div id="retrievalBoard" class="retrieval-board"></div>
         </section>
 
-        <section class="panel">
+        <section id="inspectorPanel" class="panel">
           <h2>阶段返回</h2>
           <div class="inspector">
             <div id="stageSummary"></div>
@@ -1358,7 +1457,7 @@ def build_redesigned_index_html() -> str:
           </div>
         </section>
 
-        <section class="panel">
+        <section id="evidencePanel" class="panel hidden">
           <h2>答案生成依据</h2>
           <div id="selectedEvidence" class="part-box"><div class="empty">暂无选中证据</div></div>
         </section>
@@ -1492,10 +1591,16 @@ def build_redesigned_index_html() -> str:
           <label for="llmApiKey">LLM API Key</label>
           <input id="llmApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
         </div>
+        <div class="full">
+          <label for="configImportFile">配置文件导入</label>
+          <input id="configImportFile" type="file" accept="application/json,.json">
+        </div>
       </div>
       <div class="modal-foot">
         <button id="loadDemoBtn" class="secondary">加载 Demo 配置</button>
         <button id="docArborEnvBtn" class="secondary">填入 DocArbor Env</button>
+        <button id="exportConfigBtn" class="secondary">导出配置</button>
+        <button id="importConfigBtn" class="secondary">导入配置</button>
         <button id="previewConfigBtn" class="secondary">预览配置</button>
         <button id="saveConfigBtn">保存配置</button>
       </div>
@@ -1511,6 +1616,7 @@ def build_redesigned_index_html() -> str:
     const dashscopeBaseUrl = __DASHSCOPE_BASE_URL_JSON__;
     const openaiBaseUrl = __OPENAI_BASE_URL_JSON__;
     const localEmbeddingBaseUrl = "http://127.0.0.1:8888/v1";
+    const savedConfigKey = "waji-rag-workbench-config-v1";
     const channels = [
       ["work_orders", "历史工单", "doc_type=work_order；字段权重优先 reported_issue，再看 solution/raw_text。"],
       ["manual_typical_faults", "典型故障手册", "doc_type=manual_typical_fault；优先 fault_title/file_name，再看正文 chunk。"],
@@ -1530,7 +1636,9 @@ def build_redesigned_index_html() -> str:
       selectedStage: "config",
       lastResult: null,
       currentTaskId: null,
-      tasks: []
+      tasks: [],
+      activeView: "build",
+      buildPollTimer: null
     };
 
     function configOverrides() {
@@ -1591,6 +1699,170 @@ def build_redesigned_index_html() -> str:
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
     }
 
+    function currentConfigSnapshot() {
+      return {
+        version: 1,
+        saved_at: new Date().toISOString(),
+        ui: {
+          active_view: appState.activeView,
+          query: $("query").value,
+          top_k: $("topK").value,
+          evidence_top_k: $("evidenceTopK").value
+        },
+        database_url: $("databaseUrl").value,
+        env_file: $("envFile").value,
+        work_order_dir: $("workOrderDir").value,
+        manual_dir: $("manualDir").value,
+        work_order_limit: $("workOrderLimit").value,
+        manual_limit: $("manualLimit").value,
+        max_manual_chars: $("maxManualChars").value,
+        ingest_reset: $("ingestReset").checked,
+        embedding: {
+          enabled: $("enableEmbedding").checked,
+          provider: $("embeddingProvider").value,
+          model: $("embeddingModel").value,
+          dimensions: $("embeddingDimensions").value,
+          batch_size: $("embeddingBatchSize").value,
+          base_url: $("embeddingBaseUrl").value,
+          no_proxy_hosts: $("embeddingNoProxyHosts").value,
+          api_key: $("embeddingApiKey").value
+        },
+        rerank: {
+          enabled: $("enableRerank").checked,
+          model: $("rerankModel").value,
+          base_url: $("rerankBaseUrl").value,
+          no_proxy_hosts: $("rerankNoProxyHosts").value,
+          api_key: $("rerankApiKey").value
+        },
+        llm: {
+          enabled: $("enableLlm").checked,
+          provider: $("llmProvider").value,
+          model: $("llmModel").value,
+          base_url: $("llmBaseUrl").value,
+          no_proxy_hosts: $("llmNoProxyHosts").value,
+          api_key: $("llmApiKey").value
+        }
+      };
+    }
+
+    function applyConfigSnapshot(config, options = {}) {
+      if (!config || typeof config !== "object") throw new Error("配置文件格式不正确");
+      const ui = config.ui || {};
+      setInputValue("databaseUrl", config.database_url);
+      setInputValue("envFile", config.env_file);
+      setInputValue("workOrderDir", config.work_order_dir);
+      setInputValue("manualDir", config.manual_dir);
+      setInputValue("workOrderLimit", config.work_order_limit);
+      setInputValue("manualLimit", config.manual_limit);
+      setInputValue("maxManualChars", config.max_manual_chars);
+      setCheckboxValue("ingestReset", config.ingest_reset);
+      setInputValue("query", ui.query);
+      setInputValue("topK", ui.top_k);
+      setInputValue("evidenceTopK", ui.evidence_top_k);
+
+      const embedding = config.embedding || {};
+      setCheckboxValue("enableEmbedding", embedding.enabled);
+      setInputValue("embeddingProvider", embedding.provider);
+      setInputValue("embeddingModel", embedding.model);
+      setInputValue("embeddingDimensions", embedding.dimensions);
+      setInputValue("embeddingBatchSize", embedding.batch_size);
+      setInputValue("embeddingBaseUrl", embedding.base_url);
+      setInputValue("embeddingNoProxyHosts", embedding.no_proxy_hosts);
+      setInputValue("embeddingApiKey", embedding.api_key);
+
+      const rerank = config.rerank || {};
+      setCheckboxValue("enableRerank", rerank.enabled);
+      setInputValue("rerankModel", rerank.model);
+      setInputValue("rerankBaseUrl", rerank.base_url);
+      setInputValue("rerankNoProxyHosts", rerank.no_proxy_hosts);
+      setInputValue("rerankApiKey", rerank.api_key);
+
+      const llm = config.llm || {};
+      setCheckboxValue("enableLlm", llm.enabled);
+      setInputValue("llmProvider", llm.provider);
+      setInputValue("llmModel", llm.model);
+      setInputValue("llmBaseUrl", llm.base_url);
+      setInputValue("llmNoProxyHosts", llm.no_proxy_hosts);
+      setInputValue("llmApiKey", llm.api_key);
+
+      if (ui.active_view) switchView(ui.active_view === "qa" ? "qa" : "build");
+      if (!options.silent) setStatus("配置已导入", "success");
+    }
+
+    function setInputValue(id, value) {
+      if (value === undefined || value === null) return;
+      $(id).value = String(value);
+    }
+
+    function setCheckboxValue(id, value) {
+      if (value === undefined || value === null) return;
+      $(id).checked = Boolean(value);
+    }
+
+    function saveConfigToLocalStorage() {
+      try {
+        localStorage.setItem(savedConfigKey, JSON.stringify(currentConfigSnapshot()));
+        return true;
+      } catch (error) {
+        setStatus(`配置保存失败：${error}`, "error");
+        return false;
+      }
+    }
+
+    function restoreConfigFromLocalStorage() {
+      try {
+        const raw = localStorage.getItem(savedConfigKey);
+        if (!raw) return false;
+        applyConfigSnapshot(JSON.parse(raw), {silent: true});
+        setStatus("已恢复上次保存的配置", "success");
+        return true;
+      } catch (error) {
+        setStatus(`配置恢复失败：${error}`, "error");
+        return false;
+      }
+    }
+
+    function exportConfig() {
+      const blob = new Blob([JSON.stringify(currentConfigSnapshot(), null, 2)], {type: "application/json"});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `waji-rag-config-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      saveConfigToLocalStorage();
+      setStatus("配置已导出", "success");
+    }
+
+    async function importConfig() {
+      const file = $("configImportFile").files && $("configImportFile").files[0];
+      if (!file) {
+        setStatus("请先选择一个 JSON 配置文件", "error");
+        return;
+      }
+      const text = await file.text();
+      applyConfigSnapshot(JSON.parse(text));
+      saveConfigToLocalStorage();
+    }
+
+    function bindAutoSave() {
+      const ids = [
+        "databaseUrl", "envFile", "workOrderDir", "manualDir", "workOrderLimit", "manualLimit", "maxManualChars",
+        "ingestReset", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
+        "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
+        "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey", "enableLlm",
+        "llmProvider", "llmModel", "llmBaseUrl", "llmNoProxyHosts", "llmApiKey"
+      ];
+      for (const id of ids) {
+        const element = $(id);
+        if (!element) continue;
+        element.addEventListener("change", saveConfigToLocalStorage);
+        element.addEventListener("input", saveConfigToLocalStorage);
+      }
+    }
+
     function ingestPayload() {
       return {
         ...commonPayload(),
@@ -1635,6 +1907,23 @@ def build_redesigned_index_html() -> str:
       $("status").textContent = text;
     }
 
+    function switchView(view) {
+      appState.activeView = view;
+      $("buildView").classList.toggle("active", view === "build");
+      $("qaView").classList.toggle("active", view === "qa");
+      $("buildViewBtn").classList.toggle("active", view === "build");
+      $("qaViewBtn").classList.toggle("active", view === "qa");
+      if (view === "build" && !["config", "init", "ingest"].includes(appState.selectedStage)) {
+        appState.selectedStage = "ingest";
+      }
+      if (view === "qa" && ["config", "init", "ingest"].includes(appState.selectedStage)) {
+        appState.selectedStage = appState.lastResult ? "retrieval" : "retrieval";
+      }
+      renderStages();
+      renderStageInspector();
+      saveConfigToLocalStorage();
+    }
+
     function setStage(id, status, data = null, summary = "") {
       appState.stages[id] = {status, data, summary};
       appState.selectedStage = id;
@@ -1665,6 +1954,8 @@ def build_redesigned_index_html() -> str:
         `;
         button.addEventListener("click", () => {
           appState.selectedStage = id;
+          if (["config", "init", "ingest"].includes(id)) appState.activeView = "build";
+          if (["retrieval", "rerank", "answer"].includes(id)) appState.activeView = "qa";
           renderStages();
           renderStageInspector();
         });
@@ -1675,6 +1966,11 @@ def build_redesigned_index_html() -> str:
     function renderStageInspector() {
       const [stageId, title, note] = stageOrder.find(([id]) => id === appState.selectedStage) || stageOrder[0];
       const state = appState.stages[stageId] || {status: "pending", data: null, summary: ""};
+      $("buildView").classList.toggle("active", appState.activeView === "build");
+      $("qaView").classList.toggle("active", appState.activeView === "qa");
+      $("buildViewBtn").classList.toggle("active", appState.activeView === "build");
+      $("qaViewBtn").classList.toggle("active", appState.activeView === "qa");
+      renderVisiblePanels(stageId);
       $("stageSummary").innerHTML = `
         <div class="evidence-row">
           <div class="row-title">${escapeHtml(title)}</div>
@@ -1683,6 +1979,54 @@ def build_redesigned_index_html() -> str:
         </div>
       `;
       $("stageJson").textContent = JSON.stringify(state.data || {}, null, 2);
+    }
+
+    function renderVisiblePanels(stageId) {
+      const showAnswer = appState.activeView === "qa" && stageId === "answer";
+      const showRetrieval = appState.activeView === "qa" && stageId === "retrieval";
+      const showEvidence = appState.activeView === "qa" && stageId === "rerank";
+      const showInspector = !showAnswer && !showRetrieval && !showEvidence;
+      $("answerPanel").classList.toggle("hidden", !showAnswer);
+      $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
+      $("evidencePanel").classList.toggle("hidden", !showEvidence);
+      $("inspectorPanel").classList.toggle("hidden", !showInspector);
+    }
+
+    function renderBuildProgress(payload = {}) {
+      const progress = payload.progress || {};
+      const report = payload.report || {};
+      const counts = progress.counts || report || {};
+      const percent = progress.percent ?? (report.elapsed_seconds !== undefined ? 100 : 0);
+      $("buildProgressBar").style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
+      $("buildProgressText").textContent = progress.message || payload.summary || "等待构建任务。";
+      $("buildCurrentFile").textContent = progress.current_file ? `当前文件：${progress.current_file}` : "";
+      $("buildSources").innerHTML = `
+        工单目录：${escapeHtml(report.work_order_dir || $("workOrderDir").value || "未配置")}<br>
+        手册目录：${escapeHtml(report.manual_dir || $("manualDir").value || "未配置")}<br>
+        文件进度：${escapeHtml(progress.processed_files ?? "-")} / ${escapeHtml(progress.total_files ?? "-")}
+      `;
+      renderBuildStats(counts, progress);
+    }
+
+    function renderBuildStats(counts = {}, progress = {}) {
+      const failedValue = Array.isArray(counts.failed_items) ? counts.failed_items.length : (counts.failed_items ?? progress.failed_count ?? 0);
+      const stats = [
+        ["工单文件", counts.work_order_files ?? 0],
+        ["已解析工单", counts.work_orders ?? 0],
+        ["备件记录", counts.part_records ?? 0],
+        ["手册文件", counts.manual_files ?? 0],
+        ["手册块", counts.manual_chunks ?? 0],
+        ["索引文档", counts.total_documents ?? 0],
+        ["词项行", counts.term_rows ?? 0],
+        ["向量", counts.embeddings ?? 0],
+        ["失败", failedValue]
+      ];
+      $("buildStats").innerHTML = stats.map(([label, value]) => `
+        <div class="stat-card">
+          <div class="stat-value">${escapeHtml(value)}</div>
+          <div class="row-meta">${escapeHtml(label)}</div>
+        </div>
+      `).join("");
     }
 
     async function refreshTasks(options = {}) {
@@ -1738,10 +2082,13 @@ def build_redesigned_index_html() -> str:
       if (task.query) $("query").value = task.query;
       setStage("config", "done", task.request || {}, "已载入任务请求");
       if (task.task_type === "build") {
+        appState.activeView = "build";
         renderBuildTaskResult(task);
       } else if (task.task_type === "search") {
+        appState.activeView = "qa";
         renderSearchResult(task.result || {});
       } else {
+        appState.activeView = "qa";
         renderPipelineResult(task.result || {});
       }
       if (task.status === "failed") {
@@ -1752,12 +2099,42 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderBuildTaskResult(task) {
-      const status = task.status === "failed" ? "error" : task.status === "completed_with_errors" ? "fallback" : "done";
+      const status = task.status === "running" ? "active" : task.status === "failed" ? "error" : task.status === "completed_with_errors" ? "fallback" : "done";
+      renderBuildProgress(task.result || {});
       setStage("ingest", status, task.result || {}, task.summary || "构建任务已完成");
       $("answer").textContent = task.summary || "构建任务已完成。可以继续发起检索或回答任务。";
       renderParts([]);
       renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
       renderSelectedEvidence([]);
+      if (task.status === "running" && !appState.buildPollTimer) startBuildPolling(task.id);
+    }
+
+    function startBuildPolling(taskId) {
+      stopBuildPolling();
+      appState.buildPollTimer = window.setInterval(async () => {
+        try {
+          const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+          const task = data.task;
+          if (!task) return;
+          appState.currentTaskId = task.id;
+          renderBuildTaskResult(task);
+          await refreshTasks({quiet: true});
+          if (task.status !== "running") {
+            stopBuildPolling();
+            setStatus(`构建任务 #${task.id} ${task.status}`, task.status === "failed" ? "error" : "success");
+          }
+        } catch (error) {
+          stopBuildPolling();
+          setStatus(String(error), "error");
+        }
+      }, 1200);
+    }
+
+    function stopBuildPolling() {
+      if (appState.buildPollTimer) {
+        window.clearInterval(appState.buildPollTimer);
+        appState.buildPollTimer = null;
+      }
     }
 
     function taskTypeLabel(taskType) {
@@ -1897,6 +2274,8 @@ def build_redesigned_index_html() -> str:
 
     async function runBuild(button) {
       button.disabled = true;
+      switchView("build");
+      stopBuildPolling();
       resetStages();
       try {
         setStatus("配置预览中");
@@ -1914,15 +2293,17 @@ def build_redesigned_index_html() -> str:
 
         setStatus("构建索引中");
         setStage("ingest", "active", ingestPayload(), "解析工单、清洗 HTML、写入索引");
-        const ingestResult = await postJson("/api/ingest-db", ingestPayload());
+        const ingestResult = await postJson("/api/ingest-db", {...ingestPayload(), async: true});
         appState.currentTaskId = ingestResult.task_id || null;
-        setStage("ingest", "done", ingestResult, ingestResult.summary || "入库完成");
+        renderBuildProgress({progress: {message: ingestResult.summary || "构建任务已启动", percent: 0}});
+        setStage("ingest", "active", ingestResult, ingestResult.summary || "构建任务已启动");
         $("answer").textContent = "构建完成。下一步可以点击“检索”查看多路召回结果，或点击“回答”生成最终答案。";
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
         renderSelectedEvidence([]);
         await refreshTasks({quiet: true});
-        setStatus("构建完成", "success");
+        if (appState.currentTaskId) startBuildPolling(appState.currentTaskId);
+        setStatus("构建任务已启动，可在左侧任务记录查看进度", "success");
       } catch (error) {
         setStatus(String(error), "error");
         const current = appState.selectedStage || "ingest";
@@ -1934,6 +2315,7 @@ def build_redesigned_index_html() -> str:
 
     async function runFullFlow(button) {
       button.disabled = true;
+      switchView("build");
       resetStages();
       try {
         setStatus("配置预览中");
@@ -1956,6 +2338,7 @@ def build_redesigned_index_html() -> str:
         setStage("ingest", "done", ingestResult, ingestResult.summary || "入库完成");
 
         setStatus("多路召回与答案生成中");
+        switchView("qa");
         setStage("retrieval", "active", queryPayload(), "分路召回证据");
         const askResult = await postJson("/api/ask-db", queryPayload());
         appState.currentTaskId = askResult.task_id || appState.currentTaskId;
@@ -1975,6 +2358,7 @@ def build_redesigned_index_html() -> str:
     async function runSearch(button) {
       button.disabled = true;
       try {
+        switchView("qa");
         setStatus("检索中");
         setStage("retrieval", "active", queryPayload(), "分路召回证据");
         const result = await postJson("/api/search-db", queryPayload());
@@ -1993,6 +2377,7 @@ def build_redesigned_index_html() -> str:
     async function runAsk(button) {
       button.disabled = true;
       try {
+        switchView("qa");
         setStatus("问答中");
         const result = await postJson("/api/ask-db", queryPayload());
         appState.currentTaskId = result.task_id || null;
@@ -2043,7 +2428,7 @@ def build_redesigned_index_html() -> str:
       }
     }
 
-    function applyDemoDefaults() {
+    function applyDemoDefaults(options = {}) {
       $("workOrderDir").value = demoWorkOrderDir;
       $("manualDir").value = demoManualDir;
       $("query").value = defaultQuery;
@@ -2067,6 +2452,7 @@ def build_redesigned_index_html() -> str:
       $("llmNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("rerankApiKey").value = "";
       $("llmApiKey").value = "";
+      if (options.save !== false) saveConfigToLocalStorage();
       setStatus("已加载 Demo 配置", "success");
     }
 
@@ -2079,6 +2465,7 @@ def build_redesigned_index_html() -> str:
     $("openConfigBtn").addEventListener("click", () => $("configModal").classList.add("open"));
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
     $("saveConfigBtn").addEventListener("click", () => {
+      saveConfigToLocalStorage();
       $("configModal").classList.remove("open");
       setStatus("配置已保存到页面状态", "success");
     });
@@ -2091,6 +2478,10 @@ def build_redesigned_index_html() -> str:
       setStatus("已填入 DocArbor Env 路径", "success");
     });
     $("embeddingProvider").addEventListener("change", () => applyEmbeddingProviderDefaults(true));
+    $("exportConfigBtn").addEventListener("click", exportConfig);
+    $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
+    $("buildViewBtn").addEventListener("click", () => switchView("build"));
+    $("qaViewBtn").addEventListener("click", () => switchView("qa"));
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
     $("refreshTasksBtn").addEventListener("click", () => refreshTasks());
     $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
@@ -2111,7 +2502,11 @@ def build_redesigned_index_html() -> str:
       $("version").textContent = data.waji_rag_version + " · " + data.platform;
     }).catch(() => {});
     resetStages();
-    applyDemoDefaults();
+    applyDemoDefaults({save: false});
+    bindAutoSave();
+    const restoredConfig = restoreConfigFromLocalStorage();
+    renderBuildProgress({});
+    if (!restoredConfig) switchView("build");
     refreshTasks({quiet: true});
   </script>
 </body>
@@ -2215,18 +2610,24 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         task_id: int | None = None
         try:
             task_id = create_task(database, "build", None, task_request_payload(payload))
-            options = PgIngestOptions(
-                database=database,
-                work_order_dir=optional_path(payload.get("work_order_dir")),
-                manual_dir=optional_path(payload.get("manual_dir")),
-                config_path=optional_path(payload.get("config")),
-                config_overrides=object_payload(payload.get("config_overrides")),
-                env_path=optional_path(payload.get("env_file")),
-                reset=bool(payload.get("reset")),
-                work_order_limit=optional_int(payload.get("work_order_limit")),
-                manual_limit=optional_int(payload.get("manual_limit")),
-                max_manual_chars=int(payload.get("max_manual_chars") or 1800),
-            )
+            if bool(payload.get("async")):
+                update_task_progress(
+                    database,
+                    task_id,
+                    {"phase": "queued", "message": "构建任务已进入后台队列", "percent": 0, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
+                    "构建任务已启动",
+                )
+                thread = threading.Thread(
+                    target=run_ingest_task,
+                    args=(database, task_id, payload),
+                    name=f"waji-ingest-{task_id}",
+                    daemon=True,
+                )
+                thread.start()
+                self._send_json({"task_id": task_id, "summary": "构建任务已启动", "status": "running"}, status=HTTPStatus.ACCEPTED)
+                return
+
+            options = ingest_options_from_payload(payload, database)
             report = PgIngestBuilder(options).ingest()
             response = {"task_id": task_id, "summary": format_ingest_report_summary(report), "report": report.to_dict()}
             finish_task(
@@ -2402,6 +2803,51 @@ def task_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return safe_payload
 
 
+def ingest_options_from_payload(
+    payload: dict[str, Any],
+    database: DatabaseOptions,
+    *,
+    progress_callback: Any | None = None,
+) -> PgIngestOptions:
+    """Build ingest options from a web request payload."""
+
+    return PgIngestOptions(
+        database=database,
+        work_order_dir=optional_path(payload.get("work_order_dir")),
+        manual_dir=optional_path(payload.get("manual_dir")),
+        config_path=optional_path(payload.get("config")),
+        config_overrides=object_payload(payload.get("config_overrides")),
+        env_path=optional_path(payload.get("env_file")),
+        reset=bool(payload.get("reset")),
+        work_order_limit=optional_int(payload.get("work_order_limit")),
+        manual_limit=optional_int(payload.get("manual_limit")),
+        max_manual_chars=int(payload.get("max_manual_chars") or 1800),
+        progress_callback=progress_callback,
+    )
+
+
+def run_ingest_task(database: DatabaseOptions, task_id: int, payload: dict[str, Any]) -> None:
+    """Run one ingest task in the background and persist progress."""
+
+    try:
+        options = ingest_options_from_payload(
+            payload,
+            database,
+            progress_callback=lambda progress: update_task_progress(database, task_id, progress, str(progress.get("message") or "构建中")),
+        )
+        report = PgIngestBuilder(options).ingest()
+        response = {"task_id": task_id, "summary": format_ingest_report_summary(report), "report": report.to_dict()}
+        finish_task(
+            database,
+            task_id,
+            "completed_with_errors" if report.failed_items else "completed",
+            response,
+            str(response["summary"]),
+        )
+    except Exception as exc:  # noqa: BLE001 - background task must persist failure.
+        mark_task_failed(database, task_id, exc)
+
+
 def create_task(database: DatabaseOptions, task_type: str, query: str | None, request: dict[str, Any]) -> int:
     """Create a persistent workbench task and return its task ID."""
 
@@ -2421,6 +2867,25 @@ def create_task(database: DatabaseOptions, task_type: str, query: str | None, re
                 raise RuntimeError("failed to create task")
         conn.commit()
     return int(row[0])
+
+
+def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict[str, object], summary: str) -> None:
+    """Persist running progress for a task."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                UPDATE rag_tasks
+                SET updated_at = now(), status = %s, result = %s, summary = %s
+                WHERE id = %s
+                """,
+                ("running", json_param({"task_id": task_id, "progress": redact_secrets(progress)}), summary, task_id),
+            )
+            if cur.rowcount != 1:
+                raise LookupError(f"task not found: {task_id}")
+        conn.commit()
 
 
 def finish_task(
