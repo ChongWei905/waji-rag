@@ -2466,11 +2466,7 @@ def build_redesigned_index_html() -> str:
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
     $("saveConfigBtn").addEventListener("click", () => {
       saveConfigToLocalStorage();
-      $("configModal").classList.remove("open");
       setStatus("配置已保存到页面状态", "success");
-    });
-    $("configModal").addEventListener("click", (event) => {
-      if (event.target.id === "configModal") $("configModal").classList.remove("open");
     });
     $("loadDemoBtn").addEventListener("click", applyDemoDefaults);
     $("docArborEnvBtn").addEventListener("click", () => {
