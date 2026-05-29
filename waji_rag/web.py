@@ -28,6 +28,7 @@ from waji_rag.pg_index import (
     PgPipelineOptions,
     PgSchemaManager,
     PgSearchOptions,
+    clear_application_data,
     connect,
     create_task_schema,
     format_ingest_report_summary,
@@ -831,6 +832,11 @@ def build_redesigned_index_html() -> str:
       background: transparent;
       border-color: var(--line);
     }
+    button.danger {
+      color: #fff;
+      background: var(--danger);
+      border-color: var(--danger);
+    }
     input, select, textarea {
       width: 100%;
       border: 1px solid var(--line);
@@ -883,6 +889,16 @@ def build_redesigned_index_html() -> str:
       align-items: center;
       flex-wrap: wrap;
       gap: 8px;
+    }
+    .panel-title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .panel-title-row h2 {
+      margin: 0;
     }
     .header-actions button, .query-actions button {
       white-space: nowrap;
@@ -1381,7 +1397,10 @@ def build_redesigned_index_html() -> str:
 
     <section id="buildView" class="view active">
       <div class="panel">
-        <h2>索引构建</h2>
+        <div class="panel-title-row">
+          <h2>索引构建</h2>
+          <button id="clearDataBtn" class="danger">清空数据</button>
+        </div>
         <div class="build-dashboard">
           <div>
             <div class="doc-info">
@@ -1996,6 +2015,7 @@ def build_redesigned_index_html() -> str:
       const progress = payload.progress || {};
       const report = payload.report || {};
       const counts = progress.counts || report || {};
+      const timings = progress.timing_seconds || report.timing_seconds || {};
       const percent = progress.percent ?? (report.elapsed_seconds !== undefined ? 100 : 0);
       $("buildProgressBar").style.width = `${Math.max(0, Math.min(100, Number(percent) || 0))}%`;
       $("buildProgressText").textContent = progress.message || payload.summary || "等待构建任务。";
@@ -2005,10 +2025,10 @@ def build_redesigned_index_html() -> str:
         手册目录：${escapeHtml(report.manual_dir || $("manualDir").value || "未配置")}<br>
         文件进度：${escapeHtml(progress.processed_files ?? "-")} / ${escapeHtml(progress.total_files ?? "-")}
       `;
-      renderBuildStats(counts, progress);
+      renderBuildStats(counts, progress, timings);
     }
 
-    function renderBuildStats(counts = {}, progress = {}) {
+    function renderBuildStats(counts = {}, progress = {}, timings = {}) {
       const failedValue = Array.isArray(counts.failed_items) ? counts.failed_items.length : (counts.failed_items ?? progress.failed_count ?? 0);
       const stats = [
         ["工单文件", counts.work_order_files ?? 0],
@@ -2019,7 +2039,11 @@ def build_redesigned_index_html() -> str:
         ["索引文档", counts.total_documents ?? 0],
         ["词项行", counts.term_rows ?? 0],
         ["向量", counts.embeddings ?? 0],
-        ["失败", failedValue]
+        ["失败", failedValue],
+        ["解析耗时", formatSeconds(timings.parse_seconds)],
+        ["BM25耗时", formatSeconds(timings.bm25_seconds)],
+        ["Embedding耗时", formatSeconds(timings.embedding_seconds)],
+        ["PG写入耗时", formatSeconds(timings.pg_write_seconds)]
       ];
       $("buildStats").innerHTML = stats.map(([label, value]) => `
         <div class="stat-card">
@@ -2405,6 +2429,37 @@ def build_redesigned_index_html() -> str:
       }
     }
 
+    async function clearData(button) {
+      const confirmed = window.confirm("确定清空当前数据库中的索引数据、构建记录和任务记录吗？此操作不可撤销。");
+      if (!confirmed) return;
+      button.disabled = true;
+      stopBuildPolling();
+      try {
+        setStatus("正在清空数据库数据");
+        const result = await postJson("/api/clear-data", taskPayload({confirm: true}));
+        appState.currentTaskId = null;
+        appState.lastResult = null;
+        appState.tasks = [];
+        resetStages();
+        renderBuildProgress({});
+        renderTaskList();
+        renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
+        renderParts([]);
+        renderSelectedEvidence([]);
+        $("answer").textContent = "数据已清空。可以重新构建索引。";
+        setStage("init", "done", result, "数据库数据已清空");
+        await refreshTasks({quiet: true});
+        const beforeCounts = result.before_counts || {};
+        const clearedRows = Object.values(beforeCounts).reduce((total, value) => total + Number(value || 0), 0);
+        setStatus(`数据已清空，删除前共有 ${clearedRows} 行记录`, "success");
+      } catch (error) {
+        setStatus(String(error), "error");
+        setStage("init", "error", {error: String(error)}, "清空数据失败");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     function applyEmbeddingProviderDefaults(force = false) {
       const provider = $("embeddingProvider").value;
       const baseInput = $("embeddingBaseUrl");
@@ -2456,6 +2511,12 @@ def build_redesigned_index_html() -> str:
       setStatus("已加载 Demo 配置", "success");
     }
 
+    function formatSeconds(value) {
+      const number = Number(value || 0);
+      if (!Number.isFinite(number) || number <= 0) return "0.00s";
+      return `${number.toFixed(number >= 10 ? 1 : 2)}s`;
+    }
+
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
@@ -2480,6 +2541,7 @@ def build_redesigned_index_html() -> str:
     $("qaViewBtn").addEventListener("click", () => switchView("qa"));
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
     $("refreshTasksBtn").addEventListener("click", () => refreshTasks());
+    $("clearDataBtn").addEventListener("click", () => clearData($("clearDataBtn")));
     $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
     $("runSearchBtn").addEventListener("click", () => runSearch($("runSearchBtn")));
     $("runAnswerBtn").addEventListener("click", () => runAsk($("runAnswerBtn")));
@@ -2558,6 +2620,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/init-db":
             self._handle_init_db()
             return
+        if parsed.path == "/api/clear-data":
+            self._handle_clear_data()
+            return
         if parsed.path == "/api/ingest-db":
             self._handle_ingest_db()
             return
@@ -2596,6 +2661,17 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         try:
             result = PgSchemaManager(database_from_payload(payload)).initialize(reset=bool(payload.get("reset")))
+            self._send_json(result)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_clear_data(self) -> None:
+        payload = self._read_json()
+        if not bool(payload.get("confirm")):
+            self._send_json({"error": "confirm=true is required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            result = clear_application_data(database_from_payload(payload))
             self._send_json(result)
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)

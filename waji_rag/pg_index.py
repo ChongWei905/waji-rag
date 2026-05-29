@@ -38,6 +38,17 @@ DEFAULT_BM25_K1 = 1.5
 DEFAULT_BM25_B = 0.75
 MANUAL_SUFFIXES = {".html", ".htm", ".md", ".markdown"}
 FAULT_CODE_IN_QUERY = re.compile(r"\b[A-Za-z]\d{3,}[A-Za-z0-9_-]*\b")
+APPLICATION_DATA_TABLES = (
+    "rag_tasks",
+    "document_embeddings",
+    "document_terms",
+    "document_fields",
+    "documents",
+    "manual_chunks",
+    "part_evidence",
+    "work_orders",
+    "ingest_runs",
+)
 
 
 @dataclass(slots=True)
@@ -89,13 +100,16 @@ class PgIngestReport:
     term_rows: int = 0
     embeddings: int = 0
     html_converted_in_memory: int = 0
+    timing_seconds: dict[str, float] = field(default_factory=dict)
     failed_items: list[dict[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable report dictionary."""
 
-        return asdict(self)
+        payload = asdict(self)
+        payload["timing_seconds"] = {key: round(value, 3) for key, value in self.timing_seconds.items()}
+        return payload
 
 
 @dataclass(slots=True)
@@ -196,6 +210,8 @@ class PgIngestBuilder:
             env_path=options.env_path,
         )
         self.embedding_provider = build_embedding_provider(self.config)
+        self.pending_embeddings: list[tuple[int, IndexDocument]] = []
+        self.processed_file_count = 0
 
     def ingest(self) -> PgIngestReport:
         """Run schema initialization, parse files, and write searchable records."""
@@ -240,8 +256,10 @@ class PgIngestBuilder:
                 run_id = create_ingest_run(cur, self.config)
                 if work_order_dir is not None:
                     self._ingest_work_orders(cur, work_order_dir, report)
+                    self._flush_embedding_batch(cur, report)
                 if manual_dir is not None:
                     self._ingest_manuals(cur, manual_dir, report)
+                    self._flush_embedding_batch(cur, report)
                 finish_ingest_run(cur, run_id, report)
             conn.commit()
 
@@ -271,6 +289,7 @@ class PgIngestBuilder:
 
         for file_index, txt_path in enumerate(txt_files, start=1):
             try:
+                parse_started = time.perf_counter()
                 self._emit_progress(
                     self._progress_payload(
                         phase="work_orders",
@@ -283,25 +302,31 @@ class PgIngestBuilder:
                 )
                 text, encoding = read_text_with_fallback(txt_path, self.options.encodings)
                 record = self.parser.parse(text, source_path=txt_path, encoding=encoding)
+                add_timing(report, "parse_seconds", time.perf_counter() - parse_started)
+
+                pg_started = time.perf_counter()
                 delete_source_records(cur, str(txt_path))
                 upsert_work_order(cur, record)
+                add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
                 report.work_orders += 1
                 if record.parse_warnings:
                     report.warnings.append(f"{txt_path}: {', '.join(record.parse_warnings)}")
 
                 documents = build_documents_for_work_order(record)
+                self.processed_file_count = file_index
                 for document in documents:
-                    document_id, term_rows = upsert_search_document(cur, document)
+                    document_id, term_rows, timings = upsert_search_document(cur, document)
+                    merge_timings(report, timings)
                     report.total_documents += 1
                     report.term_rows += term_rows
-                    if maybe_store_embedding(cur, document_id, document, self.config, self.embedding_provider, report):
-                        report.embeddings += 1
+                    self._queue_embedding(cur, document_id, document, report)
                 report.part_records += len(record.parts)
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
                 report.failed_items.append(
                     {"stage": "work_order", "input": str(txt_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
             finally:
+                self.processed_file_count = max(self.processed_file_count, file_index)
                 self._emit_progress(
                     self._progress_payload(
                         phase="work_orders",
@@ -328,6 +353,7 @@ class PgIngestBuilder:
 
         for file_index, manual_path in enumerate(manual_files, start=1):
             try:
+                parse_started = time.perf_counter()
                 self._emit_progress(
                     self._progress_payload(
                         phase="manuals",
@@ -345,11 +371,15 @@ class PgIngestBuilder:
                 )
                 metadata = infer_manual_metadata(manual_path, root)
                 chunks = chunk_markdown(markdown_text, max_chars=max(self.options.max_manual_chars, 200))
+                add_timing(report, "parse_seconds", time.perf_counter() - parse_started)
                 if not chunks:
                     report.warnings.append(f"empty_manual_file: {manual_path}")
                     continue
 
+                self.processed_file_count = report.work_order_files + file_index
+                pg_started = time.perf_counter()
                 delete_source_records(cur, str(manual_path))
+                add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
                 for chunk_index, chunk_text in enumerate(chunks):
                     chunk_metadata = {
                         **metadata,
@@ -366,20 +396,23 @@ class PgIngestBuilder:
                         chunk_text=chunk_text,
                         chunk_index=chunk_index,
                     )
+                    pg_started = time.perf_counter()
                     insert_manual_chunk(cur, document, chunk_metadata)
-                    document_id, term_rows = upsert_search_document(cur, document)
+                    add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
+                    document_id, term_rows, timings = upsert_search_document(cur, document)
+                    merge_timings(report, timings)
                     report.manual_chunks += 1
                     report.total_documents += 1
                     report.term_rows += term_rows
                     if converted_from_html:
                         report.html_converted_in_memory += 1 if chunk_index == 0 else 0
-                    if maybe_store_embedding(cur, document_id, document, self.config, self.embedding_provider, report):
-                        report.embeddings += 1
+                    self._queue_embedding(cur, document_id, document, report)
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
                 report.failed_items.append(
                     {"stage": "manual", "input": str(manual_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
             finally:
+                self.processed_file_count = max(self.processed_file_count, report.work_order_files + file_index)
                 self._emit_progress(
                     self._progress_payload(
                         phase="manuals",
@@ -390,6 +423,40 @@ class PgIngestBuilder:
                         current_total=len(manual_files),
                     )
                 )
+
+    def _queue_embedding(self, cur: Any, document_id: int, document: IndexDocument, report: PgIngestReport) -> None:
+        if self.embedding_provider is None:
+            return
+        self.pending_embeddings.append((document_id, document))
+        batch_size = max(1, int(self.config.embedding.batch_size))
+        if len(self.pending_embeddings) >= batch_size:
+            self._flush_embedding_batch(cur, report)
+
+    def _flush_embedding_batch(self, cur: Any, report: PgIngestReport) -> None:
+        if not self.pending_embeddings:
+            return
+        if self.embedding_provider is None:
+            self.pending_embeddings.clear()
+            return
+
+        items = self.pending_embeddings
+        self.pending_embeddings = []
+        self._emit_progress(
+            self._progress_payload(
+                phase="embedding",
+                message=f"批量生成向量 {len(items)} 条",
+                report=report,
+            )
+        )
+        stored_count = store_embedding_batch(cur, items, self.config, self.embedding_provider, report)
+        report.embeddings += stored_count
+        self._emit_progress(
+            self._progress_payload(
+                phase="embedding",
+                message=f"已写入向量 {report.embeddings} 条",
+                report=report,
+            )
+        )
 
     def _emit_progress(self, progress: dict[str, object]) -> None:
         """Emit ingest progress when a callback was configured."""
@@ -417,6 +484,8 @@ class PgIngestBuilder:
             processed_files = current_index
         elif phase == "manuals" and current_index is not None:
             processed_files = report.work_order_files + current_index
+        elif phase == "embedding":
+            processed_files = min(total_files, self.processed_file_count)
         percent = round((processed_files / total_files) * 100, 1) if total_files else 0.0
         if phase == "completed":
             processed_files = total_files
@@ -431,6 +500,7 @@ class PgIngestBuilder:
             "processed_files": processed_files,
             "total_files": total_files,
             "counts": ingest_report_counts(report),
+            "timing_seconds": rounded_timings(report.timing_seconds),
             "failed_count": len(report.failed_items),
             "recent_failures": report.failed_items[-5:],
             "warnings": report.warnings[-5:],
@@ -830,6 +900,43 @@ def create_extensions(cur: Any) -> None:
     cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
 
 
+def clear_application_data(database: DatabaseOptions) -> dict[str, object]:
+    """Clear indexed evidence and workbench task history while keeping the schema."""
+
+    started_at = time.time()
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_extensions(cur)
+            create_schema(cur)
+            before_counts = count_application_rows(cur)
+            clear_application_data_with_cursor(cur)
+        conn.commit()
+    return {
+        "database_url": redact_database_url(database.database_url),
+        "cleared_tables": list(APPLICATION_DATA_TABLES),
+        "before_counts": before_counts,
+        "elapsed_seconds": round(time.time() - started_at, 3),
+    }
+
+
+def count_application_rows(cur: Any) -> dict[str, int]:
+    """Count rows in application data tables before cleanup."""
+
+    counts: dict[str, int] = {}
+    for table_name in APPLICATION_DATA_TABLES:
+        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+        row = cur.fetchone()
+        counts[table_name] = int(row[0]) if row else 0
+    return counts
+
+
+def clear_application_data_with_cursor(cur: Any) -> None:
+    """Truncate application data tables using an existing cursor."""
+
+    table_sql = ", ".join(APPLICATION_DATA_TABLES)
+    cur.execute(f"TRUNCATE TABLE {table_sql} RESTART IDENTITY CASCADE")
+
+
 def drop_schema_objects(cur: Any) -> None:
     """Drop application tables before a clean schema rebuild."""
 
@@ -1058,6 +1165,31 @@ def ingest_report_counts(report: PgIngestReport) -> dict[str, int]:
     }
 
 
+def add_timing(report: PgIngestReport, key: str, elapsed_seconds: float) -> None:
+    """Accumulate a positive timing value on an ingest report."""
+
+    report.timing_seconds[key] = report.timing_seconds.get(key, 0.0) + max(0.0, elapsed_seconds)
+
+
+def merge_timings(report: PgIngestReport, timings: dict[str, float]) -> None:
+    """Merge timing counters into an ingest report."""
+
+    for key, elapsed_seconds in timings.items():
+        add_timing(report, key, elapsed_seconds)
+
+
+def add_timing_value(timings: dict[str, float], key: str, elapsed_seconds: float) -> None:
+    """Accumulate a positive timing value in a plain timing dictionary."""
+
+    timings[key] = timings.get(key, 0.0) + max(0.0, elapsed_seconds)
+
+
+def rounded_timings(timings: dict[str, float]) -> dict[str, float]:
+    """Return timing counters rounded for stable JSON progress payloads."""
+
+    return {key: round(value, 3) for key, value in timings.items()}
+
+
 def delete_source_records(cur: Any, source_path: str) -> None:
     """Delete existing records for one source path before re-ingesting it."""
 
@@ -1252,10 +1384,12 @@ def insert_manual_chunk(cur: Any, document: IndexDocument, metadata: dict[str, o
     )
 
 
-def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int]:
+def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int, dict[str, float]]:
     """Insert one searchable document and its BM25 term statistics."""
 
+    timings: dict[str, float] = {}
     work_order_id = clean_string(document.metadata.get("work_order_id")) or None
+    pg_started = time.perf_counter()
     cur.execute(
         """
         INSERT INTO documents(doc_id, doc_type, title, body, work_order_id, source_path, metadata)
@@ -1287,8 +1421,10 @@ def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int]
     cur.execute("DELETE FROM document_fields WHERE document_id = %s", (document_id,))
     cur.execute("DELETE FROM document_terms WHERE document_id = %s", (document_id,))
     cur.execute("DELETE FROM document_embeddings WHERE document_id = %s", (document_id,))
+    add_timing_value(timings, "pg_write_seconds", time.perf_counter() - pg_started)
 
     term_rows = 0
+    bm25_started = time.perf_counter()
     for field_name, field_text in document.fields.items():
         terms = tokenize_text(field_text)
         field_length = len(terms)
@@ -1309,7 +1445,8 @@ def upsert_search_document(cur: Any, document: IndexDocument) -> tuple[int, int]
                 (term, document_id, field_name, tf, field_weight, field_length),
             )
             term_rows += 1
-    return document_id, term_rows
+    add_timing_value(timings, "bm25_seconds", time.perf_counter() - bm25_started)
+    return document_id, term_rows, timings
 
 
 def maybe_store_embedding(
@@ -1322,13 +1459,66 @@ def maybe_store_embedding(
 ) -> bool:
     """Store an optional embedding for one document when configured."""
 
+    return store_embedding_batch(cur, [(document_id, document)], config, provider, report) == 1
+
+
+def store_embedding_batch(
+    cur: Any,
+    items: list[tuple[int, IndexDocument]],
+    config: AppConfig,
+    provider: CommandEmbeddingProvider | OpenAICompatibleEmbeddingProvider | None,
+    report: PgIngestReport,
+) -> int:
+    """Embed and store a batch of documents, falling back to single-item retries on provider errors."""
+
     if provider is None:
-        return False
+        return 0
+    if not items:
+        return 0
+    texts = [f"{document.title}\n{document.text}" for _, document in items]
     try:
-        vector = provider.embed_texts([f"{document.title}\n{document.text}"])[0]
+        embedding_started = time.perf_counter()
+        vectors = provider.embed_texts(texts)
+        add_timing(report, "embedding_seconds", time.perf_counter() - embedding_started)
     except EmbeddingProviderError as exc:
-        report.warnings.append(f"embedding_failed:{document.doc_id}: {exc}")
-        return False
+        report.warnings.append(f"embedding_batch_failed:{len(items)}: {exc}")
+        return store_embedding_items_individually(cur, items, config, provider, report)
+
+    pg_started = time.perf_counter()
+    for (document_id, _document), vector in zip(items, vectors, strict=True):
+        insert_document_embedding(cur, document_id, config, vector)
+    add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
+    return len(items)
+
+
+def store_embedding_items_individually(
+    cur: Any,
+    items: list[tuple[int, IndexDocument]],
+    config: AppConfig,
+    provider: CommandEmbeddingProvider | OpenAICompatibleEmbeddingProvider,
+    report: PgIngestReport,
+) -> int:
+    """Retry document embeddings one by one after a failed batch request."""
+
+    stored_count = 0
+    for document_id, document in items:
+        try:
+            embedding_started = time.perf_counter()
+            vector = provider.embed_texts([f"{document.title}\n{document.text}"])[0]
+            add_timing(report, "embedding_seconds", time.perf_counter() - embedding_started)
+        except EmbeddingProviderError as exc:
+            report.warnings.append(f"embedding_failed:{document.doc_id}: {exc}")
+            continue
+        pg_started = time.perf_counter()
+        insert_document_embedding(cur, document_id, config, vector)
+        add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
+        stored_count += 1
+    return stored_count
+
+
+def insert_document_embedding(cur: Any, document_id: int, config: AppConfig, vector: list[float]) -> None:
+    """Insert or update one pgvector embedding row."""
+
     cur.execute(
         """
         INSERT INTO document_embeddings(document_id, provider, model, dimensions, embedding)
@@ -1340,7 +1530,6 @@ def maybe_store_embedding(
         """,
         (document_id, config.embedding.provider, config.embedding.model, len(vector), vector_literal(vector)),
     )
-    return True
 
 
 def search_bm25(
