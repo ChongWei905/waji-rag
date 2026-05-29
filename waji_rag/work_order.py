@@ -63,9 +63,28 @@ PART_LABELS = {
     "quantity": ("备件数量", "配件数量", "数量", "用量"),
 }
 
+OLD_NEW_PART_LABELS = {
+    "old_part_name": ("旧件备件名称", "旧件配件名称", "旧件物料名称", "旧件名称"),
+    "new_part_name": ("新件备件名称", "新件配件名称", "新件物料名称", "新件名称"),
+    "old_part_code": ("旧件物料编码", "旧件备件编码", "旧件配件编码", "旧件编码"),
+    "new_part_code": ("新件物料编码", "新件备件编码", "新件配件编码", "新件编码"),
+    "old_quantity": ("旧件数量",),
+    "new_quantity": ("新件数量",),
+}
+
+NORMALIZED_OLD_NEW_KEYS = {
+    "old_part_name": "part_name",
+    "new_part_name": "part_name",
+    "old_part_code": "part_code",
+    "new_part_code": "part_code",
+    "old_quantity": "quantity",
+    "new_quantity": "quantity",
+}
+
 NO_PART_PATTERNS = ("无", "未更换", "不涉及", "无需", "没有")
 PART_RECORD_START_KEYS = {"part_number_name", "part_number", "part_name"}
 PART_RECORD_END_KEYS = {"part_code", "quantity"}
+NUMBERED_PART_PATTERN = re.compile(r"(?m)^\s*\d+\s*[.、)]\s*")
 
 
 @dataclass(slots=True)
@@ -168,7 +187,7 @@ class WorkOrderParser:
             warnings.append("missing_reported_issue")
         if not solution:
             warnings.append("missing_solution")
-        if parts_text and not parts and not is_no_part_text(parts_text):
+        if parts_text and not parts and not is_no_part_text(parts_text) and not is_empty_part_template(parts_text):
             warnings.append("parts_section_without_structured_parts")
         if not work_order_id:
             warnings.append("missing_work_order_id")
@@ -327,6 +346,10 @@ def parse_parts(parts_text: str) -> list[PartRecord]:
     if not parts_text or is_no_part_text(parts_text):
         return []
 
+    numbered_parts = parse_numbered_block_parts(parts_text)
+    if numbered_parts:
+        return numbered_parts
+
     table_parts = parse_table_like_parts(parts_text)
     if table_parts:
         return table_parts
@@ -337,7 +360,7 @@ def parse_parts(parts_text: str) -> list[PartRecord]:
         part = parse_part_chunk(chunk)
         if has_part_signal(part):
             parts.append(part)
-    if not parts and parts_text:
+    if not parts and parts_text and not is_empty_part_template(parts_text):
         parts.append(PartRecord(raw_text=parts_text))
     return parts
 
@@ -381,6 +404,10 @@ def parse_table_like_parts(parts_text: str) -> list[PartRecord]:
 def parse_part_chunk(chunk: str) -> PartRecord:
     """Parse one part chunk with label-based extraction."""
 
+    old_new_part = parse_old_new_part_block(chunk)
+    if has_part_identity(old_new_part):
+        return old_new_part
+
     return PartRecord(
         part_number_name=extract_part_value(chunk, PART_LABELS["part_number_name"]),
         part_number=extract_part_value(chunk, PART_LABELS["part_number"]),
@@ -395,17 +422,61 @@ def extract_part_value(text: str, labels: tuple[str, ...]) -> str | None:
     """Extract one part field value by label."""
 
     label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
-    all_labels = tuple(label for labels_ in PART_LABELS.values() for label in labels_)
+    all_labels = tuple(label for labels_ in all_part_label_sets() for label in labels_)
     stop_pattern = "|".join(re.escape(label) for label in sorted(all_labels, key=len, reverse=True))
     pattern = re.compile(
         rf"(?:^|(?<=[;；,\n\s]))(?:{label_pattern})\s*[:：]\s*"
-        rf"(?P<value>.*?)(?=\s*(?:{stop_pattern})\s*[:：]|[;；,\n]|$)",
+        rf"(?P<value>.*?)(?=\s*(?:{stop_pattern})(?:\s*[:：]|$)|[;；,\n]|$)",
         flags=re.IGNORECASE | re.DOTALL,
     )
     match = pattern.search(text)
     if not match:
         return None
     return clean_value(match.group("value"))
+
+
+def parse_numbered_block_parts(parts_text: str) -> list[PartRecord]:
+    """Parse numbered old/new part blocks such as ``1. 新件备件名称: ...``."""
+
+    blocks = split_numbered_part_blocks(parts_text)
+    parts: list[PartRecord] = []
+    for block in blocks:
+        part = parse_old_new_part_block(block)
+        if has_part_identity(part):
+            parts.append(part)
+    return parts
+
+
+def parse_old_new_part_block(block: str) -> PartRecord:
+    """Parse one old/new part block and prefer new-part fields over old-part fields."""
+
+    old_part_name = extract_part_value(block, OLD_NEW_PART_LABELS["old_part_name"])
+    new_part_name = extract_part_value(block, OLD_NEW_PART_LABELS["new_part_name"])
+    old_part_code = extract_part_value(block, OLD_NEW_PART_LABELS["old_part_code"])
+    new_part_code = extract_part_value(block, OLD_NEW_PART_LABELS["new_part_code"])
+    old_quantity = extract_part_value(block, OLD_NEW_PART_LABELS["old_quantity"])
+    new_quantity = extract_part_value(block, OLD_NEW_PART_LABELS["new_quantity"])
+
+    return PartRecord(
+        part_name=first_non_empty(new_part_name, old_part_name),
+        part_code=first_non_empty(new_part_code, old_part_code),
+        quantity=first_non_empty(new_quantity, old_quantity),
+        raw_text=clean_value(block),
+    )
+
+
+def split_numbered_part_blocks(parts_text: str) -> list[str]:
+    """Split a parts section into numbered blocks."""
+
+    matches = list(NUMBERED_PART_PATTERN.finditer(parts_text))
+    blocks: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(parts_text)
+        block = clean_value(parts_text[start:end])
+        if block:
+            blocks.append(block)
+    return blocks
 
 
 def split_part_chunks(parts_text: str) -> list[str]:
@@ -454,6 +525,11 @@ def split_inline_part_records(parts_text: str) -> list[str]:
 
 def first_part_key_in_segment(segment: str) -> str | None:
     """Return the first labeled part field key found in a text segment."""
+
+    for key, labels in OLD_NEW_PART_LABELS.items():
+        label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+        if re.search(rf"(?:^|(?<=[;；,\n\s]))(?:{label_pattern})\s*[:：]", segment, flags=re.IGNORECASE):
+            return NORMALIZED_OLD_NEW_KEYS[key]
 
     for key, labels in PART_LABELS.items():
         label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
@@ -514,11 +590,38 @@ def has_part_signal(part: PartRecord) -> bool:
     )
 
 
+def has_part_identity(part: PartRecord) -> bool:
+    """Return whether a part record has an identifying name, number, or code."""
+
+    return any((part.part_number_name, part.part_number, part.part_name, part.part_code))
+
+
 def is_no_part_text(text: str) -> bool:
     """Return whether the parts text means no parts were used."""
 
     compact = re.sub(r"\s+", "", text)
     return compact in NO_PART_PATTERNS or any(pattern == compact for pattern in NO_PART_PATTERNS)
+
+
+def is_empty_part_template(text: str) -> bool:
+    """Return whether text looks like an empty structured parts template."""
+
+    blocks = split_numbered_part_blocks(clean_value(text))
+    if not blocks:
+        return False
+    return all(not has_any_labeled_part_value(block) for block in blocks)
+
+
+def has_any_labeled_part_value(text: str) -> bool:
+    """Return whether any known part label has a non-empty value."""
+
+    return any(extract_part_value(text, labels) for labels in all_part_label_sets())
+
+
+def all_part_label_sets() -> tuple[tuple[str, ...], ...]:
+    """Return all label sets that can terminate a part-field value."""
+
+    return (*PART_LABELS.values(), *OLD_NEW_PART_LABELS.values())
 
 
 def first_non_empty(*values: str | None) -> str | None:
