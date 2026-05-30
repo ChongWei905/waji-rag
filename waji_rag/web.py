@@ -63,6 +63,8 @@ DEFAULT_QUERY = (
     "相应故障需要更换备件的详细信息（备件的编号及名称，备件编码，备件数量）"
 )
 DEFAULT_SHARED_CONFIG_PATH = PROJECT_ROOT / ".git" / "info" / "waji-rag-shared-config.json"
+_TASK_SCHEMA_LOCK = threading.Lock()
+_TASK_SCHEMA_DATABASES: set[str] = set()
 
 
 INDEX_HTML = f"""<!doctype html>
@@ -5770,12 +5772,28 @@ def failed_item_key(item: object) -> tuple[str, str] | None:
     return stage, source_path
 
 
+def ensure_task_schema(database: DatabaseOptions) -> None:
+    """Create the task-history schema once per process and database URL."""
+
+    database_key = database.database_url
+    if database_key in _TASK_SCHEMA_DATABASES:
+        return
+    with _TASK_SCHEMA_LOCK:
+        if database_key in _TASK_SCHEMA_DATABASES:
+            return
+        with connect(database.database_url) as conn:
+            with conn.cursor() as cur:
+                create_task_schema(cur)
+            conn.commit()
+        _TASK_SCHEMA_DATABASES.add(database_key)
+
+
 def create_task(database: DatabaseOptions, task_type: str, query: str | None, request: dict[str, Any]) -> int:
     """Create a persistent workbench task and return its task ID."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 INSERT INTO rag_tasks(task_type, status, query, request)
@@ -5794,9 +5812,9 @@ def create_task(database: DatabaseOptions, task_type: str, query: str | None, re
 def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict[str, object], summary: str) -> None:
     """Persist running progress for a task."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 UPDATE rag_tasks
@@ -5824,9 +5842,9 @@ def update_task_result(
 ) -> None:
     """Persist a task result snapshot while preserving the existing task row."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 UPDATE rag_tasks
@@ -5843,9 +5861,9 @@ def update_task_result(
 def request_task_pause(database: DatabaseOptions, task_id: int) -> dict[str, Any]:
     """Request a running task to pause at its next checkpoint."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 UPDATE rag_tasks
@@ -5865,9 +5883,9 @@ def request_task_pause(database: DatabaseOptions, task_id: int) -> dict[str, Any
 def is_task_pause_requested(database: DatabaseOptions, task_id: int) -> bool:
     """Return whether a task has a pending pause request."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute("SELECT status FROM rag_tasks WHERE id = %s", (task_id,))
             row = cur.fetchone()
     return bool(row and str(row[0]) == "pause_requested")
@@ -5884,9 +5902,9 @@ def finish_task(
 ) -> None:
     """Persist the final state, result payload, and summary for a task."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 UPDATE rag_tasks
@@ -5917,9 +5935,9 @@ def list_tasks(database: DatabaseOptions, *, limit: int = 40) -> list[dict[str, 
     """Return recent workbench tasks without large request/result payloads."""
 
     safe_limit = max(1, min(limit, 200))
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 SELECT id, task_type, status, query, summary, error, created_at, updated_at
@@ -5950,9 +5968,9 @@ def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list
     """Return recent batch-evaluation tasks with compact result counts."""
 
     safe_limit = max(1, min(limit, 200))
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 SELECT id, task_type, status, query, summary, result, error, created_at, updated_at
@@ -5990,9 +6008,9 @@ def list_question_tabs(database: DatabaseOptions, *, limit: int = 120) -> list[d
     """Return persisted question tabs reconstructed from search and answer tasks."""
 
     safe_limit = max(1, min(limit, 300))
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 SELECT id, task_type, status, query, summary, error, created_at, updated_at
@@ -6122,9 +6140,9 @@ def max_iso_datetime(left: object, right: object) -> object:
 def get_task(database: DatabaseOptions, task_id: int) -> dict[str, Any] | None:
     """Return one workbench task with its stored request and result payloads."""
 
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
-            create_task_schema(cur)
             cur.execute(
                 """
                 SELECT id, task_type, status, query, summary, request, result, error, created_at, updated_at
