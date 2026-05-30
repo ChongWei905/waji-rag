@@ -1489,6 +1489,9 @@ def build_redesigned_index_html() -> str:
     .history-modal {
       width: min(760px, 100%);
     }
+    .batch-eval-modal {
+      width: min(1180px, 100%);
+    }
     .modal-head, .modal-foot {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
@@ -1516,6 +1519,69 @@ def build_redesigned_index_html() -> str:
       display: grid;
       gap: 12px;
     }
+    .batch-eval-body {
+      padding: 16px;
+      display: grid;
+      gap: 14px;
+    }
+    .batch-eval-controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .batch-eval-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .batch-eval-results {
+      display: grid;
+      gap: 8px;
+      max-height: min(430px, calc(100vh - 340px));
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .eval-row {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .eval-row.pass {
+      border-color: #86efac;
+      background: #f0fdf4;
+    }
+    .eval-row.fail, .eval-row.error {
+      border-color: #fecaca;
+      background: #fff1f2;
+    }
+    .eval-row.skipped {
+      border-style: dashed;
+      background: var(--soft);
+    }
+    .eval-row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+    .eval-row-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+    }
+    .eval-field {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      background: rgba(255, 255, 255, .72);
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
     .checkline {
       min-height: 38px;
       display: flex;
@@ -1540,7 +1606,7 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .eval-row-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1555,6 +1621,7 @@ def build_redesigned_index_html() -> str:
       <button id="runSearchBtn" class="secondary">检索</button>
       <button id="runAnswerBtn" class="secondary">回答</button>
       <button id="runFullFlowBtn">全流程</button>
+      <button id="openBatchEvalBtn" class="secondary">批量评测</button>
       <button id="openQuestionSidebarHeaderBtn" class="secondary">回答历史</button>
       <button id="openHistoryBtn" class="secondary">历史任务</button>
       <button id="openConfigBtn" class="secondary">配置</button>
@@ -1692,6 +1759,53 @@ def build_redesigned_index_html() -> str:
       </div>
       <div class="history-body">
         <div id="taskList" class="task-list"><div class="empty">暂无历史任务</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="batchEvalModal" class="modal-backdrop">
+    <div class="modal batch-eval-modal">
+      <div class="modal-head">
+        <h2>批量问题评测</h2>
+        <div class="actions">
+          <button id="closeBatchEvalBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div class="batch-eval-body">
+        <div>
+          <label for="batchEvalCsv">CSV 文件</label>
+          <input id="batchEvalCsv" type="file" accept=".csv,text/csv">
+          <div id="batchEvalFileMeta" class="row-meta">尚未载入 CSV。第一行会作为列名。</div>
+        </div>
+        <div class="batch-eval-controls">
+          <div>
+            <label for="batchEvalQuestionColumn">问题列</label>
+            <select id="batchEvalQuestionColumn"></select>
+          </div>
+          <div>
+            <label for="batchEvalPartNameColumn">新件备件名称列</label>
+            <select id="batchEvalPartNameColumn"></select>
+          </div>
+          <div>
+            <label for="batchEvalPartCodeColumn">新件物料编码列</label>
+            <select id="batchEvalPartCodeColumn"></select>
+          </div>
+          <div>
+            <label for="batchEvalPartQuantityColumn">新件数量列</label>
+            <select id="batchEvalPartQuantityColumn"></select>
+          </div>
+        </div>
+        <div class="batch-eval-toolbar">
+          <div id="batchEvalStatus" class="row-meta">配置列后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
+          <div class="actions">
+            <button id="runBatchEvalBtn">开始评测</button>
+            <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
+            <button id="exportBatchEvalBtn" class="secondary" disabled>导出结果</button>
+          </div>
+        </div>
+        <div class="progress-track"><div id="batchEvalProgressBar" class="progress-bar"></div></div>
+        <div id="batchEvalSummary" class="stat-grid"></div>
+        <div id="batchEvalResults" class="batch-eval-results"><div class="empty">暂无评测结果</div></div>
       </div>
     </div>
   </div>
@@ -1922,7 +2036,15 @@ def build_redesigned_index_html() -> str:
       questionTabCounter: 0,
       questionSidebarOpen: true,
       activeView: "build",
-      buildPollTimer: null
+      buildPollTimer: null,
+      batchEval: {
+        headers: [],
+        rows: [],
+        results: [],
+        running: false,
+        stopRequested: false,
+        fileName: ""
+      }
     };
 
     function stageOrderForView(view = appState.activeView) {
@@ -2268,6 +2390,397 @@ def build_redesigned_index_html() -> str:
 
     function parseCsv(value) {
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
+    }
+
+    function parseCsvFileText(text) {
+      const rows = [];
+      let row = [];
+      let cell = "";
+      let quoted = false;
+      const source = String(text || "").replace(/^\uFEFF/, "");
+      for (let index = 0; index < source.length; index += 1) {
+        const ch = source[index];
+        const next = source[index + 1];
+        if (ch === '"') {
+          if (quoted && next === '"') {
+            cell += '"';
+            index += 1;
+          } else {
+            quoted = !quoted;
+          }
+        } else if (ch === "," && !quoted) {
+          row.push(cell);
+          cell = "";
+        } else if ((ch === "\n" || ch === "\r") && !quoted) {
+          if (ch === "\r" && next === "\n") index += 1;
+          row.push(cell);
+          rows.push(row);
+          row = [];
+          cell = "";
+        } else {
+          cell += ch;
+        }
+      }
+      if (cell || row.length) {
+        row.push(cell);
+        rows.push(row);
+      }
+      const nonEmptyRows = rows.filter(item => item.some(value => String(value || "").trim()));
+      if (!nonEmptyRows.length) throw new Error("CSV 内容为空");
+      const headers = nonEmptyRows[0].map((value, index) => String(value || `列${index + 1}`).trim() || `列${index + 1}`);
+      const records = nonEmptyRows.slice(1).map(rowValues => headers.map((_header, index) => rowValues[index] ?? ""));
+      return {headers, rows: records};
+    }
+
+    async function loadBatchEvalCsv() {
+      const file = $("batchEvalCsv").files && $("batchEvalCsv").files[0];
+      if (!file) return;
+      try {
+        const parsed = parseCsvFileText(await file.text());
+        appState.batchEval.headers = parsed.headers;
+        appState.batchEval.rows = parsed.rows;
+        appState.batchEval.results = [];
+        appState.batchEval.fileName = file.name;
+        renderBatchEvalColumns();
+        renderBatchEvalResults();
+        $("batchEvalFileMeta").textContent = `${file.name} · ${parsed.rows.length} 行数据 · ${parsed.headers.length} 列`;
+        $("batchEvalStatus").textContent = "CSV 已载入，请确认列映射后开始评测。";
+        $("exportBatchEvalBtn").disabled = true;
+      } catch (error) {
+        setStatus(String(error), "error");
+        $("batchEvalStatus").textContent = String(error);
+      }
+    }
+
+    function renderBatchEvalColumns() {
+      const headers = appState.batchEval.headers || [];
+      setColumnOptions("batchEvalQuestionColumn", headers, guessColumnIndex(headers, ["问题", "query", "报修", "故障"]), false);
+      setColumnOptions("batchEvalPartNameColumn", headers, guessColumnIndex(headers, ["新件备件名称", "备件名称", "名称", "part_name"]), true);
+      setColumnOptions("batchEvalPartCodeColumn", headers, guessColumnIndex(headers, ["新件物料编码", "物料编码", "备件编码", "part_code", "编码"]), true);
+      setColumnOptions("batchEvalPartQuantityColumn", headers, guessColumnIndex(headers, ["新件数量", "备件数量", "数量", "quantity"]), true);
+    }
+
+    function setColumnOptions(id, headers, selectedIndex, allowBlank) {
+      const select = $(id);
+      const blankOption = allowBlank ? '<option value="">不使用</option>' : "";
+      select.innerHTML = blankOption + headers.map((header, index) => (
+        `<option value="${index}">${escapeHtml(index + 1)} · ${escapeHtml(header)}</option>`
+      )).join("");
+      if (selectedIndex >= 0) select.value = String(selectedIndex);
+    }
+
+    function guessColumnIndex(headers, keywords) {
+      const normalizedHeaders = headers.map(header => normalizeEvalText(header));
+      for (const keyword of keywords) {
+        const normalizedKeyword = normalizeEvalText(keyword);
+        const found = normalizedHeaders.findIndex(header => header.includes(normalizedKeyword));
+        if (found >= 0) return found;
+      }
+      return -1;
+    }
+
+    async function runBatchEval() {
+      if (appState.batchEval.running) return;
+      const rows = appState.batchEval.rows || [];
+      const questionIndex = Number($("batchEvalQuestionColumn").value);
+      if (!rows.length) {
+        setStatus("请先载入 CSV 文件", "error");
+        return;
+      }
+      if (!Number.isInteger(questionIndex) || questionIndex < 0) {
+        setStatus("请选择问题列", "error");
+        return;
+      }
+      appState.batchEval.running = true;
+      appState.batchEval.stopRequested = false;
+      appState.batchEval.results = [];
+      $("runBatchEvalBtn").disabled = true;
+      $("stopBatchEvalBtn").disabled = false;
+      $("exportBatchEvalBtn").disabled = true;
+      renderBatchEvalResults();
+      const partColumns = {
+        name: optionalColumnIndex("batchEvalPartNameColumn"),
+        code: optionalColumnIndex("batchEvalPartCodeColumn"),
+        quantity: optionalColumnIndex("batchEvalPartQuantityColumn")
+      };
+      try {
+        for (let index = 0; index < rows.length; index += 1) {
+          if (appState.batchEval.stopRequested) break;
+          const row = rows[index];
+          const rowNumber = index + 2;
+          const question = String(row[questionIndex] || "").trim();
+          const expectedParts = buildExpectedParts(row, partColumns);
+          if (!question) {
+            appState.batchEval.results.push({
+              rowNumber,
+              question: "",
+              status: "skipped",
+              expectedParts,
+              retrievedParts: [],
+              message: "问题为空"
+            });
+            renderBatchEvalResults(index + 1, rows.length);
+            continue;
+          }
+          $("batchEvalStatus").textContent = `评测中：${index + 1} / ${rows.length}`;
+          try {
+            const response = await postJson("/api/search-db", queryPayload(question));
+            const retrieval = response.result || response;
+            const retrievedParts = listPartCandidates(retrieval);
+            const match = evaluatePartRecall(expectedParts, retrievedParts);
+            appState.batchEval.results.push({
+              rowNumber,
+              question,
+              status: match.correct ? "pass" : "fail",
+              taskId: response.task_id || null,
+              expectedParts,
+              retrievedParts,
+              match
+            });
+          } catch (error) {
+            appState.batchEval.results.push({
+              rowNumber,
+              question,
+              status: "error",
+              expectedParts,
+              retrievedParts: [],
+              message: String(error)
+            });
+          }
+          renderBatchEvalResults(index + 1, rows.length);
+        }
+        $("batchEvalStatus").textContent = appState.batchEval.stopRequested ? "评测已停止" : "评测完成";
+      } finally {
+        appState.batchEval.running = false;
+        appState.batchEval.stopRequested = false;
+        $("runBatchEvalBtn").disabled = false;
+        $("stopBatchEvalBtn").disabled = true;
+        $("exportBatchEvalBtn").disabled = !appState.batchEval.results.length;
+      }
+    }
+
+    function optionalColumnIndex(id) {
+      const value = $(id).value;
+      if (value === "") return null;
+      const index = Number(value);
+      return Number.isInteger(index) && index >= 0 ? index : null;
+    }
+
+    function buildExpectedParts(row, columns) {
+      const names = splitExpectedCell(columns.name === null ? "" : row[columns.name]);
+      const codes = splitExpectedCell(columns.code === null ? "" : row[columns.code]);
+      const quantities = splitExpectedCell(columns.quantity === null ? "" : row[columns.quantity]);
+      const count = Math.max(names.length, codes.length, quantities.length);
+      const expected = [];
+      for (let index = 0; index < count; index += 1) {
+        const item = {
+          name: names[index] || "",
+          code: codes[index] || "",
+          quantity: quantities[index] || ""
+        };
+        if (item.name || item.code || item.quantity) expected.push(item);
+      }
+      return expected;
+    }
+
+    function splitExpectedCell(value) {
+      return String(value || "").split(/[，,]/).map(item => item.trim()).filter(Boolean);
+    }
+
+    function listPartCandidates(retrieval) {
+      const parts = retrieval && Array.isArray(retrieval.part_candidates) ? retrieval.part_candidates : [];
+      return parts.map(part => ({
+        name: String(part.part_name || part.part_number_name || ""),
+        code: String(part.part_code || ""),
+        quantity: String(part.quantity || ""),
+        work_order_id: String(part.work_order_id || ""),
+        source_path: String(part.source_path || "")
+      }));
+    }
+
+    function evaluatePartRecall(expectedParts, retrievedParts) {
+      if (!expectedParts.length) {
+        return {
+          correct: retrievedParts.length === 0,
+          matched: [],
+          missing: [],
+          unexpected_count: retrievedParts.length
+        };
+      }
+      const matched = [];
+      const missing = [];
+      const usedCandidateIndexes = new Set();
+      for (const expected of expectedParts) {
+        const matchedIndex = retrievedParts.findIndex((candidate, index) => (
+          !usedCandidateIndexes.has(index) && expectedPartMatches(expected, candidate)
+        ));
+        if (matchedIndex >= 0) {
+          usedCandidateIndexes.add(matchedIndex);
+          matched.push({expected, actual: retrievedParts[matchedIndex]});
+        } else {
+          missing.push(expected);
+        }
+      }
+      return {
+        correct: missing.length === 0,
+        matched,
+        missing,
+        unexpected_count: 0
+      };
+    }
+
+    function expectedPartMatches(expected, actual) {
+      return partNameMatches(expected.name, actual.name)
+        && partCodeMatches(expected.code, actual.code)
+        && partQuantityMatches(expected.quantity, actual.quantity);
+    }
+
+    function partNameMatches(expected, actual) {
+      if (!String(expected || "").trim()) return true;
+      const left = normalizeEvalText(expected);
+      const right = normalizeEvalText(actual);
+      return Boolean(left && right && (right.includes(left) || left.includes(right)));
+    }
+
+    function partCodeMatches(expected, actual) {
+      if (!String(expected || "").trim()) return true;
+      return normalizeEvalText(expected) === normalizeEvalText(actual);
+    }
+
+    function partQuantityMatches(expected, actual) {
+      if (!String(expected || "").trim()) return true;
+      const leftNumber = Number(String(expected).trim());
+      const rightNumber = Number(String(actual).trim());
+      if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber === rightNumber;
+      return normalizeEvalText(expected) === normalizeEvalText(actual);
+    }
+
+    function normalizeEvalText(value) {
+      return String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+    }
+
+    function renderBatchEvalResults(done = appState.batchEval.results.length, total = appState.batchEval.rows.length) {
+      const results = appState.batchEval.results || [];
+      const counts = {
+        total: appState.batchEval.rows.length,
+        done: results.length,
+        pass: results.filter(item => item.status === "pass").length,
+        fail: results.filter(item => item.status === "fail").length,
+        error: results.filter(item => item.status === "error").length,
+        skipped: results.filter(item => item.status === "skipped").length
+      };
+      const percent = total ? Math.round((done / total) * 100) : 0;
+      $("batchEvalProgressBar").style.width = `${Math.min(Math.max(percent, 0), 100)}%`;
+      $("batchEvalSummary").innerHTML = [
+        ["总行数", counts.total],
+        ["已评测", counts.done],
+        ["正确", counts.pass],
+        ["失败", counts.fail],
+        ["错误/跳过", `${counts.error} / ${counts.skipped}`],
+      ].map(([label, value]) => `
+        <div class="stat-card">
+          <div class="stat-value">${escapeHtml(value)}</div>
+          <div class="row-meta">${escapeHtml(label)}</div>
+        </div>
+      `).join("");
+      if (!results.length) {
+        $("batchEvalResults").innerHTML = '<div class="empty">暂无评测结果</div>';
+        return;
+      }
+      $("batchEvalResults").innerHTML = results.map(renderBatchEvalRow).join("");
+    }
+
+    function renderBatchEvalRow(item) {
+      const statusText = {
+        pass: "正确",
+        fail: "失败",
+        error: "错误",
+        skipped: "跳过"
+      }[item.status] || item.status;
+      const expected = item.expectedParts && item.expectedParts.length ? item.expectedParts.map(formatExpectedPart).join("<br>") : "期望不召回备件";
+      const actual = item.retrievedParts && item.retrievedParts.length ? item.retrievedParts.map(formatRetrievedPart).join("<br>") : "未召回备件";
+      const reason = batchEvalReason(item);
+      return `
+        <div class="eval-row ${escapeHtml(item.status)}">
+          <div class="eval-row-head">
+            <div class="row-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(statusText)}</div>
+            <div class="row-meta">${item.taskId ? `task #${escapeHtml(item.taskId)}` : ""}</div>
+          </div>
+          <div class="row-meta">${escapeHtml(item.question || "")}</div>
+          <div class="eval-row-grid">
+            <div class="eval-field"><div class="row-meta">真值</div>${expected}</div>
+            <div class="eval-field"><div class="row-meta">召回备件证据</div>${actual}</div>
+          </div>
+          ${reason ? `<div class="row-meta">${escapeHtml(reason)}</div>` : ""}
+        </div>
+      `;
+    }
+
+    function batchEvalReason(item) {
+      if (item.message) return item.message;
+      const match = item.match || {};
+      if (item.status === "fail" && Array.isArray(match.missing) && match.missing.length) {
+        return `未命中：${match.missing.map(formatExpectedPartText).join("；")}`;
+      }
+      if (item.status === "fail" && match.unexpected_count) {
+        return `期望不召回备件，但召回 ${match.unexpected_count} 条`;
+      }
+      return "";
+    }
+
+    function formatExpectedPart(part) {
+      return escapeHtml(formatExpectedPartText(part));
+    }
+
+    function formatExpectedPartText(part) {
+      return [
+        part.name ? `证据=${part.name}` : "",
+        part.code ? `编码=${part.code}` : "",
+        part.quantity ? `数量=${part.quantity}` : "",
+      ].filter(Boolean).join("，") || "空";
+    }
+
+    function formatRetrievedPart(part) {
+      return escapeHtml([
+        part.name ? `证据=${part.name}` : "",
+        part.code ? `编码=${part.code}` : "",
+        part.quantity ? `数量=${part.quantity}` : "",
+        part.work_order_id ? `工单=${part.work_order_id}` : "",
+      ].filter(Boolean).join("，") || "空");
+    }
+
+    function exportBatchEvalResults() {
+      const rows = [["row", "status", "question", "expected", "retrieved", "message"]];
+      for (const item of appState.batchEval.results || []) {
+        rows.push([
+          item.rowNumber,
+          item.status,
+          item.question || "",
+          (item.expectedParts || []).map(formatExpectedPartText).join(" | ") || "期望不召回备件",
+          (item.retrievedParts || []).map(part => [
+            part.name ? `证据=${part.name}` : "",
+            part.code ? `编码=${part.code}` : "",
+            part.quantity ? `数量=${part.quantity}` : "",
+            part.work_order_id ? `工单=${part.work_order_id}` : "",
+          ].filter(Boolean).join("，")).join(" | "),
+          batchEvalReason(item),
+        ]);
+      }
+      const csv = rows.map(row => row.map(csvCell).join(",")).join("\n");
+      const blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `waji-rag-batch-eval-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function csvCell(value) {
+      const text = String(value ?? "");
+      return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
     }
 
     function currentConfigSnapshot() {
@@ -3553,6 +4066,15 @@ def build_redesigned_index_html() -> str:
 
     $("openConfigBtn").addEventListener("click", () => $("configModal").classList.add("open"));
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
+    $("openBatchEvalBtn").addEventListener("click", () => $("batchEvalModal").classList.add("open"));
+    $("closeBatchEvalBtn").addEventListener("click", () => $("batchEvalModal").classList.remove("open"));
+    $("batchEvalCsv").addEventListener("change", loadBatchEvalCsv);
+    $("runBatchEvalBtn").addEventListener("click", () => runBatchEval());
+    $("stopBatchEvalBtn").addEventListener("click", () => {
+      appState.batchEval.stopRequested = true;
+      $("batchEvalStatus").textContent = "正在停止，当前行结束后停止。";
+    });
+    $("exportBatchEvalBtn").addEventListener("click", exportBatchEvalResults);
     $("openHistoryBtn").addEventListener("click", async () => {
       $("taskHistoryModal").classList.add("open");
       await refreshTasks({quiet: true});
