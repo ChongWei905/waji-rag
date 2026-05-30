@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import html
+import hashlib
 import threading
 import time
 from http import HTTPStatus
@@ -1552,12 +1553,12 @@ def build_redesigned_index_html() -> str:
     <div class="workspace">
       <aside class="stage-rail">
         <div class="rail-head">
-          <h2>任务记录</h2>
+          <h2 id="taskListTitle">构建任务</h2>
           <button id="refreshTasksBtn" class="ghost">刷新</button>
         </div>
         <div id="taskList" class="task-list"><div class="empty">暂无任务</div></div>
         <div class="rail-divider"></div>
-        <h2>执行阶段</h2>
+        <h2 id="stageListTitle">构建阶段</h2>
         <div id="stageList" class="stage-list"></div>
       </aside>
 
@@ -1762,11 +1763,13 @@ def build_redesigned_index_html() -> str:
       ["manual_fault_codes", "故障码手册", "问题出现故障码时先精确匹配 fault_code，未出现故障码则为空。"],
       ["part_evidence", "备件证据", "doc_type=part_evidence；从命中工单的备件字段抽取，不从问题猜备件。"]
     ];
-    const stageOrder = [
+    const buildStageOrder = [
       ["config", "配置解析", "读取页面配置、env 和模型开关"],
       ["init", "初始化 PG", "创建 PostgreSQL / pgvector 表结构"],
       ["ingest", "构建索引", "解析工单、HTML 转 Markdown、入库、建 BM25/向量"],
-      ["embedding", "补Embedding", "扫描已有索引文档，为缺失向量的文档补齐 embedding"],
+      ["embedding", "补Embedding", "扫描已有索引文档，为缺失向量的文档补齐 embedding"]
+    ];
+    const qaStageOrder = [
       ["retrieval", "多路召回", "历史工单、手册、故障码、备件证据分路召回"],
       ["evidence_filter", "证据过滤", "按部件锚点过滤同症状但错部件的证据"],
       ["rerank", "重排", "可选 rerank；失败或关闭则保留原顺序"],
@@ -1779,6 +1782,8 @@ def build_redesigned_index_html() -> str:
       currentTaskId: null,
       currentTask: null,
       tasks: [],
+      buildStages: {},
+      buildSelectedStage: "config",
       questionTabs: [],
       activeQuestionTabId: null,
       questionTabCounter: 0,
@@ -1786,14 +1791,39 @@ def build_redesigned_index_html() -> str:
       buildPollTimer: null
     };
 
-    function createStageState(selectedStage = "config") {
+    function stageOrderForView(view = appState.activeView) {
+      return view === "qa" ? qaStageOrder : buildStageOrder;
+    }
+
+    function initialStageForView(view = appState.activeView) {
+      return view === "qa" ? "retrieval" : "config";
+    }
+
+    function stageIdSetForView(view = appState.activeView) {
+      return new Set(stageOrderForView(view).map(([id]) => id));
+    }
+
+    function createStageState(view = "build", selectedStage = null) {
       const stages = {};
-      for (const [id] of stageOrder) stages[id] = {status: "pending", data: null, summary: ""};
-      return {stages, selectedStage};
+      for (const [id] of stageOrderForView(view)) stages[id] = {status: "pending", data: null, summary: ""};
+      const stageIds = stageIdSetForView(view);
+      const safeSelectedStage = selectedStage && stageIds.has(selectedStage) ? selectedStage : initialStageForView(view);
+      return {stages, selectedStage: safeSelectedStage};
+    }
+
+    function hydrateStageState(view, stages = {}, selectedStage = null) {
+      const hydrated = createStageState(view, selectedStage);
+      const stageIds = stageIdSetForView(view);
+      for (const [id, value] of Object.entries(stages || {})) {
+        if (!stageIds.has(id)) continue;
+        hydrated.stages[id] = value || hydrated.stages[id];
+      }
+      if (!stageIds.has(hydrated.selectedStage)) hydrated.selectedStage = initialStageForView(view);
+      return hydrated;
     }
 
     function makeQuestionTab(query = "") {
-      const state = createStageState("retrieval");
+      const state = createStageState("qa", "retrieval");
       appState.questionTabCounter += 1;
       return {
         id: `q-${Date.now()}-${appState.questionTabCounter}`,
@@ -1805,8 +1835,22 @@ def build_redesigned_index_html() -> str:
         searchTaskId: null,
         answerTaskId: null,
         status: "draft",
+        persisted: false,
+        loadingResult: false,
         updatedAt: new Date().toISOString()
       };
+    }
+
+    function makeQuestionTabFromServer(item) {
+      const tab = makeQuestionTab(item.query || defaultQuery);
+      tab.id = item.id || tab.id;
+      tab.title = item.title || questionTitle(tab.query);
+      tab.searchTaskId = item.search_task_id || null;
+      tab.answerTaskId = item.answer_task_id || null;
+      tab.status = item.status || "persisted";
+      tab.persisted = true;
+      tab.updatedAt = item.updated_at || tab.updatedAt;
+      return tab;
     }
 
     function questionTitle(query) {
@@ -1831,14 +1875,14 @@ def build_redesigned_index_html() -> str:
       return appState.questionTabs[0];
     }
 
-    function ensureQuestionTabForQuery(query) {
+    function ensureQuestionTabForQuery(query, options = {}) {
       const normalized = String(query || "").trim();
       let tab = appState.questionTabs.find(item => item.query.trim() === normalized);
       if (!tab) {
         tab = makeQuestionTab(normalized || defaultQuery);
         appState.questionTabs.push(tab);
       }
-      activateQuestionTab(tab.id);
+      activateQuestionTab(tab.id, options);
       return tab;
     }
 
@@ -1864,20 +1908,30 @@ def build_redesigned_index_html() -> str:
       renderQuestionTabs();
     }
 
-    function activateQuestionTab(tabId) {
+    function activateQuestionTab(tabId, options = {}) {
       const tab = appState.questionTabs.find(item => item.id === tabId);
       if (!tab) return;
+      if (appState.activeView === "build") {
+        appState.buildStages = appState.stages;
+        appState.buildSelectedStage = appState.selectedStage;
+      } else {
+        syncActiveQuestionState();
+      }
+      const tabState = hydrateStageState("qa", tab.stages, tab.selectedStage || "retrieval");
+      tab.stages = tabState.stages;
+      tab.selectedStage = tabState.selectedStage;
       appState.activeQuestionTabId = tab.id;
       appState.activeView = "qa";
       $("query").value = tab.query;
-      appState.stages = tab.stages || createStageState("retrieval").stages;
-      appState.selectedStage = tab.selectedStage || "retrieval";
+      appState.stages = tab.stages;
+      appState.selectedStage = tab.selectedStage;
       appState.lastResult = tab.lastResult || null;
       appState.currentTaskId = tab.answerTaskId || tab.searchTaskId || appState.currentTaskId;
       renderQuestionTabs();
       renderStages();
       renderStageInspector();
       renderQuestionResult(tab);
+      if (options.loadPersisted !== false) loadPersistedQuestionResult(tab);
       saveConfigToLocalStorage();
     }
 
@@ -1909,6 +1963,13 @@ def build_redesigned_index_html() -> str:
       return bits.join(" · ");
     }
 
+    function questionStatusFromTask(task, fallback = "persisted") {
+      if (task && task.status === "completed") {
+        return task.task_type === "search" ? "searched" : "answered";
+      }
+      return (task && task.status) || fallback;
+    }
+
     function renderQuestionResult(tab) {
       const result = tab && tab.lastResult ? tab.lastResult : null;
       if (!result) {
@@ -1928,6 +1989,36 @@ def build_redesigned_index_html() -> str:
         renderParts(result.part_candidates || []);
         $("answer").textContent = "已完成检索。请查看“多路召回”和“证据过滤”。";
         renderSelectedEvidence([]);
+      }
+    }
+
+    async function loadPersistedQuestionResult(tab) {
+      if (!tab || tab.loadingResult || tab.lastResult) return;
+      const taskId = tab.answerTaskId || tab.searchTaskId;
+      if (!taskId || ["searching", "answering"].includes(tab.status)) return;
+      tab.loadingResult = true;
+      try {
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        const task = data.task;
+        if (!task) return;
+        const target = appState.questionTabs.find(item => item.id === tab.id);
+        if (!target) return;
+        target.status = questionStatusFromTask(task, target.status);
+        target.lastResult = task.result && task.result.result ? task.result.result : (task.result || null);
+        target.updatedAt = task.updated_at || target.updatedAt;
+        if (appState.activeView === "qa" && appState.activeQuestionTabId === target.id) {
+          appState.currentTaskId = task.id;
+          if (task.task_type === "search") {
+            renderSearchResult(task.result || {});
+          } else {
+            renderPipelineResult(task.result || {});
+          }
+          syncActiveQuestionState();
+        }
+      } catch (error) {
+        setStatus(`加载历史回答失败：${error}`, "error");
+      } finally {
+        tab.loadingResult = false;
       }
     }
 
@@ -2011,15 +2102,6 @@ def build_redesigned_index_html() -> str:
         ui: {
           active_view: appState.activeView,
           query: $("query").value,
-          active_question_tab_id: appState.activeQuestionTabId,
-          question_tabs: appState.questionTabs.map(tab => ({
-            id: tab.id,
-            query: tab.query,
-            title: tab.title,
-            search_task_id: tab.searchTaskId,
-            answer_task_id: tab.answerTaskId,
-            status: tab.status
-          })),
           top_k: $("topK").value,
           evidence_top_k: $("evidenceTopK").value
         },
@@ -2082,22 +2164,6 @@ def build_redesigned_index_html() -> str:
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
-      if (Array.isArray(ui.question_tabs) && ui.question_tabs.length) {
-        appState.questionTabs = ui.question_tabs.map(item => {
-          const tab = makeQuestionTab(item.query || defaultQuery);
-          tab.id = item.id || tab.id;
-          tab.title = item.title || questionTitle(item.query);
-          tab.searchTaskId = item.search_task_id || null;
-          tab.answerTaskId = item.answer_task_id || null;
-          tab.status = item.status || "draft";
-          return tab;
-        });
-        appState.activeQuestionTabId = ui.active_question_tab_id || appState.questionTabs[0].id;
-        const activeTab = activeQuestionTab() || appState.questionTabs[0];
-        appState.activeQuestionTabId = activeTab.id;
-        $("query").value = activeTab.query;
-        renderQuestionTabs();
-      }
 
       const embedding = config.embedding || {};
       if (modelApiLog.enabled === undefined) setCheckboxValue("apiRequestLoggingEnabled", embedding.log_requests_enabled);
@@ -2256,50 +2322,72 @@ def build_redesigned_index_html() -> str:
     }
 
     function switchView(view) {
+      if (appState.activeView === "build") {
+        appState.buildStages = appState.stages;
+        appState.buildSelectedStage = appState.selectedStage;
+      } else {
+        syncActiveQuestionState();
+      }
       appState.activeView = view;
       if (view === "qa") {
         const tab = ensureQuestionTab($("query").value || defaultQuery);
+        const tabState = hydrateStageState("qa", tab.stages, tab.selectedStage || "retrieval");
+        tab.stages = tabState.stages;
+        tab.selectedStage = tabState.selectedStage;
         appState.activeQuestionTabId = tab.id;
         appState.stages = tab.stages;
-        appState.selectedStage = tab.selectedStage || "retrieval";
+        appState.selectedStage = tab.selectedStage;
         appState.lastResult = tab.lastResult || null;
         $("query").value = tab.query;
         renderQuestionTabs();
+      } else {
+        const buildState = hydrateStageState("build", appState.buildStages, appState.buildSelectedStage || "config");
+        appState.buildStages = buildState.stages;
+        appState.buildSelectedStage = buildState.selectedStage;
+        appState.stages = buildState.stages;
+        appState.selectedStage = buildState.selectedStage;
       }
       $("buildView").classList.toggle("active", view === "build");
       $("qaView").classList.toggle("active", view === "qa");
       $("buildViewBtn").classList.toggle("active", view === "build");
       $("qaViewBtn").classList.toggle("active", view === "qa");
-      if (view === "build" && !["config", "init", "ingest", "embedding"].includes(appState.selectedStage)) {
-        appState.selectedStage = "ingest";
-      }
-      if (view === "qa" && ["config", "init", "ingest", "embedding"].includes(appState.selectedStage)) {
-        appState.selectedStage = appState.lastResult ? "retrieval" : "retrieval";
-      }
+      renderTaskList();
       renderStages();
       renderStageInspector();
       saveConfigToLocalStorage();
     }
 
     function setStage(id, status, data = null, summary = "") {
+      if (!stageIdSetForView(appState.activeView).has(id)) return;
       appState.stages[id] = {status, data, summary};
       appState.selectedStage = id;
+      if (appState.activeView === "build") {
+        appState.buildStages = appState.stages;
+        appState.buildSelectedStage = appState.selectedStage;
+      }
       renderStages();
       renderStageInspector();
       syncActiveQuestionState();
     }
 
-    function resetStages() {
-      appState.stages = {};
-      for (const [id] of stageOrder) appState.stages[id] = {status: "pending", data: null, summary: ""};
-      appState.selectedStage = "config";
+    function resetStages(view = appState.activeView, selectedStage = null) {
+      const state = createStageState(view, selectedStage);
+      appState.stages = state.stages;
+      appState.selectedStage = state.selectedStage;
+      if (view === "build") {
+        appState.buildStages = state.stages;
+        appState.buildSelectedStage = state.selectedStage;
+      } else {
+        syncActiveQuestionState();
+      }
       renderStages();
       renderStageInspector();
     }
 
     function renderStages() {
+      $("stageListTitle").textContent = appState.activeView === "qa" ? "回答阶段" : "构建阶段";
       $("stageList").innerHTML = "";
-      for (const [id, title, note] of stageOrder) {
+      for (const [id, title, note] of stageOrderForView(appState.activeView)) {
         const state = appState.stages[id] || {status: "pending", summary: ""};
         const button = document.createElement("button");
         button.className = `stage-node ${state.status || "pending"} ${appState.selectedStage === id ? "active" : ""}`;
@@ -2312,8 +2400,8 @@ def build_redesigned_index_html() -> str:
         `;
         button.addEventListener("click", () => {
           appState.selectedStage = id;
-          if (["config", "init", "ingest", "embedding"].includes(id)) appState.activeView = "build";
-          if (["retrieval", "evidence_filter", "rerank", "answer"].includes(id)) appState.activeView = "qa";
+          if (appState.activeView === "build") appState.buildSelectedStage = id;
+          syncActiveQuestionState();
           renderStages();
           renderStageInspector();
         });
@@ -2322,7 +2410,8 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderStageInspector() {
-      const [stageId, title, note] = stageOrder.find(([id]) => id === appState.selectedStage) || stageOrder[0];
+      const order = stageOrderForView(appState.activeView);
+      const [stageId, title, note] = order.find(([id]) => id === appState.selectedStage) || order[0];
       const state = appState.stages[stageId] || {status: "pending", data: null, summary: ""};
       $("buildView").classList.toggle("active", appState.activeView === "build");
       $("qaView").classList.toggle("active", appState.activeView === "qa");
@@ -2448,13 +2537,72 @@ def build_redesigned_index_html() -> str:
       }
     }
 
+    async function refreshQuestionTabsFromServer(options = {}) {
+      try {
+        const data = await postJson("/api/question-tabs", taskPayload({limit: 120}));
+        applyServerQuestionTabs(data.question_tabs || []);
+        return data;
+      } catch (error) {
+        if (!options.quiet) setStatus(String(error), "error");
+        return {question_tabs: []};
+      }
+    }
+
+    function applyServerQuestionTabs(serverTabs) {
+      const previousActiveId = appState.activeQuestionTabId;
+      const previousActiveQuery = activeQuestionTab() ? activeQuestionTab().query.trim() : "";
+      const existingById = new Map(appState.questionTabs.map(tab => [tab.id, tab]));
+      const existingByQuery = new Map(appState.questionTabs.map(tab => [tab.query.trim(), tab]));
+      const nextTabs = [];
+      const seenQueries = new Set();
+      for (const item of serverTabs) {
+        const query = String(item.query || "").trim();
+        if (!query || seenQueries.has(query)) continue;
+        const existing = existingById.get(item.id) || existingByQuery.get(query);
+        const tab = makeQuestionTabFromServer(item);
+        if (existing) {
+          tab.stages = existing.stages;
+          tab.selectedStage = existing.selectedStage;
+          if (existing.answerTaskId === tab.answerTaskId && existing.searchTaskId === tab.searchTaskId) {
+            tab.lastResult = existing.lastResult;
+          }
+        }
+        nextTabs.push(tab);
+        seenQueries.add(query);
+      }
+      if (nextTabs.length) {
+        appState.questionTabs = nextTabs;
+      } else if (!appState.questionTabs.length) {
+        appState.questionTabs = [makeQuestionTab($("query").value || defaultQuery)];
+      }
+      const activeById = appState.questionTabs.find(tab => tab.id === previousActiveId);
+      const activeByQuery = appState.questionTabs.find(tab => tab.query.trim() === previousActiveQuery);
+      const activeTab = activeById || activeByQuery || appState.questionTabs[0];
+      appState.activeQuestionTabId = activeTab ? activeTab.id : null;
+      if (appState.activeView === "qa" && activeTab) {
+        const tabState = hydrateStageState("qa", activeTab.stages, activeTab.selectedStage || "retrieval");
+        activeTab.stages = tabState.stages;
+        activeTab.selectedStage = tabState.selectedStage;
+        appState.stages = activeTab.stages;
+        appState.selectedStage = activeTab.selectedStage;
+        appState.lastResult = activeTab.lastResult || null;
+        $("query").value = activeTab.query;
+        renderQuestionResult(activeTab);
+        loadPersistedQuestionResult(activeTab);
+      }
+      renderQuestionTabs();
+    }
+
     function renderTaskList() {
-      if (!appState.tasks.length) {
-        $("taskList").innerHTML = '<div class="empty">暂无任务</div>';
+      $("taskListTitle").textContent = appState.activeView === "qa" ? "问答任务" : "构建任务";
+      const visibleTasks = appState.tasks.filter(task => taskBelongsToView(task));
+      if (!visibleTasks.length) {
+        const emptyText = appState.activeView === "qa" ? "暂无检索/回答任务" : "暂无构建任务";
+        $("taskList").innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
         return;
       }
       $("taskList").innerHTML = "";
-      for (const task of appState.tasks) {
+      for (const task of visibleTasks) {
         const button = document.createElement("button");
         button.className = `task-card ${task.status || ""} ${appState.currentTaskId === task.id ? "active" : ""}`;
         button.innerHTML = `
@@ -2468,6 +2616,12 @@ def build_redesigned_index_html() -> str:
         button.addEventListener("click", () => loadTask(task.id));
         $("taskList").appendChild(button);
       }
+    }
+
+    function taskBelongsToView(task) {
+      const buildTypes = new Set(["build", "build_retry", "embedding"]);
+      const qaTypes = new Set(["search", "answer"]);
+      return appState.activeView === "qa" ? qaTypes.has(task.task_type) : buildTypes.has(task.task_type);
     }
 
     async function loadTask(taskId) {
@@ -2485,19 +2639,19 @@ def build_redesigned_index_html() -> str:
       appState.currentTask = task;
       renderTaskList();
       if (task.task_type === "build" || task.task_type === "build_retry" || task.task_type === "embedding") {
-        appState.activeView = "build";
-        resetStages();
+        switchView("build");
+        resetStages("build", "config");
         setStage("config", "done", task.request || {}, "已载入任务请求");
         renderBuildTaskResult(task);
       } else if (task.task_type === "search") {
-        const tab = ensureQuestionTabForQuery(task.query || defaultQuery);
+        const tab = ensureQuestionTabForQuery(task.query || defaultQuery, {loadPersisted: false});
         tab.searchTaskId = task.id;
         tab.status = task.status || "searched";
         appState.currentTaskId = task.id;
         renderSearchResult(task.result || {});
         syncActiveQuestionState();
       } else {
-        const tab = ensureQuestionTabForQuery(task.query || defaultQuery);
+        const tab = ensureQuestionTabForQuery(task.query || defaultQuery, {loadPersisted: false});
         tab.answerTaskId = task.id;
         tab.status = task.status || "answered";
         appState.currentTaskId = task.id;
@@ -2573,6 +2727,7 @@ def build_redesigned_index_html() -> str:
     function renderPipelineResult(response) {
       const result = response.result || response;
       appState.lastResult = result;
+      resetStages("qa", "retrieval");
       const retrieval = result.retrieval || result;
       const answer = result.answer || {};
       setStageFromTrace(result);
@@ -2600,6 +2755,7 @@ def build_redesigned_index_html() -> str:
     function renderSearchResult(response) {
       const result = response.result || response;
       appState.lastResult = result;
+      resetStages("qa", "retrieval");
       setStage("retrieval", "done", result, formatRetrievalSummary(result));
       if (result.evidence_filter) {
         setStage("evidence_filter", result.evidence_filter.status || "done", result.evidence_filter, evidenceFilterSummary(result.evidence_filter));
@@ -2742,7 +2898,7 @@ def build_redesigned_index_html() -> str:
       button.disabled = true;
       switchView("build");
       stopBuildPolling();
-      resetStages();
+      resetStages("build", "config");
       try {
         setStatus("配置预览中");
         setStage("config", "active", commonPayload(), "准备读取配置");
@@ -2872,7 +3028,7 @@ def build_redesigned_index_html() -> str:
       button.disabled = true;
       const fullFlowQuery = $("query").value;
       switchView("build");
-      resetStages();
+      resetStages("build", "config");
       try {
         setStatus("配置预览中");
         setStage("config", "active", commonPayload(), "准备读取配置");
@@ -2895,7 +3051,8 @@ def build_redesigned_index_html() -> str:
 
         setStatus("多路召回与答案生成中");
         switchView("qa");
-        const questionTab = ensureQuestionTabForQuery(fullFlowQuery);
+        const questionTab = ensureQuestionTabForQuery(fullFlowQuery, {loadPersisted: false});
+        resetStages("qa", "retrieval");
         questionTab.status = "answering";
         renderQuestionTabs();
         const payload = queryPayload(questionTab.query);
@@ -2908,6 +3065,7 @@ def build_redesigned_index_html() -> str:
         renderPipelineResult(askResult);
         syncActiveQuestionState();
         await refreshTasks({quiet: true});
+        await refreshQuestionTabsFromServer({quiet: true});
         setStatus("全流程完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -2923,7 +3081,8 @@ def build_redesigned_index_html() -> str:
       const requestedQuery = $("query").value;
       try {
         switchView("qa");
-        const questionTab = ensureQuestionTabForQuery(requestedQuery);
+        const questionTab = ensureQuestionTabForQuery(requestedQuery, {loadPersisted: false});
+        resetStages("qa", "retrieval");
         questionTab.status = "searching";
         renderQuestionTabs();
         const payload = queryPayload(questionTab.query);
@@ -2936,6 +3095,7 @@ def build_redesigned_index_html() -> str:
         renderSearchResult(result);
         syncActiveQuestionState();
         await refreshTasks({quiet: true});
+        await refreshQuestionTabsFromServer({quiet: true});
         setStatus("检索完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -2950,7 +3110,8 @@ def build_redesigned_index_html() -> str:
       const requestedQuery = $("query").value;
       try {
         switchView("qa");
-        const questionTab = ensureQuestionTabForQuery(requestedQuery);
+        const questionTab = ensureQuestionTabForQuery(requestedQuery, {loadPersisted: false});
+        resetStages("qa", "retrieval");
         questionTab.status = "answering";
         renderQuestionTabs();
         const payload = queryPayload(questionTab.query);
@@ -2963,6 +3124,7 @@ def build_redesigned_index_html() -> str:
         renderPipelineResult(result);
         syncActiveQuestionState();
         await refreshTasks({quiet: true});
+        await refreshQuestionTabsFromServer({quiet: true});
         setStatus("问答完成", "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -2975,6 +3137,7 @@ def build_redesigned_index_html() -> str:
     async function runPreviewConfig(button) {
       button.disabled = true;
       try {
+        switchView("build");
         const result = await postJson("/api/config-preview", commonPayload());
         setStage("config", "done", result, "配置读取完成");
         setStatus("配置预览完成", "success");
@@ -2996,7 +3159,20 @@ def build_redesigned_index_html() -> str:
         appState.currentTaskId = null;
         appState.lastResult = null;
         appState.tasks = [];
-        resetStages();
+        appState.questionTabs = appState.questionTabs.map(tab => {
+          const state = createStageState("qa", "retrieval");
+          return {
+            ...tab,
+            stages: state.stages,
+            selectedStage: state.selectedStage,
+            lastResult: null,
+            searchTaskId: null,
+            answerTaskId: null,
+            status: "draft"
+          };
+        });
+        switchView("build");
+        resetStages("build", "config");
         renderBuildProgress({});
         renderTaskList();
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
@@ -3005,6 +3181,7 @@ def build_redesigned_index_html() -> str:
         $("answer").textContent = "数据已清空。可以重新构建索引。";
         setStage("init", "done", result, "数据库数据已清空");
         await refreshTasks({quiet: true});
+        await refreshQuestionTabsFromServer({quiet: true});
         const beforeCounts = result.before_counts || {};
         const clearedRows = Object.values(beforeCounts).reduce((total, value) => total + Number(value || 0), 0);
         setStatus(`数据已清空，删除前共有 ${clearedRows} 行记录`, "success");
@@ -3101,7 +3278,10 @@ def build_redesigned_index_html() -> str:
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
     $("query").addEventListener("input", syncActiveQuestionInput);
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
-    $("refreshTasksBtn").addEventListener("click", () => refreshTasks());
+    $("refreshTasksBtn").addEventListener("click", async () => {
+      await refreshTasks();
+      await refreshQuestionTabsFromServer();
+    });
     $("clearDataBtn").addEventListener("click", () => clearData($("clearDataBtn")));
     $("resumeBuildBtn").addEventListener("click", () => runResumeBuild($("resumeBuildBtn")));
     $("retryFailedBtn").addEventListener("click", () => retryFailedItems($("retryFailedBtn")));
@@ -3115,6 +3295,7 @@ def build_redesigned_index_html() -> str:
     $("runFullFlowBtn").addEventListener("click", () => runFullFlow($("runFullFlowBtn")));
     $("doctorBtn").addEventListener("click", async () => {
       try {
+        switchView("build");
         const result = await getJson("/api/doctor");
         setStage("config", "done", result, "环境检查完成");
         setStatus("环境检查完成", "success");
@@ -3126,7 +3307,7 @@ def build_redesigned_index_html() -> str:
     getJson("/api/doctor").then(data => {
       $("version").textContent = data.waji_rag_version + " · " + data.platform;
     }).catch(() => {});
-    resetStages();
+    resetStages("build", "config");
     applyDemoDefaults({save: false});
     bindAutoSave();
     const restoredConfig = restoreConfigFromLocalStorage();
@@ -3139,6 +3320,7 @@ def build_redesigned_index_html() -> str:
     renderBuildProgress({});
     if (!restoredConfig) switchView("build");
     refreshTasks({quiet: true});
+    refreshQuestionTabsFromServer({quiet: true});
   </script>
 </body>
 </html>
@@ -3218,6 +3400,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/tasks":
             self._handle_tasks()
+            return
+        if parsed.path == "/api/question-tabs":
+            self._handle_question_tabs()
             return
         if parsed.path == "/api/task":
             self._handle_task()
@@ -3474,6 +3659,14 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         try:
             tasks = list_tasks(database_from_payload(payload), limit=int(payload.get("limit") or 40))
             self._send_json({"tasks": tasks})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_question_tabs(self) -> None:
+        payload = self._read_json()
+        try:
+            question_tabs = list_question_tabs(database_from_payload(payload), limit=int(payload.get("limit") or 120))
+            self._send_json({"question_tabs": question_tabs})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -3965,6 +4158,126 @@ def list_tasks(database: DatabaseOptions, *, limit: int = 40) -> list[dict[str, 
         }
         for row in rows
     ]
+
+
+def list_question_tabs(database: DatabaseOptions, *, limit: int = 120) -> list[dict[str, Any]]:
+    """Return persisted question tabs reconstructed from search and answer tasks."""
+
+    safe_limit = max(1, min(limit, 300))
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                SELECT id, task_type, status, query, summary, error, created_at, updated_at
+                FROM rag_tasks
+                WHERE task_type IN ('search', 'answer')
+                  AND query IS NOT NULL
+                  AND btrim(query) <> ''
+                ORDER BY updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                (safe_limit * 4,),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+    tasks = [
+        {
+            "id": int(row[0]),
+            "task_type": row[1],
+            "status": row[2],
+            "query": row[3],
+            "summary": row[4],
+            "error": row[5],
+            "created_at": iso_datetime(row[6]),
+            "updated_at": iso_datetime(row[7]),
+        }
+        for row in rows
+    ]
+    return build_question_tabs_from_tasks(tasks, limit=safe_limit)
+
+
+def build_question_tabs_from_tasks(tasks: list[dict[str, Any]], *, limit: int = 120) -> list[dict[str, Any]]:
+    """Build shared question-tab metadata from persisted search and answer tasks."""
+
+    tabs_by_key: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_type = str(task.get("task_type") or "")
+        if task_type not in {"search", "answer"}:
+            continue
+        query = normalize_question_query(task.get("query"))
+        if not query:
+            continue
+        key = normalize_question_key(query)
+        tab = tabs_by_key.get(key)
+        if tab is None:
+            tab = {
+                "id": f"q-server-{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}",
+                "query": query,
+                "title": question_tab_title(query),
+                "search_task_id": None,
+                "answer_task_id": None,
+                "status": "persisted",
+                "summary": None,
+                "created_at": task.get("created_at"),
+                "updated_at": task.get("updated_at"),
+                "latest_task_id": task.get("id"),
+                "latest_task_type": task_type,
+            }
+            tabs_by_key[key] = tab
+        tab["updated_at"] = max_iso_datetime(tab.get("updated_at"), task.get("updated_at"))
+        if task_type == "answer" and tab.get("answer_task_id") is None:
+            tab["answer_task_id"] = task.get("id")
+            tab["status"] = question_status_from_task(task, answered_label="answered")
+            tab["summary"] = task.get("summary")
+        elif task_type == "search" and tab.get("search_task_id") is None:
+            tab["search_task_id"] = task.get("id")
+            if tab.get("answer_task_id") is None:
+                tab["status"] = question_status_from_task(task, answered_label="searched")
+                tab["summary"] = task.get("summary")
+        if tab.get("latest_task_id") is None:
+            tab["latest_task_id"] = task.get("id")
+            tab["latest_task_type"] = task_type
+    tabs = sorted(tabs_by_key.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    return tabs[: max(1, min(limit, 300))]
+
+
+def normalize_question_query(value: object) -> str:
+    """Return a compact display query for question grouping."""
+
+    return " ".join(str(value or "").split())
+
+
+def normalize_question_key(query: str) -> str:
+    """Return the stable grouping key for one diagnostic question."""
+
+    return normalize_question_query(query)
+
+
+def question_tab_title(query: str) -> str:
+    """Return a concise title for a persisted question tab."""
+
+    text = normalize_question_query(query)
+    return f"{text[:24]}..." if len(text) > 24 else text or "新问题"
+
+
+def question_status_from_task(task: dict[str, Any], *, answered_label: str) -> str:
+    """Map a stored task status into a question-tab status label."""
+
+    status = str(task.get("status") or "")
+    if status == "completed":
+        return answered_label
+    return status or "persisted"
+
+
+def max_iso_datetime(left: object, right: object) -> object:
+    """Return the lexicographically latest ISO datetime-like value."""
+
+    if not left:
+        return right
+    if not right:
+        return left
+    return right if str(right) > str(left) else left
 
 
 def get_task(database: DatabaseOptions, task_id: int) -> dict[str, Any] | None:
