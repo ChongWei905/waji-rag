@@ -994,25 +994,21 @@ class PgRetriever:
                     constraints=constraints,
                     debug_events=retrieval_events,
                 )
-                part_hits = self._search_channel(
-                    cur,
-                    query,
-                    terms,
-                    top_k=top_k,
-                    doc_types=["part_evidence"],
-                    mode=effective_mode,
-                    channel_name="part_evidence",
-                    constraints=constraints,
-                    debug_events=retrieval_events,
+                retrieval_events.append(
+                    {
+                        "channel": "part_evidence",
+                        "stage": "search",
+                        "status": "skipped",
+                        "reason": "part_evidence_independent_retrieval_disabled",
+                    }
                 )
-                enrich_part_hit_fields(cur, part_hits)
                 channels = {
                     "work_orders": work_order_hits,
                     "manual_typical_faults": typical_hits,
                     "manual_fault_codes": fault_code_hits,
-                    "part_evidence": part_hits,
+                    "part_evidence": [],
                 }
-                linked_work_order_ids = collect_work_order_ids(work_order_hits, part_hits)
+                linked_work_order_ids = collect_work_order_ids(work_order_hits)
                 part_candidates = fetch_part_candidates(cur, linked_work_order_ids)
 
         channel_payloads: dict[str, list[dict[str, object]]] = {
@@ -1033,7 +1029,10 @@ class PgRetriever:
             "part_candidate_source": {
                 "linked_work_order_ids": linked_work_order_ids,
                 "limit_applied": False,
-                "search_hit_count": len(channels.get("part_evidence", [])),
+                "source": "work_order_hits",
+                "independent_part_retrieval_enabled": False,
+                "search_hit_count": 0,
+                "work_order_hit_count": len(channels.get("work_orders", [])),
             },
         }
         evidence_filter = filter_evidence_for_answer(
@@ -1204,7 +1203,12 @@ class RagPipeline:
                 },
             )
         )
-        part_candidates = list_payload(retrieval.get("filtered_part_candidates")) or list_payload(retrieval.get("part_candidates"))
+        filtered_part_candidates = retrieval.get("filtered_part_candidates")
+        part_candidates = (
+            list_payload(filtered_part_candidates)
+            if isinstance(filtered_part_candidates, list)
+            else list_payload(retrieval.get("part_candidates"))
+        )
         rerank_payload = self._rerank(query, evidence_items, trace)
         selected_evidence = list(rerank_payload.get("evidence") or evidence_items)
         answer_payload = self._answer(query, selected_evidence, part_candidates, trace)
@@ -3005,7 +3009,7 @@ def filter_part_candidates_by_evidence(
     part_candidates: list[dict[str, object]],
     evidence_filter: dict[str, object],
 ) -> list[dict[str, object]]:
-    """Keep part candidates tied to accepted work orders when the gate has such IDs."""
+    """Keep only part candidates tied to accepted work-order evidence."""
 
     accepted = list_payload(evidence_filter.get("accepted"))
     accepted_ids = {
@@ -3014,7 +3018,7 @@ def filter_part_candidates_by_evidence(
         if isinstance(item, dict) and item.get("work_order_id")
     }
     if not accepted_ids:
-        return part_candidates
+        return []
     return [part for part in part_candidates if str(part.get("work_order_id")) in accepted_ids]
 
 

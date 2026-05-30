@@ -15,6 +15,7 @@ from waji_rag.pg_index import (
     bulk_insert_rows,
     clear_application_data_with_cursor,
     filter_evidence_for_answer,
+    filter_part_candidates_by_evidence,
     fetch_part_candidates,
     prioritize_hits_by_constraints,
     query_constraints_from_llm_payload,
@@ -248,6 +249,29 @@ class PgIndexHelpersTests(unittest.TestCase):
         self.assertEqual([part["part_code"] for part in parts], ["PB-001", "TN-002", "PL-003", "BT-004"])
         self.assertTrue(all(part["doc_type"] == "part_evidence" for part in parts))
         self.assertTrue(all(part["channel"] == "part_evidence" for part in parts))
+
+    def test_filter_part_candidates_requires_accepted_work_order_id(self) -> None:
+        part_candidates = [
+            {"work_order_id": "WO-001", "part_name": "风扇皮带", "part_code": "PB-001"},
+            {"work_order_id": "WO-002", "part_name": "空调压缩机", "part_code": "AC-001"},
+        ]
+
+        filtered = filter_part_candidates_by_evidence(
+            part_candidates,
+            {
+                "accepted": [
+                    {"channel": "manual_typical_faults", "title": "风扇皮带异响"},
+                    {"channel": "work_orders", "work_order_id": "WO-001", "title": "风扇皮带异响"},
+                ]
+            },
+        )
+        no_work_order = filter_part_candidates_by_evidence(
+            part_candidates,
+            {"accepted": [{"channel": "manual_typical_faults", "title": "风扇皮带异响"}]},
+        )
+
+        self.assertEqual([part["part_code"] for part in filtered], ["PB-001"])
+        self.assertEqual(no_work_order, [])
 
 
 class FakeCursor:

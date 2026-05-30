@@ -2014,7 +2014,7 @@ def build_redesigned_index_html() -> str:
       ["work_orders", "历史工单", "doc_type=work_order；字段权重优先 reported_issue，再看 solution/raw_text。"],
       ["manual_typical_faults", "典型故障手册", "doc_type=manual_typical_fault；优先 fault_title/file_name，再看正文 chunk。"],
       ["manual_fault_codes", "故障码手册", "问题出现故障码时先精确匹配 fault_code，未出现故障码则为空。"],
-      ["part_evidence", "备件证据", "doc_type=part_evidence；从命中工单的备件字段抽取，不从问题猜备件。"]
+      ["part_evidence", "备件证据", "不独立检索备件索引；仅展示历史工单召回后关联出的备件。"]
     ];
     const buildStageOrder = [
       ["config", "配置解析", "读取页面配置、env 和模型开关"],
@@ -3541,7 +3541,7 @@ def build_redesigned_index_html() -> str:
       const source = retrieval.part_candidate_source || {};
       if (name === "part_evidence" && source.limit_applied === false) {
         const count = Array.isArray(source.linked_work_order_ids) ? source.linked_work_order_ids.length : 0;
-        return `关联工单全量备件 · work_orders=${count}`;
+        return `仅工单关联备件 · work_orders=${count}`;
       }
       return `mode=${retrieval.mode || ""} · top_k=${retrieval.top_k || ""}`;
     }
