@@ -17,6 +17,7 @@ from waji_rag.config import (
     DEFAULT_DASHSCOPE_BASE_URL,
     DEFAULT_DASHSCOPE_RERANK_BASE_URL,
     DEFAULT_DOCARBOR_ENV_PATH,
+    DEFAULT_MODEL_API_REQUEST_LOG_PATH,
     DEFAULT_OPENAI_BASE_URL,
     load_config,
     redact_secrets,
@@ -1610,6 +1611,14 @@ def build_redesigned_index_html() -> str:
           <label for="llmApiKey">LLM API Key</label>
           <input id="llmApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
         </div>
+        <label class="checkline full" for="apiRequestLoggingEnabled">
+          <input id="apiRequestLoggingEnabled" type="checkbox" checked>
+          <span>记录 Embedding / LLM 请求日志</span>
+        </label>
+        <div class="full">
+          <label for="apiRequestLogPath">请求日志文件</label>
+          <input id="apiRequestLogPath" value="__MODEL_API_REQUEST_LOG_PATH__">
+        </div>
         <div class="full">
           <label for="configImportFile">配置文件导入</label>
           <input id="configImportFile" type="file" accept="application/json,.json">
@@ -1635,6 +1644,7 @@ def build_redesigned_index_html() -> str:
     const dashscopeBaseUrl = __DASHSCOPE_BASE_URL_JSON__;
     const openaiBaseUrl = __OPENAI_BASE_URL_JSON__;
     const localEmbeddingBaseUrl = "http://127.0.0.1:8888/v1";
+    const defaultModelApiRequestLogPath = __MODEL_API_REQUEST_LOG_PATH_JSON__;
     const savedConfigKey = "waji-rag-workbench-config-v1";
     const channels = [
       ["work_orders", "历史工单", "doc_type=work_order；字段权重优先 reported_issue，再看 solution/raw_text。"],
@@ -1670,7 +1680,9 @@ def build_redesigned_index_html() -> str:
           api_key: $("embeddingApiKey").value.trim(),
           dimensions: $("embeddingDimensions").value ? Number($("embeddingDimensions").value) : null,
           batch_size: $("embeddingBatchSize").value ? Number($("embeddingBatchSize").value) : 10,
-          no_proxy_hosts: parseCsv($("embeddingNoProxyHosts").value)
+          no_proxy_hosts: parseCsv($("embeddingNoProxyHosts").value),
+          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
+          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
         },
         rerank: {
           enabled: $("enableRerank").checked,
@@ -1689,7 +1701,9 @@ def build_redesigned_index_html() -> str:
           api_key: $("llmApiKey").value.trim(),
           no_proxy_hosts: parseCsv($("llmNoProxyHosts").value),
           max_tokens: 1400,
-          temperature: 0
+          temperature: 0,
+          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
+          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
         },
         answer: {
           enabled: true,
@@ -1736,6 +1750,10 @@ def build_redesigned_index_html() -> str:
         manual_limit: $("manualLimit").value,
         max_manual_chars: $("maxManualChars").value,
         ingest_reset: $("ingestReset").checked,
+        model_api_log: {
+          enabled: $("apiRequestLoggingEnabled").checked,
+          path: $("apiRequestLogPath").value
+        },
         embedding: {
           enabled: $("enableEmbedding").checked,
           provider: $("embeddingProvider").value,
@@ -1775,11 +1793,16 @@ def build_redesigned_index_html() -> str:
       setInputValue("manualLimit", config.manual_limit);
       setInputValue("maxManualChars", config.max_manual_chars);
       setCheckboxValue("ingestReset", config.ingest_reset);
+      const modelApiLog = config.model_api_log || {};
+      setCheckboxValue("apiRequestLoggingEnabled", modelApiLog.enabled);
+      setInputValue("apiRequestLogPath", modelApiLog.path);
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
 
       const embedding = config.embedding || {};
+      if (modelApiLog.enabled === undefined) setCheckboxValue("apiRequestLoggingEnabled", embedding.log_requests_enabled);
+      if (modelApiLog.path === undefined) setInputValue("apiRequestLogPath", embedding.request_log_path);
       setCheckboxValue("enableEmbedding", embedding.enabled);
       setInputValue("embeddingProvider", embedding.provider);
       setInputValue("embeddingModel", embedding.model);
@@ -1797,6 +1820,12 @@ def build_redesigned_index_html() -> str:
       setInputValue("rerankApiKey", rerank.api_key);
 
       const llm = config.llm || {};
+      if (modelApiLog.enabled === undefined && embedding.log_requests_enabled === undefined) {
+        setCheckboxValue("apiRequestLoggingEnabled", llm.log_requests_enabled);
+      }
+      if (modelApiLog.path === undefined && embedding.request_log_path === undefined) {
+        setInputValue("apiRequestLogPath", llm.request_log_path);
+      }
       setCheckboxValue("enableLlm", llm.enabled);
       setInputValue("llmProvider", llm.provider);
       setInputValue("llmModel", llm.model);
@@ -1869,6 +1898,7 @@ def build_redesigned_index_html() -> str:
     function bindAutoSave() {
       const ids = [
         "databaseUrl", "envFile", "workOrderDir", "manualDir", "workOrderLimit", "manualLimit", "maxManualChars",
+        "apiRequestLoggingEnabled", "apiRequestLogPath",
         "ingestReset", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
         "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
         "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey", "enableLlm",
@@ -2507,6 +2537,8 @@ def build_redesigned_index_html() -> str:
       $("llmNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("rerankApiKey").value = "";
       $("llmApiKey").value = "";
+      $("apiRequestLoggingEnabled").checked = true;
+      $("apiRequestLogPath").value = defaultModelApiRequestLogPath;
       if (options.save !== false) saveConfigToLocalStorage();
       setStatus("已加载 Demo 配置", "success");
     }
@@ -2584,6 +2616,8 @@ def build_redesigned_index_html() -> str:
         "__DASHSCOPE_BASE_URL_JSON__": json.dumps(DEFAULT_DASHSCOPE_BASE_URL, ensure_ascii=False),
         "__DASHSCOPE_RERANK_BASE_URL__": html.escape(DEFAULT_DASHSCOPE_RERANK_BASE_URL),
         "__OPENAI_BASE_URL_JSON__": json.dumps(DEFAULT_OPENAI_BASE_URL, ensure_ascii=False),
+        "__MODEL_API_REQUEST_LOG_PATH__": html.escape(DEFAULT_MODEL_API_REQUEST_LOG_PATH),
+        "__MODEL_API_REQUEST_LOG_PATH_JSON__": json.dumps(DEFAULT_MODEL_API_REQUEST_LOG_PATH, ensure_ascii=False),
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)

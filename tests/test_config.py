@@ -60,6 +60,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.llm.no_proxy_hosts, ["10.30.4.5", "192.168.0.0/16"])
         self.assertEqual(config.rerank.no_proxy_hosts, ["10.30.4.5", "*.company.local"])
 
+    def test_model_request_logging_defaults_to_enabled_and_can_be_disabled(self) -> None:
+        default_config = config_from_payload({})
+
+        disabled_config = config_from_payload(
+            {
+                "embedding": {"log_requests_enabled": False},
+                "llm": {"log_requests_enabled": False, "request_log_path": "tmp/model-calls.jsonl"},
+            }
+        )
+
+        self.assertTrue(default_config.embedding.log_requests_enabled)
+        self.assertTrue(default_config.llm.log_requests_enabled)
+        self.assertFalse(disabled_config.embedding.log_requests_enabled)
+        self.assertFalse(disabled_config.llm.log_requests_enabled)
+        self.assertEqual(disabled_config.llm.request_log_path, "tmp/model-calls.jsonl")
+
 
 if __name__ == "__main__":
     unittest.main()

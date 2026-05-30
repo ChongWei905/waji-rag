@@ -15,6 +15,7 @@ DEFAULT_DASHSCOPE_RERANK_BASE_URL = "https://dashscope.aliyuncs.com/compatible-a
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_DOCARBOR_ENV_PATH = "/Users/weichong/Documents/new_working_area/file_tree/DocArbor/.env"
 DEFAULT_EMBEDDING_NO_PROXY_HOSTS = ("localhost", "127.0.0.1", "127.0.0.0/8", "::1")
+DEFAULT_MODEL_API_REQUEST_LOG_PATH = "logs/model_api_requests.jsonl"
 SECRET_KEY_PATTERN = re.compile(
     r"^(api[_-]?key|secret|password|bearer[_-]?token|access[_-]?token|refresh[_-]?token)$",
     re.IGNORECASE,
@@ -36,6 +37,8 @@ class EmbeddingConfig:
     batch_size: int = 10
     timeout_seconds: float = 180.0
     no_proxy_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
+    log_requests_enabled: bool = True
+    request_log_path: str = DEFAULT_MODEL_API_REQUEST_LOG_PATH
 
     def is_available(self) -> bool:
         """Return whether this config can create embeddings."""
@@ -98,6 +101,8 @@ class LLMConfig:
     timeout_seconds: float = 180.0
     disable_thinking: bool = True
     no_proxy_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS))
+    log_requests_enabled: bool = True
+    request_log_path: str = DEFAULT_MODEL_API_REQUEST_LOG_PATH
 
     def is_available(self) -> bool:
         """Return whether this config can generate final answers."""
@@ -173,6 +178,8 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
     rerank_payload = object_payload(payload.get("rerank"))
     llm_payload = object_payload(payload.get("llm"))
     answer_payload = object_payload(payload.get("answer"))
+    default_log_enabled = as_bool(payload.get("log_requests_enabled", True))
+    default_log_path = str(payload.get("request_log_path") or DEFAULT_MODEL_API_REQUEST_LOG_PATH)
 
     embedding_api_key_env = str(embedding_payload.get("api_key_env") or "DOCARBOR_EMBEDDING_API_KEY")
     llm_api_key_env = str(llm_payload.get("api_key_env") or "DOCARBOR_LLM_API_KEY")
@@ -215,6 +222,8 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
                 embedding_payload.get("no_proxy_hosts", embedding_payload.get("no_proxy")),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+            log_requests_enabled=as_bool(embedding_payload.get("log_requests_enabled", default_log_enabled)),
+            request_log_path=str(embedding_payload.get("request_log_path") or default_log_path),
         ),
         rerank=RerankConfig(
             enabled=as_bool(rerank_payload.get("enabled", False)),
@@ -252,6 +261,8 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
                 llm_payload.get("no_proxy_hosts", llm_payload.get("no_proxy")),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+            log_requests_enabled=as_bool(llm_payload.get("log_requests_enabled", default_log_enabled)),
+            request_log_path=str(llm_payload.get("request_log_path") or default_log_path),
         ),
         answer=AnswerConfig(
             enabled=as_bool(answer_payload.get("enabled", True)),
@@ -275,6 +286,8 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
                 env_values.get("DOCARBOR_EMBEDDING_NO_PROXY_HOSTS"),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+            "log_requests_enabled": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_ENABLED", "true"),
+            "request_log_path": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_PATH", DEFAULT_MODEL_API_REQUEST_LOG_PATH),
         },
         "rerank": {
             "provider": "dashscope",
@@ -298,6 +311,8 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
                 env_values.get("DOCARBOR_LLM_NO_PROXY_HOSTS", env_values.get("DOCARBOR_MODEL_NO_PROXY_HOSTS")),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+            "log_requests_enabled": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_ENABLED", "true"),
+            "request_log_path": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_PATH", DEFAULT_MODEL_API_REQUEST_LOG_PATH),
         },
     }
 

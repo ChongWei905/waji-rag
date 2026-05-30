@@ -12,6 +12,7 @@ build/
 data/
 outputs/
 tmp/
+logs/
 output.md
 waji_wai_table.html
 docs/assets/*-flow.png

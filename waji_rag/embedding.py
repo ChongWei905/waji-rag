@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from waji_rag.config import DEFAULT_EMBEDDING_NO_PROXY_HOSTS, EmbeddingConfig
+from waji_rag.model_call_logging import append_model_api_request_log
 
 
 @dataclass(slots=True)
@@ -119,6 +120,10 @@ class OpenAICompatibleEmbeddingProvider:
             api_key=self.config.api_key,
             timeout_seconds=self.config.timeout_seconds,
             no_proxy_hosts=self.config.no_proxy_hosts,
+            provider=self.config.provider,
+            model=self.config.model,
+            log_requests_enabled=self.config.log_requests_enabled,
+            request_log_path=self.config.request_log_path,
         )
         return validate_embedding_payload(response, texts=texts)
 
@@ -156,6 +161,10 @@ def post_json(
     api_key: str,
     timeout_seconds: float,
     no_proxy_hosts: list[str] | None = None,
+    provider: str = "",
+    model: str = "",
+    log_requests_enabled: bool = False,
+    request_log_path: str = "logs/model_api_requests.jsonl",
 ) -> dict[str, Any]:
     """POST JSON to an embedding endpoint and parse the JSON response."""
 
@@ -177,21 +186,100 @@ def post_json(
         if should_bypass_proxy(url, no_proxy_hosts or [])
         else urllib.request.build_opener()
     )
+    status_code: int | None = None
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
+            status_code = int(response.status)
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service="embedding",
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="http_error",
+            status_code=exc.code,
+            response={"body_preview": body[:1000]},
+            error=f"HTTP {exc.code}",
+        )
         raise EmbeddingProviderError(f"embedding HTTP {exc.code}: {body[:500]}") from exc
     except urllib.error.URLError as exc:
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service="embedding",
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="request_error",
+            error=str(exc),
+        )
         raise EmbeddingProviderError(f"embedding request failed after {time.time() - start:.2f}s: {exc}") from exc
 
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service="embedding",
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="invalid_json",
+            status_code=status_code,
+            response={"body_preview": body[:1000]},
+            error=str(exc),
+        )
         raise EmbeddingProviderError(f"embedding endpoint returned invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service="embedding",
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="invalid_payload",
+            status_code=status_code,
+            response=parsed,
+            error="non-object JSON payload",
+        )
         raise EmbeddingProviderError("embedding endpoint returned a non-object JSON payload")
+    append_model_api_request_log(
+        enabled=log_requests_enabled,
+        log_path=request_log_path,
+        service="embedding",
+        provider=provider,
+        model=model,
+        method="POST",
+        url=url,
+        headers=headers,
+        payload=payload,
+        elapsed_ms=int((time.time() - start) * 1000),
+        status="ok",
+        status_code=status_code,
+        response=parsed,
+    )
     return parsed
 
 

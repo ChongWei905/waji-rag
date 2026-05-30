@@ -12,6 +12,7 @@ from typing import Any
 
 from waji_rag.config import LLMConfig, RerankConfig
 from waji_rag.embedding import should_bypass_proxy
+from waji_rag.model_call_logging import append_model_api_request_log
 
 
 @dataclass(slots=True)
@@ -60,6 +61,11 @@ class OpenAICompatibleChatClient:
             timeout_seconds=self.config.timeout_seconds,
             error_prefix="chat",
             no_proxy_hosts=self.config.no_proxy_hosts,
+            service="llm",
+            provider=self.config.provider,
+            model=self.config.model,
+            log_requests_enabled=self.config.log_requests_enabled,
+            request_log_path=self.config.request_log_path,
         )
         elapsed_ms = int((time.time() - started_at) * 1000)
         choices = response.get("choices") if isinstance(response, dict) else None
@@ -243,6 +249,11 @@ def post_json(
     timeout_seconds: float,
     error_prefix: str,
     no_proxy_hosts: list[str] | None = None,
+    service: str = "",
+    provider: str = "",
+    model: str = "",
+    log_requests_enabled: bool = False,
+    request_log_path: str = "logs/model_api_requests.jsonl",
 ) -> dict[str, Any]:
     """POST JSON to a model endpoint and parse the JSON response."""
 
@@ -263,20 +274,100 @@ def post_json(
         if should_bypass_proxy(url, no_proxy_hosts or [])
         else urllib.request.build_opener()
     )
+    start = time.time()
+    status_code: int | None = None
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
+            status_code = int(response.status)
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service=service or error_prefix,
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="http_error",
+            status_code=exc.code,
+            response={"body_preview": body[:1000]},
+            error=f"HTTP {exc.code}",
+        )
         raise RuntimeError(f"{error_prefix} HTTP {exc.code}: {body[:500]}") from exc
     except urllib.error.URLError as exc:
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service=service or error_prefix,
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="request_error",
+            error=str(exc),
+        )
         raise RuntimeError(f"{error_prefix} request failed: {exc}") from exc
 
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
         compact = re.sub(r"\s+", " ", body[:500])
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service=service or error_prefix,
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="invalid_json",
+            status_code=status_code,
+            response={"body_preview": body[:1000]},
+            error=str(exc),
+        )
         raise RuntimeError(f"{error_prefix} endpoint returned invalid JSON: {compact}") from exc
     if not isinstance(parsed, dict):
+        append_model_api_request_log(
+            enabled=log_requests_enabled,
+            log_path=request_log_path,
+            service=service or error_prefix,
+            provider=provider,
+            model=model,
+            method="POST",
+            url=url,
+            headers=headers,
+            payload=payload,
+            elapsed_ms=int((time.time() - start) * 1000),
+            status="invalid_payload",
+            status_code=status_code,
+            response=parsed,
+            error="non-object JSON payload",
+        )
         raise RuntimeError(f"{error_prefix} endpoint returned a non-object JSON payload")
+    append_model_api_request_log(
+        enabled=log_requests_enabled,
+        log_path=request_log_path,
+        service=service or error_prefix,
+        provider=provider,
+        model=model,
+        method="POST",
+        url=url,
+        headers=headers,
+        payload=payload,
+        elapsed_ms=int((time.time() - start) * 1000),
+        status="ok",
+        status_code=status_code,
+        response=parsed,
+    )
     return parsed
