@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-import json
+import base64
+import csv
 import html
 import hashlib
+import json
+import posixpath
 import threading
 import time
+import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from xml.etree import ElementTree as ET
 
 from waji_rag import __version__
 from waji_rag.config import (
@@ -1773,9 +1779,9 @@ def build_redesigned_index_html() -> str:
       </div>
       <div class="batch-eval-body">
         <div>
-          <label for="batchEvalCsv">CSV 文件</label>
-          <input id="batchEvalCsv" type="file" accept=".csv,text/csv">
-          <div id="batchEvalFileMeta" class="row-meta">尚未载入 CSV。第一行会作为列名。</div>
+          <label for="batchEvalCsv">CSV / XLSX 文件</label>
+          <input id="batchEvalCsv" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          <div id="batchEvalFileMeta" class="row-meta">尚未载入 CSV / XLSX。第一行会作为列名。</div>
         </div>
         <div class="batch-eval-controls">
           <div>
@@ -1796,7 +1802,7 @@ def build_redesigned_index_html() -> str:
           </div>
         </div>
         <div class="batch-eval-toolbar">
-          <div id="batchEvalStatus" class="row-meta">配置列后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
+          <div id="batchEvalStatus" class="row-meta">载入 CSV / XLSX 并配置列后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
           <div class="actions">
             <button id="runBatchEvalBtn">开始评测</button>
             <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
@@ -2436,7 +2442,7 @@ def build_redesigned_index_html() -> str:
       const file = $("batchEvalCsv").files && $("batchEvalCsv").files[0];
       if (!file) return;
       try {
-        const parsed = parseCsvFileText(await file.text());
+        const parsed = await parseBatchEvalFile(file);
         appState.batchEval.headers = parsed.headers;
         appState.batchEval.rows = parsed.rows;
         appState.batchEval.results = [];
@@ -2444,12 +2450,42 @@ def build_redesigned_index_html() -> str:
         renderBatchEvalColumns();
         renderBatchEvalResults();
         $("batchEvalFileMeta").textContent = `${file.name} · ${parsed.rows.length} 行数据 · ${parsed.headers.length} 列`;
-        $("batchEvalStatus").textContent = "CSV 已载入，请确认列映射后开始评测。";
+        $("batchEvalStatus").textContent = `${parsed.format || "表格"} 已载入，请确认列映射后开始评测。`;
         $("exportBatchEvalBtn").disabled = true;
       } catch (error) {
         setStatus(String(error), "error");
         $("batchEvalStatus").textContent = String(error);
       }
+    }
+
+    async function parseBatchEvalFile(file) {
+      const name = String(file && file.name ? file.name : "").toLowerCase();
+      const type = String(file && file.type ? file.type : "").toLowerCase();
+      if (name.endsWith(".xlsx") || type.includes("spreadsheetml.sheet")) {
+        const response = await postJson("/api/parse-table", {
+          filename: file.name,
+          data_base64: await fileToBase64(file)
+        });
+        return {
+          headers: response.headers || [],
+          rows: response.rows || [],
+          format: response.format || "XLSX"
+        };
+      }
+      return {...parseCsvFileText(await file.text()), format: "CSV"};
+    }
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = String(reader.result || "");
+          const commaIndex = dataUrl.indexOf(",");
+          resolve(commaIndex >= 0 ? dataUrl.slice(commaIndex + 1) : dataUrl);
+        };
+        reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
+        reader.readAsDataURL(file);
+      });
     }
 
     function renderBatchEvalColumns() {
@@ -4231,6 +4267,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/task":
             self._handle_task()
             return
+        if parsed.path == "/api/parse-table":
+            self._handle_parse_table()
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def log_message(self, format: str, *args: object) -> None:
@@ -4509,6 +4548,24 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _handle_parse_table(self) -> None:
+        payload = self._read_json()
+        try:
+            filename = str(payload.get("filename") or "").strip()
+            encoded = str(payload.get("data_base64") or "").strip()
+            if not filename:
+                self._send_json({"error": "filename is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            if not encoded:
+                self._send_json({"error": "data_base64 is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            content = base64.b64decode(encoded, validate=True)
+            self._send_json(parse_table_file(filename, content))
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("content-length", "0") or "0")
         body = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -4532,6 +4589,173 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+
+def parse_table_file(filename: str, content: bytes) -> dict[str, Any]:
+    """Parse a CSV or XLSX table into headers and row values for batch evaluation."""
+
+    suffix = Path(filename).suffix.lower()
+    if suffix == ".csv":
+        return parse_csv_table(content)
+    if suffix == ".xlsx":
+        return parse_xlsx_table(content)
+    if suffix == ".xls":
+        raise ValueError("暂不支持旧版 .xls，请另存为 .xlsx 或 .csv")
+    raise ValueError("仅支持 .csv 或 .xlsx 文件")
+
+
+def parse_csv_table(content: bytes) -> dict[str, Any]:
+    """Parse CSV bytes using utf-8-sig and return a table payload."""
+
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"CSV 需要保存为 UTF-8 编码：{exc}") from exc
+    reader = csv.reader(StringIO(text))
+    return table_rows_to_payload([[cell for cell in row] for row in reader], "CSV")
+
+
+def parse_xlsx_table(content: bytes) -> dict[str, Any]:
+    """Parse the first worksheet in an XLSX workbook without third-party dependencies."""
+
+    try:
+        with zipfile.ZipFile(BytesIO(content)) as workbook:
+            sheet_path = _first_xlsx_worksheet_path(workbook)
+            shared_strings = _xlsx_shared_strings(workbook)
+            rows = _xlsx_sheet_rows(workbook, sheet_path, shared_strings)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("XLSX 文件格式无效") from exc
+    return table_rows_to_payload(rows, "XLSX")
+
+
+def table_rows_to_payload(rows: list[list[str]], format_name: str) -> dict[str, Any]:
+    """Convert raw table rows into the front-end batch-evaluation shape."""
+
+    non_empty_rows = [row for row in rows if any(str(cell or "").strip() for cell in row)]
+    if not non_empty_rows:
+        raise ValueError(f"{format_name} 内容为空")
+    headers = [
+        str(value or f"列{index + 1}").strip() or f"列{index + 1}"
+        for index, value in enumerate(non_empty_rows[0])
+    ]
+    records = [
+        [str(row[index] if index < len(row) else "") for index in range(len(headers))]
+        for row in non_empty_rows[1:]
+    ]
+    return {"format": format_name, "headers": headers, "rows": records}
+
+
+def _first_xlsx_worksheet_path(workbook: zipfile.ZipFile) -> str:
+    names = set(workbook.namelist())
+    if "xl/workbook.xml" in names and "xl/_rels/workbook.xml.rels" in names:
+        workbook_root = ET.fromstring(workbook.read("xl/workbook.xml"))
+        sheet = next((element for element in workbook_root.iter() if _xml_local_name(element.tag) == "sheet"), None)
+        relationship_id = _xlsx_relationship_id(sheet.attrib) if sheet is not None else ""
+        if relationship_id:
+            rels_root = ET.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
+            for relationship in rels_root.iter():
+                if _xml_local_name(relationship.tag) != "Relationship":
+                    continue
+                if relationship.attrib.get("Id") != relationship_id:
+                    continue
+                target = relationship.attrib.get("Target", "")
+                sheet_path = _xlsx_target_path("xl/workbook.xml", target)
+                if sheet_path in names:
+                    return sheet_path
+    fallback = sorted(name for name in names if name.startswith("xl/worksheets/") and name.endswith(".xml"))
+    if not fallback:
+        raise ValueError("XLSX 中没有可读取的工作表")
+    return fallback[0]
+
+
+def _xlsx_relationship_id(attributes: dict[str, str]) -> str:
+    for key, value in attributes.items():
+        if key == "id" or key.endswith("}id"):
+            return value
+    return ""
+
+
+def _xlsx_target_path(source_path: str, target: str) -> str:
+    if not target:
+        return ""
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    return posixpath.normpath(posixpath.join(posixpath.dirname(source_path), target))
+
+
+def _xlsx_shared_strings(workbook: zipfile.ZipFile) -> list[str]:
+    if "xl/sharedStrings.xml" not in workbook.namelist():
+        return []
+    root = ET.fromstring(workbook.read("xl/sharedStrings.xml"))
+    strings: list[str] = []
+    for item in root:
+        if _xml_local_name(item.tag) != "si":
+            continue
+        strings.append("".join(text.text or "" for text in item.iter() if _xml_local_name(text.tag) == "t"))
+    return strings
+
+
+def _xlsx_sheet_rows(workbook: zipfile.ZipFile, sheet_path: str, shared_strings: list[str]) -> list[list[str]]:
+    root = ET.fromstring(workbook.read(sheet_path))
+    rows: list[list[str]] = []
+    for row_element in root.iter():
+        if _xml_local_name(row_element.tag) != "row":
+            continue
+        row_values: list[str] = []
+        next_column = 0
+        for cell_element in row_element:
+            if _xml_local_name(cell_element.tag) != "c":
+                continue
+            column = _xlsx_column_index(cell_element.attrib.get("r", "")) if cell_element.attrib.get("r") else next_column
+            while len(row_values) <= column:
+                row_values.append("")
+            row_values[column] = _xlsx_cell_value(cell_element, shared_strings)
+            next_column = column + 1
+        rows.append(row_values)
+    return rows
+
+
+def _xlsx_column_index(cell_ref: str) -> int:
+    column = 0
+    found = False
+    for char in cell_ref.upper():
+        if not ("A" <= char <= "Z"):
+            break
+        found = True
+        column = column * 26 + (ord(char) - ord("A") + 1)
+    return column - 1 if found else 0
+
+
+def _xlsx_cell_value(cell_element: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell_element.attrib.get("t", "")
+    if cell_type == "inlineStr":
+        return _xlsx_inline_text(cell_element)
+    value_text = _first_child_text(cell_element, "v")
+    if cell_type == "s":
+        try:
+            return shared_strings[int(value_text)]
+        except (ValueError, IndexError):
+            return ""
+    if cell_type == "b":
+        return "TRUE" if value_text == "1" else "FALSE"
+    if value_text:
+        return value_text
+    return _xlsx_inline_text(cell_element)
+
+
+def _xlsx_inline_text(cell_element: ET.Element) -> str:
+    return "".join(text.text or "" for text in cell_element.iter() if _xml_local_name(text.tag) == "t")
+
+
+def _first_child_text(element: ET.Element, name: str) -> str:
+    for child in element:
+        if _xml_local_name(child.tag) == name:
+            return child.text or ""
+    return ""
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
 
 
 def database_from_payload(payload: dict[str, Any]) -> DatabaseOptions:
