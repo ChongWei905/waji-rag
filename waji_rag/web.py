@@ -400,7 +400,7 @@ INDEX_HTML = f"""<!doctype html>
         <input id="rerankBaseUrl" value="{DEFAULT_DASHSCOPE_RERANK_BASE_URL}">
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
-          <span>启用 LLM 答案生成</span>
+          <span>启用 LLM 解析 / 答案生成</span>
         </label>
         <label for="llmModel">LLM 模型</label>
         <input id="llmModel" value="qwen3.5-plus">
@@ -931,29 +931,72 @@ def build_redesigned_index_html() -> str:
     }
     .question-shell {
       display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .question-shell.history-collapsed {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .question-shell.history-collapsed .question-sidebar {
+      display: none;
+    }
+    .question-shell:not(.history-collapsed) #openQuestionSidebarBtn {
+      display: none;
+    }
+    .question-sidebar, .question-main-toolbar {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .question-sidebar {
+      position: sticky;
+      top: 12px;
+      padding: 10px;
+      display: grid;
       gap: 10px;
     }
-    .question-tabs-row {
+    .question-sidebar-head, .question-main-toolbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      background: var(--surface);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px;
+    }
+    .question-sidebar-head h2 {
+      margin: 0;
+    }
+    .question-sidebar-head button, .question-main-toolbar button {
+      min-height: 32px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
+    .question-main {
+      min-width: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .question-main-toolbar {
+      min-height: 42px;
+      padding: 6px 8px;
+    }
+    .current-question-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 760;
     }
     .question-tabs {
       min-width: 0;
-      display: flex;
-      flex: 1;
+      display: grid;
       gap: 8px;
-      overflow-x: auto;
-      padding-bottom: 1px;
+      max-height: min(520px, calc(100vh - 260px));
+      overflow-y: auto;
+      padding-right: 2px;
     }
     .question-tab {
-      min-width: 180px;
-      max-width: 320px;
+      width: 100%;
       min-height: 44px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -1292,7 +1335,6 @@ def build_redesigned_index_html() -> str:
     }
     .part-evidence-fields {
       display: grid;
-      grid-template-columns: minmax(0, 1.3fr) minmax(80px, .45fr) minmax(120px, .65fr);
       gap: 8px;
     }
     .part-field {
@@ -1460,14 +1502,15 @@ def build_redesigned_index_html() -> str:
       padding: 0;
     }
     @media (max-width: 1180px) {
-      .query-band, .workspace, .answer-layout, .inspector, .build-dashboard { grid-template-columns: 1fr; }
+      .query-band, .workspace, .answer-layout, .inspector, .build-dashboard, .question-shell { grid-template-columns: 1fr; }
       .stage-rail { position: static; }
+      .question-sidebar { position: static; }
       .retrieval-board { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body, .part-evidence-fields { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1532,31 +1575,41 @@ def build_redesigned_index_html() -> str:
     </section>
 
     <section id="qaView" class="view">
-      <div class="question-shell">
-        <div class="question-tabs-row">
+      <div id="questionShell" class="question-shell">
+        <aside id="questionSidebar" class="question-sidebar">
+          <div class="question-sidebar-head">
+            <h2>历史回答</h2>
+            <button id="closeQuestionSidebarBtn" class="ghost">收起</button>
+          </div>
           <div id="questionTabs" class="question-tabs"></div>
           <button id="newQuestionBtn" class="secondary">新问题</button>
+        </aside>
+        <div class="question-main">
+          <div class="question-main-toolbar">
+            <button id="openQuestionSidebarBtn" class="secondary">历史回答</button>
+            <div id="currentQuestionTitle" class="current-question-title">当前问题</div>
+          </div>
+          <section class="query-band">
+            <div>
+              <label for="query">当前问题</label>
+              <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
+            </div>
+            <div class="query-tools">
+              <div>
+                <label for="topK">每路 Top K</label>
+                <input id="topK" type="number" min="1" value="1">
+              </div>
+              <div>
+                <label for="evidenceTopK">答案证据数</label>
+                <input id="evidenceTopK" type="number" min="1" value="4">
+              </div>
+              <div class="query-actions">
+                <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
+                <button id="runQuestionAnswerBtn">回答当前问题</button>
+              </div>
+            </div>
+          </section>
         </div>
-        <section class="query-band">
-          <div>
-            <label for="query">当前问题</label>
-            <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
-          </div>
-          <div class="query-tools">
-            <div>
-              <label for="topK">每路 Top K</label>
-              <input id="topK" type="number" min="1" value="1">
-            </div>
-            <div>
-              <label for="evidenceTopK">答案证据数</label>
-              <input id="evidenceTopK" type="number" min="1" value="4">
-            </div>
-            <div class="query-actions">
-              <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
-              <button id="runQuestionAnswerBtn">回答当前问题</button>
-            </div>
-          </div>
-        </section>
       </div>
     </section>
 
@@ -1715,7 +1768,7 @@ def build_redesigned_index_html() -> str:
 
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
-          <span>启用 LLM 答案生成</span>
+          <span>启用 LLM 解析 / 答案生成</span>
         </label>
         <div>
           <label for="llmProvider">LLM Provider</label>
@@ -1806,6 +1859,7 @@ def build_redesigned_index_html() -> str:
       questionTabs: [],
       activeQuestionTabId: null,
       questionTabCounter: 0,
+      questionSidebarOpen: true,
       activeView: "build",
       buildPollTimer: null
     };
@@ -1881,6 +1935,13 @@ def build_redesigned_index_html() -> str:
       return appState.questionTabs.find(tab => tab.id === appState.activeQuestionTabId) || null;
     }
 
+    function updateCurrentQuestionTitle() {
+      const title = $("currentQuestionTitle");
+      if (!title) return;
+      const tab = activeQuestionTab();
+      title.textContent = tab ? (tab.title || questionTitle(tab.query)) : "当前问题";
+    }
+
     function ensureQuestionTab(query = $("query").value) {
       if (!appState.questionTabs.length) {
         const tab = makeQuestionTab(query || defaultQuery);
@@ -1914,6 +1975,7 @@ def build_redesigned_index_html() -> str:
       tab.status = "draft";
       tab.updatedAt = new Date().toISOString();
       renderQuestionTabs();
+      updateCurrentQuestionTitle();
     }
 
     function syncActiveQuestionState() {
@@ -1947,6 +2009,7 @@ def build_redesigned_index_html() -> str:
       appState.lastResult = tab.lastResult || null;
       appState.currentTaskId = tab.answerTaskId || tab.searchTaskId || appState.currentTaskId;
       renderQuestionTabs();
+      updateCurrentQuestionTitle();
       renderStages();
       renderStageInspector();
       renderQuestionResult(tab);
@@ -1959,10 +2022,11 @@ def build_redesigned_index_html() -> str:
       if (!container) return;
       if (!appState.questionTabs.length) {
         container.innerHTML = '<div class="empty">暂无问题</div>';
+        updateCurrentQuestionTitle();
         return;
       }
       container.innerHTML = "";
-      for (const tab of appState.questionTabs) {
+      for (const tab of questionTabsNewestFirst()) {
         const button = document.createElement("button");
         button.className = `question-tab ${tab.id === appState.activeQuestionTabId ? "active" : ""}`;
         button.innerHTML = `
@@ -1972,6 +2036,23 @@ def build_redesigned_index_html() -> str:
         button.addEventListener("click", () => activateQuestionTab(tab.id));
         container.appendChild(button);
       }
+      updateCurrentQuestionTitle();
+    }
+
+    function questionTabsNewestFirst() {
+      return [...appState.questionTabs].sort((left, right) => questionTabTime(right) - questionTabTime(left));
+    }
+
+    function questionTabTime(tab) {
+      const value = Date.parse(tab && tab.updatedAt ? tab.updatedAt : "");
+      return Number.isFinite(value) ? value : 0;
+    }
+
+    function setQuestionSidebar(open, options = {}) {
+      appState.questionSidebarOpen = Boolean(open);
+      const shell = $("questionShell");
+      if (shell) shell.classList.toggle("history-collapsed", !appState.questionSidebarOpen);
+      if (options.save !== false) saveConfigToLocalStorage();
     }
 
     function questionTabMeta(tab) {
@@ -2121,6 +2202,7 @@ def build_redesigned_index_html() -> str:
         ui: {
           active_view: appState.activeView,
           query: $("query").value,
+          question_sidebar_open: appState.questionSidebarOpen,
           top_k: $("topK").value,
           evidence_top_k: $("evidenceTopK").value
         },
@@ -2183,6 +2265,9 @@ def build_redesigned_index_html() -> str:
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
+      if (ui.question_sidebar_open !== undefined) {
+        setQuestionSidebar(Boolean(ui.question_sidebar_open), {save: false});
+      }
 
       const embedding = config.embedding || {};
       if (modelApiLog.enabled === undefined) setCheckboxValue("apiRequestLoggingEnabled", embedding.log_requests_enabled);
@@ -2801,13 +2886,22 @@ def build_redesigned_index_html() -> str:
             <div class="route-head">
               <h3>${escapeHtml(label)} <span class="pill">${hits.length}</span></h3>
               <div class="row-meta">生成方式：${escapeHtml(plan)}</div>
-              <div class="row-meta">mode=${escapeHtml(retrieval.mode || "")} · top_k=${escapeHtml(retrieval.top_k || "")}</div>
+              <div class="row-meta">${escapeHtml(routeLimitText(name, retrieval))}</div>
               <div class="term-list">${queryTerms.slice(0, 10).map(term => `<span class="pill">${escapeHtml(term)}</span>`).join("")}</div>
             </div>
             <div class="route-body">${body}</div>
           </div>
         `;
       }).join("");
+    }
+
+    function routeLimitText(name, retrieval) {
+      const source = retrieval.part_candidate_source || {};
+      if (name === "part_evidence" && source.limit_applied === false) {
+        const count = Array.isArray(source.linked_work_order_ids) ? source.linked_work_order_ids.length : 0;
+        return `关联工单全量备件 · work_orders=${count}`;
+      }
+      return `mode=${retrieval.mode || ""} · top_k=${retrieval.top_k || ""}`;
     }
 
     function renderHit(hit, index) {
@@ -2843,12 +2937,12 @@ def build_redesigned_index_html() -> str:
               <div class="part-field-value">${escapeHtml(part.name)}</div>
             </div>
             <div class="part-field">
-              <div class="row-meta">新件数量</div>
-              <div class="part-field-value">${escapeHtml(part.quantity)}</div>
-            </div>
-            <div class="part-field">
               <div class="row-meta">新件物料编码</div>
               <div class="part-field-value">${escapeHtml(part.code)}</div>
+            </div>
+            <div class="part-field">
+              <div class="row-meta">新件数量</div>
+              <div class="part-field-value">${escapeHtml(part.quantity)}</div>
             </div>
           </div>
         </div>
@@ -3379,6 +3473,8 @@ def build_redesigned_index_html() -> str:
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
     $("buildViewBtn").addEventListener("click", () => switchView("build"));
     $("qaViewBtn").addEventListener("click", () => switchView("qa"));
+    $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
+    $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
     $("query").addEventListener("input", syncActiveQuestionInput);
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
@@ -3421,6 +3517,8 @@ def build_redesigned_index_html() -> str:
       appState.activeQuestionTabId = tab.id;
     }
     renderQuestionTabs();
+    updateCurrentQuestionTitle();
+    setQuestionSidebar(appState.questionSidebarOpen, {save: false});
     renderBuildProgress({});
     if (!restoredConfig) switchView("build");
     refreshTasks({quiet: true});

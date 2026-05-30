@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from waji_rag.config import AppConfig, EmbeddingConfig, LLMConfig
+from waji_rag.llm import QueryParseResult
 from waji_rag.pg_index import (
     APPLICATION_DATA_TABLES,
     PgIngestReport,
@@ -12,12 +15,14 @@ from waji_rag.pg_index import (
     bulk_insert_rows,
     clear_application_data_with_cursor,
     filter_evidence_for_answer,
+    fetch_part_candidates,
     prioritize_hits_by_constraints,
+    query_constraints_from_llm_payload,
+    resolve_query_constraints,
     store_embedding_batch,
     unique_terms,
     vector_literal,
 )
-from waji_rag.config import AppConfig, EmbeddingConfig
 from waji_rag.index_build import IndexDocument
 from waji_rag.work_order import PartRecord, WorkOrderRecord
 
@@ -143,6 +148,57 @@ class PgIndexHelpersTests(unittest.TestCase):
         self.assertEqual(result["rejected"][0]["evidence_gate"]["reason"], "missing_strict_component_anchor")
         self.assertEqual(result["rejected"][1]["evidence_gate"]["component_hits"], ["皮带"])
 
+    def test_query_constraints_from_llm_payload_keeps_explicit_anchors_only(self) -> None:
+        fallback = build_query_constraints("用户报修机器风扇皮带异响，请回答可能原因")
+
+        constraints = query_constraints_from_llm_payload(
+            "用户报修机器风扇皮带异响，请回答可能原因",
+            ["风扇", "皮带", "异响"],
+            {
+                "fault_phrase": "风扇皮带异响",
+                "component_text": "风扇皮带",
+                "component_terms": ["风扇皮带", "发动机附件轮系", "风扇", "皮带"],
+                "required_component_terms": ["风扇", "皮带"],
+                "symptom_terms": ["异响", "噪声"],
+            },
+            fallback=fallback,
+        )
+
+        self.assertEqual(constraints.fault_phrase, "风扇皮带异响")
+        self.assertEqual(constraints.component_text, "风扇皮带")
+        self.assertEqual(constraints.component_terms, ["风扇皮带", "风扇", "皮带"])
+        self.assertEqual(constraints.required_component_terms, ["风扇", "皮带"])
+        self.assertEqual(constraints.symptom_terms, ["异响"])
+
+    def test_resolve_query_constraints_uses_llm_when_available(self) -> None:
+        config = AppConfig(
+            llm=LLMConfig(
+                enabled=True,
+                provider="vllm",
+                model="demo-chat",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+        )
+        events: list[dict[str, object]] = []
+
+        with patch("waji_rag.pg_index.parse_diagnostic_query_constraints") as parser:
+            parser.return_value = QueryParseResult(
+                payload={
+                    "fault_phrase": "风扇皮带异响",
+                    "component_text": "风扇皮带",
+                    "component_terms": ["风扇皮带", "风扇", "皮带"],
+                    "required_component_terms": ["风扇", "皮带"],
+                    "symptom_terms": ["异响"],
+                },
+                debug={"usage": {"total_tokens": 12}},
+            )
+
+            constraints = resolve_query_constraints("用户报修机器风扇皮带异响", ["风扇", "皮带", "异响"], config, events)
+
+        self.assertEqual(constraints.component_terms, ["风扇皮带", "风扇", "皮带"])
+        self.assertEqual(events[0]["status"], "ok")
+        self.assertEqual(events[0]["mode"], "llm")
+
     def test_prioritize_hits_by_constraints_prefers_component_anchor(self) -> None:
         constraints = build_query_constraints("风扇皮带异响")
         hits = [
@@ -174,6 +230,25 @@ class PgIndexHelpersTests(unittest.TestCase):
 
         self.assertEqual(prioritized[0].doc_id, "fan")
 
+    def test_fetch_part_candidates_returns_all_parts_for_linked_orders(self) -> None:
+        cursor = FakeFetchCursor(
+            [
+                ("WO-001", "风扇皮带异响", None, None, "风扇皮带", "PB-001", "1", "WO-001.txt"),
+                ("WO-001", "风扇皮带异响", None, None, "张紧轮", "TN-002", "1", "WO-001.txt"),
+                ("WO-001", "风扇皮带异响", None, None, "皮带轮", "PL-003", "1", "WO-001.txt"),
+                ("WO-001", "风扇皮带异响", None, None, "固定螺栓", "BT-004", "4", "WO-001.txt"),
+            ]
+        )
+
+        parts = fetch_part_candidates(cursor, ["WO-001"])
+
+        self.assertEqual(len(parts), 4)
+        self.assertNotIn("LIMIT", cursor.executions[0][0].upper())
+        self.assertEqual(cursor.executions[0][1], (["WO-001"], ["WO-001"]))
+        self.assertEqual([part["part_code"] for part in parts], ["PB-001", "TN-002", "PL-003", "BT-004"])
+        self.assertTrue(all(part["doc_type"] == "part_evidence" for part in parts))
+        self.assertTrue(all(part["channel"] == "part_evidence" for part in parts))
+
 
 class FakeCursor:
     def __init__(self) -> None:
@@ -189,6 +264,17 @@ class FakeCursor:
         """Record bulk SQL execution parameters for assertions."""
 
         self.executemany_calls.append((sql, rows))
+
+
+class FakeFetchCursor(FakeCursor):
+    def __init__(self, rows: list[tuple[object, ...]]) -> None:
+        self.rows = rows
+        super().__init__()
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        """Return preloaded rows for query helper assertions."""
+
+        return self.rows
 
 
 class FakeEmbeddingProvider:

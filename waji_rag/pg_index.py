@@ -29,7 +29,12 @@ from waji_rag.index_build import (
     short_hash,
     tokenize_text,
 )
-from waji_rag.llm import DashScopeRerankClient, build_fallback_answer, generate_diagnostic_answer
+from waji_rag.llm import (
+    DashScopeRerankClient,
+    build_fallback_answer,
+    generate_diagnostic_answer,
+    parse_diagnostic_query_constraints,
+)
 from waji_rag.work_order import WorkOrderParser, WorkOrderRecord, iter_txt_files
 
 
@@ -951,10 +956,10 @@ class PgRetriever:
         if not query:
             raise ValueError("query must not be empty")
 
-        terms = unique_terms(tokenize_text(query))
-        constraints = build_query_constraints(query, terms)
         effective_mode = self.config.retrieval_mode()
         retrieval_events: list[dict[str, object]] = []
+        terms = unique_terms(tokenize_text(query))
+        constraints = resolve_query_constraints(query, terms, self.config, retrieval_events)
         channels: dict[str, list[RetrievalHit]] = {}
         with connect(self.database.database_url) as conn:
             with conn.cursor() as cur:
@@ -1007,14 +1012,29 @@ class PgRetriever:
                     "manual_fault_codes": fault_code_hits,
                     "part_evidence": part_hits,
                 }
-                part_candidates = fetch_part_candidates(cur, collect_work_order_ids(work_order_hits, part_hits), top_k=top_k * 3)
+                linked_work_order_ids = collect_work_order_ids(work_order_hits, part_hits)
+                part_candidates = fetch_part_candidates(cur, linked_work_order_ids)
 
+        channel_payloads: dict[str, list[dict[str, object]]] = {
+            "work_orders": [hit.to_dict() for hit in channels.get("work_orders", [])],
+            "manual_typical_faults": [hit.to_dict() for hit in channels.get("manual_typical_faults", [])],
+            "manual_fault_codes": [hit.to_dict() for hit in channels.get("manual_fault_codes", [])],
+            "part_evidence": [
+                part_candidate_to_channel_hit(part, rank=rank)
+                for rank, part in enumerate(part_candidates, start=1)
+            ],
+        }
         payload: dict[str, object] = {
             "query": query,
             "mode": effective_mode,
             "top_k": top_k,
-            "channels": {name: [hit.to_dict() for hit in hits] for name, hits in channels.items()},
+            "channels": channel_payloads,
             "part_candidates": part_candidates,
+            "part_candidate_source": {
+                "linked_work_order_ids": linked_work_order_ids,
+                "limit_applied": False,
+                "search_hit_count": len(channels.get("part_evidence", [])),
+            },
         }
         evidence_filter = filter_evidence_for_answer(
             query=query,
@@ -2420,8 +2440,8 @@ def search_fault_codes_exact(cur: Any, codes: list[str], *, top_k: int) -> list[
     return [row_to_hit(row) for row in cur.fetchall()]
 
 
-def fetch_part_candidates(cur: Any, work_order_ids: list[str], *, top_k: int) -> list[dict[str, object]]:
-    """Fetch part rows linked to retrieved work orders."""
+def fetch_part_candidates(cur: Any, work_order_ids: list[str]) -> list[dict[str, object]]:
+    """Fetch every part row linked to retrieved work orders."""
 
     if not work_order_ids:
         return []
@@ -2438,10 +2458,9 @@ def fetch_part_candidates(cur: Any, work_order_ids: list[str], *, top_k: int) ->
             source_path
         FROM part_evidence
         WHERE work_order_id = ANY(%s::text[])
-        ORDER BY id ASC
-        LIMIT %s
+        ORDER BY array_position(%s::text[], work_order_id), id ASC
         """,
-        (work_order_ids, top_k),
+        (work_order_ids, work_order_ids),
     )
     keys = (
         "work_order_id",
@@ -2453,7 +2472,55 @@ def fetch_part_candidates(cur: Any, work_order_ids: list[str], *, top_k: int) ->
         "quantity",
         "source_path",
     )
-    return [dict(zip(keys, row, strict=False)) for row in cur.fetchall()]
+    return [part_candidate_payload(dict(zip(keys, row, strict=False))) for row in cur.fetchall()]
+
+
+def part_candidate_payload(part: dict[str, object]) -> dict[str, object]:
+    """Return a structured part payload shared by candidate and route displays."""
+
+    payload = dict(part)
+    payload["doc_type"] = "part_evidence"
+    payload["channel"] = "part_evidence"
+    payload["metadata"] = {
+        "work_order_id": clean_string(part.get("work_order_id")),
+        "reported_issue": clean_string(part.get("reported_issue")),
+        "part_number_name": clean_string(part.get("part_number_name")),
+        "part_number": clean_string(part.get("part_number")),
+        "part_name": clean_string(part.get("part_name")),
+        "part_code": clean_string(part.get("part_code")),
+        "quantity": clean_string(part.get("quantity")),
+    }
+    return payload
+
+
+def part_candidate_to_channel_hit(part: dict[str, object], *, rank: int) -> dict[str, object]:
+    """Convert a linked part candidate into a retrieval-channel evidence item."""
+
+    work_order_id = clean_string(part.get("work_order_id"))
+    part_name = clean_string(part.get("part_name") or part.get("part_number_name"))
+    part_code = clean_string(part.get("part_code"))
+    quantity = clean_string(part.get("quantity"))
+    title = part_name or part_code or f"备件证据 {rank}"
+    body_preview = join_text(
+        [
+            f"新件备件名称: {part_name}" if part_name else "",
+            f"新件物料编码: {part_code}" if part_code else "",
+            f"新件数量: {quantity}" if quantity else "",
+            f"来源工单: {work_order_id}" if work_order_id else "",
+            f"用户报修内容: {clean_string(part.get('reported_issue'))}" if clean_string(part.get("reported_issue")) else "",
+        ]
+    )
+    payload = part_candidate_payload(part)
+    payload.update(
+        {
+            "doc_id": f"part:{work_order_id or 'unknown'}:{rank}",
+            "title": title,
+            "score": None,
+            "body_preview": body_preview,
+            "matched_terms": [],
+        }
+    )
+    return payload
 
 
 def enrich_part_hit_fields(cur: Any, hits: list[RetrievalHit]) -> None:
@@ -2570,6 +2637,154 @@ def build_query_constraints(query: str, terms: list[str] | None = None) -> Query
         required_component_terms=required_component_terms,
         symptom_terms=symptom_terms,
     )
+
+
+def resolve_query_constraints(
+    query: str,
+    terms: list[str],
+    config: AppConfig,
+    retrieval_events: list[dict[str, object]],
+) -> QueryConstraints:
+    """Resolve query constraints through LLM parsing with deterministic fallback."""
+
+    fallback = build_query_constraints(query, terms)
+    if not config.llm.enabled:
+        retrieval_events.append(
+            {
+                "channel": "query_parser",
+                "stage": "constraints",
+                "status": "fallback",
+                "mode": "rules",
+                "reason": "llm_disabled",
+                "constraints": fallback.to_dict(),
+            }
+        )
+        return fallback
+    if not config.llm.is_available():
+        retrieval_events.append(
+            {
+                "channel": "query_parser",
+                "stage": "constraints",
+                "status": "fallback",
+                "mode": "rules",
+                "reason": "missing_llm_config",
+                "constraints": fallback.to_dict(),
+            }
+        )
+        return fallback
+    try:
+        started_at = time.time()
+        result = parse_diagnostic_query_constraints(query=query, config=config.llm)
+        constraints = query_constraints_from_llm_payload(query, terms, result.payload, fallback=fallback)
+        retrieval_events.append(
+            {
+                "channel": "query_parser",
+                "stage": "constraints",
+                "status": "ok",
+                "mode": "llm",
+                "model": config.llm.model,
+                "elapsed_ms": elapsed_ms(started_at),
+                "constraints": constraints.to_dict(),
+                "usage": result.debug.get("usage"),
+            }
+        )
+        return constraints
+    except Exception as exc:  # noqa: BLE001 - query parsing must not block retrieval.
+        retrieval_events.append(
+            {
+                "channel": "query_parser",
+                "stage": "constraints",
+                "status": "fallback",
+                "mode": "rules",
+                "reason": f"{type(exc).__name__}: {exc}",
+                "constraints": fallback.to_dict(),
+            }
+        )
+        return fallback
+
+
+def query_constraints_from_llm_payload(
+    query: str,
+    terms: list[str],
+    payload: dict[str, object],
+    *,
+    fallback: QueryConstraints | None = None,
+) -> QueryConstraints:
+    """Build safe query constraints from an LLM JSON payload."""
+
+    fallback_constraints = fallback or build_query_constraints(query, terms)
+    fault_phrase = clean_string(payload.get("fault_phrase")) or fallback_constraints.fault_phrase
+    component_text = clean_string(
+        payload.get("component_text")
+        or payload.get("component")
+        or payload.get("component_anchor")
+        or payload.get("部件锚点")
+    )
+    raw_component_terms = string_list_payload(
+        payload.get("component_terms")
+        or payload.get("component_anchors")
+        or payload.get("components")
+    )
+    raw_required_terms = string_list_payload(payload.get("required_component_terms"))
+    raw_symptom_terms = string_list_payload(
+        payload.get("symptom_terms")
+        or payload.get("abnormal_terms")
+        or payload.get("异常词")
+    )
+    source_text = normalize_for_gate(join_text([query, fault_phrase, component_text]))
+    component_terms = safe_llm_terms(raw_component_terms, source_text)
+    symptom_terms = safe_llm_terms(raw_symptom_terms, source_text)
+    if not component_text and component_terms:
+        component_text = component_terms[0]
+    if not symptom_terms:
+        symptom_terms = fallback_constraints.symptom_terms
+    required_component_terms = safe_llm_terms(raw_required_terms, source_text)
+    if not required_component_terms:
+        required_component_terms = extract_required_component_terms(component_text)
+    if not component_terms:
+        component_terms = extract_component_terms(
+            component_text or fallback_constraints.component_text,
+            terms,
+            required_component_terms=required_component_terms,
+        )
+    component_terms = unique_terms(
+        term
+        for term in component_terms
+        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
+    )[:12]
+    required_component_terms = unique_terms(
+        term
+        for term in required_component_terms
+        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
+    )[:8]
+    return QueryConstraints(
+        fault_phrase=fault_phrase,
+        component_text=component_text or fallback_constraints.component_text,
+        component_terms=component_terms or fallback_constraints.component_terms,
+        required_component_terms=required_component_terms or fallback_constraints.required_component_terms,
+        symptom_terms=unique_terms(symptom_terms)[:8],
+    )
+
+
+def string_list_payload(value: object) -> list[str]:
+    """Return a clean string list from model JSON payload values."""
+
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    return [clean_string(item) for item in value if clean_string(item)]
+
+
+def safe_llm_terms(terms: list[str], source_text: str) -> list[str]:
+    """Keep only LLM terms explicitly anchored in the original question text."""
+
+    safe_terms: list[str] = []
+    for term in terms:
+        normalized = normalize_for_gate(term)
+        if len(normalized) >= 2 and normalized in source_text:
+            safe_terms.append(normalized)
+    return unique_terms(safe_terms)
 
 
 def extract_fault_phrase(query: str) -> str:
