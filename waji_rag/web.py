@@ -1109,7 +1109,7 @@ def build_redesigned_index_html() -> str:
     .workspace {
       margin-top: 14px;
       display: grid;
-      grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+      grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
       gap: 14px;
       align-items: start;
     }
@@ -1125,30 +1125,10 @@ def build_redesigned_index_html() -> str:
       top: 12px;
       overflow: hidden;
     }
-    .rail-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 8px;
-    }
-    .rail-head h2 {
-      margin: 0;
-    }
-    .rail-head button {
-      min-height: 30px;
-      padding: 0 9px;
-      font-size: 12px;
-    }
-    .rail-divider {
-      height: 1px;
-      margin: 12px 0;
-      background: var(--line);
-    }
     .task-list {
       display: grid;
       gap: 8px;
-      max-height: 300px;
+      max-height: min(620px, calc(100vh - 250px));
       overflow: auto;
       padding-right: 2px;
     }
@@ -1413,6 +1393,9 @@ def build_redesigned_index_html() -> str:
       background: #fff;
       box-shadow: 0 22px 60px rgba(15, 23, 42, .24);
     }
+    .history-modal {
+      width: min(760px, 100%);
+    }
     .modal-head, .modal-foot {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
@@ -1434,6 +1417,11 @@ def build_redesigned_index_html() -> str:
     }
     .modal-body .full {
       grid-column: 1 / -1;
+    }
+    .history-body {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
     }
     .checkline {
       min-height: 38px;
@@ -1473,6 +1461,7 @@ def build_redesigned_index_html() -> str:
       <button id="runSearchBtn" class="secondary">检索</button>
       <button id="runAnswerBtn" class="secondary">回答</button>
       <button id="runFullFlowBtn">全流程</button>
+      <button id="openHistoryBtn" class="secondary">历史任务</button>
       <button id="openConfigBtn" class="secondary">配置</button>
       <button id="doctorBtn" class="ghost">环境检查</button>
     </div>
@@ -1552,12 +1541,6 @@ def build_redesigned_index_html() -> str:
 
     <div class="workspace">
       <aside class="stage-rail">
-        <div class="rail-head">
-          <h2 id="taskListTitle">构建任务</h2>
-          <button id="refreshTasksBtn" class="ghost">刷新</button>
-        </div>
-        <div id="taskList" class="task-list"><div class="empty">暂无任务</div></div>
-        <div class="rail-divider"></div>
         <h2 id="stageListTitle">构建阶段</h2>
         <div id="stageList" class="stage-list"></div>
       </aside>
@@ -1591,6 +1574,21 @@ def build_redesigned_index_html() -> str:
       </div>
     </div>
   </main>
+
+  <div id="taskHistoryModal" class="modal-backdrop">
+    <div class="modal history-modal">
+      <div class="modal-head">
+        <h2 id="taskListTitle">历史任务清单</h2>
+        <div class="actions">
+          <button id="refreshTasksBtn" class="ghost">刷新</button>
+          <button id="closeHistoryBtn" class="ghost">关闭</button>
+        </div>
+      </div>
+      <div class="history-body">
+        <div id="taskList" class="task-list"><div class="empty">暂无历史任务</div></div>
+      </div>
+    </div>
+  </div>
 
   <div id="configModal" class="modal-backdrop">
     <div class="modal">
@@ -2594,15 +2592,13 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderTaskList() {
-      $("taskListTitle").textContent = appState.activeView === "qa" ? "问答任务" : "构建任务";
-      const visibleTasks = appState.tasks.filter(task => taskBelongsToView(task));
-      if (!visibleTasks.length) {
-        const emptyText = appState.activeView === "qa" ? "暂无检索/回答任务" : "暂无构建任务";
-        $("taskList").innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
+      $("taskListTitle").textContent = "历史任务清单";
+      if (!appState.tasks.length) {
+        $("taskList").innerHTML = '<div class="empty">暂无历史任务</div>';
         return;
       }
       $("taskList").innerHTML = "";
-      for (const task of visibleTasks) {
+      for (const task of appState.tasks) {
         const button = document.createElement("button");
         button.className = `task-card ${task.status || ""} ${appState.currentTaskId === task.id ? "active" : ""}`;
         button.innerHTML = `
@@ -2618,16 +2614,11 @@ def build_redesigned_index_html() -> str:
       }
     }
 
-    function taskBelongsToView(task) {
-      const buildTypes = new Set(["build", "build_retry", "embedding"]);
-      const qaTypes = new Set(["search", "answer"]);
-      return appState.activeView === "qa" ? qaTypes.has(task.task_type) : buildTypes.has(task.task_type);
-    }
-
     async function loadTask(taskId) {
       try {
         const data = await postJson("/api/task", taskPayload({task_id: taskId}));
         renderStoredTask(data.task);
+        $("taskHistoryModal").classList.remove("open");
       } catch (error) {
         setStatus(String(error), "error");
       }
@@ -2925,7 +2916,7 @@ def build_redesigned_index_html() -> str:
         renderSelectedEvidence([]);
         await refreshTasks({quiet: true});
         if (appState.currentTaskId) startBuildPolling(appState.currentTaskId);
-        setStatus("构建任务已启动，可在左侧任务记录查看进度", "success");
+        setStatus("构建任务已启动，可在“历史任务”清单查看进度", "success");
       } catch (error) {
         setStatus(String(error), "error");
         const current = appState.selectedStage || "ingest";
@@ -2960,7 +2951,7 @@ def build_redesigned_index_html() -> str:
 
     async function retryFailedItems(button) {
       if (!appState.currentTaskId) {
-        setStatus("请先在左侧任务记录中选择一个有失败条目的构建任务", "error");
+        setStatus("请先在“历史任务”清单中选择一个有失败条目的构建任务", "error");
         return;
       }
       button.disabled = true;
@@ -3261,6 +3252,11 @@ def build_redesigned_index_html() -> str:
 
     $("openConfigBtn").addEventListener("click", () => $("configModal").classList.add("open"));
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
+    $("openHistoryBtn").addEventListener("click", async () => {
+      $("taskHistoryModal").classList.add("open");
+      await refreshTasks({quiet: true});
+    });
+    $("closeHistoryBtn").addEventListener("click", () => $("taskHistoryModal").classList.remove("open"));
     $("saveConfigBtn").addEventListener("click", () => {
       saveConfigToLocalStorage();
       setStatus("配置已保存到页面状态", "success");
