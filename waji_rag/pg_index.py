@@ -1101,9 +1101,22 @@ class PgRetriever:
         debug_events: list[dict[str, object]],
     ) -> list[RetrievalHit]:
         candidate_top_k = max(top_k, self.config.retrieval.bm25_top_k)
+        if channel_name == "work_orders":
+            candidate_top_k = max(
+                candidate_top_k,
+                self.config.retrieval.work_order_candidate_top_k,
+                self.config.retrieval.work_order_max_hits,
+            )
         bm25_hits = search_bm25(cur, terms, top_k=candidate_top_k, doc_types=doc_types)
         if mode != "hybrid" or self.embedding_provider is None:
-            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
+            return self._finalize_channel_hits(
+                bm25_hits,
+                constraints=constraints,
+                top_k=top_k,
+                candidate_top_k=candidate_top_k,
+                channel_name=channel_name,
+                debug_events=debug_events,
+            )
 
         try:
             query_vector = self.embedding_provider.embed_texts([query], text_type="query")[0]
@@ -1117,7 +1130,14 @@ class PgRetriever:
                     "bm25_hits": len(bm25_hits),
                 }
             )
-            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
+            return self._finalize_channel_hits(
+                bm25_hits,
+                constraints=constraints,
+                top_k=top_k,
+                candidate_top_k=candidate_top_k,
+                channel_name=channel_name,
+                debug_events=debug_events,
+            )
         try:
             vector_hits = search_vectors(
                 cur,
@@ -1137,7 +1157,14 @@ class PgRetriever:
                     "bm25_hits": len(bm25_hits),
                 }
             )
-            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
+            return self._finalize_channel_hits(
+                bm25_hits,
+                constraints=constraints,
+                top_k=top_k,
+                candidate_top_k=candidate_top_k,
+                channel_name=channel_name,
+                debug_events=debug_events,
+            )
         debug_events.append(
             {
                 "channel": channel_name,
@@ -1153,7 +1180,52 @@ class PgRetriever:
             top_k=candidate_top_k,
             bm25_weight=self.config.retrieval.hybrid_alpha,
         )
-        return prioritize_hits_by_constraints(merged_hits, constraints, top_k=top_k)
+        return self._finalize_channel_hits(
+            merged_hits,
+            constraints=constraints,
+            top_k=top_k,
+            candidate_top_k=candidate_top_k,
+            channel_name=channel_name,
+            debug_events=debug_events,
+        )
+
+    def _finalize_channel_hits(
+        self,
+        hits: list[RetrievalHit],
+        *,
+        constraints: QueryConstraints,
+        top_k: int,
+        candidate_top_k: int,
+        channel_name: str,
+        debug_events: list[dict[str, object]],
+    ) -> list[RetrievalHit]:
+        """Apply channel-specific final ranking and limits."""
+
+        if channel_name != "work_orders":
+            return prioritize_hits_by_constraints(hits, constraints, top_k=top_k)
+
+        prioritized = prioritize_hits_by_constraints(hits, constraints, top_k=len(hits))
+        filtered = filter_work_order_hits_by_threshold(
+            prioritized,
+            min_relative_score=self.config.retrieval.work_order_min_relative_score,
+            max_hits=self.config.retrieval.work_order_max_hits,
+        )
+        top_score = prioritized[0].score if prioritized else 0.0
+        debug_events.append(
+            {
+                "channel": "work_orders",
+                "stage": "threshold_filter",
+                "status": "ok",
+                "candidate_count": len(prioritized),
+                "returned_count": len(filtered),
+                "candidate_top_k": candidate_top_k,
+                "top_score": round(top_score, 6),
+                "min_relative_score": self.config.retrieval.work_order_min_relative_score,
+                "score_threshold": round(top_score * self.config.retrieval.work_order_min_relative_score, 6),
+                "max_hits": self.config.retrieval.work_order_max_hits,
+            }
+        )
+        return filtered
 
 
 class RagPipeline:
@@ -2886,6 +2958,24 @@ def prioritize_hits_by_constraints(
         return (0 if has_component else 1, 0 if has_symptom else 1, -hit.score, hit.document_id)
 
     return sorted(hits, key=sort_key)[:top_k]
+
+
+def filter_work_order_hits_by_threshold(
+    hits: list[RetrievalHit],
+    *,
+    min_relative_score: float,
+    max_hits: int,
+) -> list[RetrievalHit]:
+    """Keep work-order hits whose scores are close enough to the best candidate."""
+
+    if not hits or max_hits <= 0:
+        return []
+    top_score = hits[0].score
+    if top_score <= 0:
+        return []
+    safe_relative_score = min(max(float(min_relative_score), 0.0), 1.0)
+    score_threshold = top_score * safe_relative_score
+    return [hit for hit in hits if hit.score >= score_threshold][:max_hits]
 
 
 def filter_evidence_for_answer(

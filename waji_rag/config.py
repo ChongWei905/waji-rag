@@ -63,6 +63,9 @@ class RetrievalConfig:
     bm25_top_k: int = 20
     vector_top_k: int = 20
     hybrid_alpha: float = 0.75
+    work_order_candidate_top_k: int = 50
+    work_order_min_relative_score: float = 0.45
+    work_order_max_hits: int = 10
 
 
 @dataclass(slots=True)
@@ -212,6 +215,13 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
             bm25_top_k=int(retrieval_payload.get("bm25_top_k", 20)),
             vector_top_k=int(retrieval_payload.get("vector_top_k", 20)),
             hybrid_alpha=float(retrieval_payload.get("hybrid_alpha", 0.75)),
+            work_order_candidate_top_k=max(1, int(retrieval_payload.get("work_order_candidate_top_k", 50))),
+            work_order_min_relative_score=clamp_float(
+                retrieval_payload.get("work_order_min_relative_score", 0.45),
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            work_order_max_hits=max(0, int(retrieval_payload.get("work_order_max_hits", 10))),
         ),
         embedding=EmbeddingConfig(
             enabled=as_bool(embedding_payload.get("enabled", False)),
@@ -475,6 +485,12 @@ def optional_int(value: object, *, default: int | None = None) -> int | None:
     if value in (None, ""):
         return default
     return int(value)
+
+
+def clamp_float(value: object, *, minimum: float, maximum: float) -> float:
+    """Parse and clamp a float to an inclusive range."""
+
+    return min(max(float(value), minimum), maximum)
 
 
 def parse_string_list(value: object, *, default: list[str] | None = None) -> list[str]:

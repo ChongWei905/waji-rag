@@ -15,6 +15,7 @@ from waji_rag.pg_index import (
     bulk_insert_rows,
     clear_application_data_with_cursor,
     filter_evidence_for_answer,
+    filter_work_order_hits_by_threshold,
     filter_part_candidates_by_evidence,
     fetch_part_candidates,
     prioritize_hits_by_constraints,
@@ -230,6 +231,47 @@ class PgIndexHelpersTests(unittest.TestCase):
         prioritized = prioritize_hits_by_constraints(hits, constraints, top_k=1)
 
         self.assertEqual(prioritized[0].doc_id, "fan")
+
+    def test_filter_work_order_hits_uses_relative_threshold_without_forcing_top_k(self) -> None:
+        hits = [
+            RetrievalHit(
+                document_id=1,
+                doc_id="wo-1",
+                doc_type="work_order",
+                title="风扇皮带异响",
+                score=10.0,
+                body_preview="更换风扇皮带。",
+                work_order_id="WO-001",
+                source_path="WO-001.txt",
+                metadata={},
+            ),
+            RetrievalHit(
+                document_id=2,
+                doc_id="wo-2",
+                doc_type="work_order",
+                title="风扇皮带尖叫",
+                score=4.5,
+                body_preview="调整皮带张紧度。",
+                work_order_id="WO-002",
+                source_path="WO-002.txt",
+                metadata={},
+            ),
+            RetrievalHit(
+                document_id=3,
+                doc_id="wo-3",
+                doc_type="work_order",
+                title="空调异响",
+                score=4.4,
+                body_preview="更换鼓风机。",
+                work_order_id="WO-003",
+                source_path="WO-003.txt",
+                metadata={},
+            ),
+        ]
+
+        filtered = filter_work_order_hits_by_threshold(hits, min_relative_score=0.45, max_hits=10)
+
+        self.assertEqual([hit.doc_id for hit in filtered], ["wo-1", "wo-2"])
 
     def test_fetch_part_candidates_returns_all_parts_for_linked_orders(self) -> None:
         cursor = FakeFetchCursor(

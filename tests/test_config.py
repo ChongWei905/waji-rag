@@ -108,6 +108,21 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(disabled_config.llm.log_requests_enabled)
         self.assertEqual(disabled_config.llm.request_log_path, "tmp/model-calls.jsonl")
 
+    def test_work_order_threshold_config_is_clamped(self) -> None:
+        config = config_from_payload(
+            {
+                "retrieval": {
+                    "work_order_candidate_top_k": 80,
+                    "work_order_min_relative_score": 1.8,
+                    "work_order_max_hits": 12,
+                }
+            }
+        )
+
+        self.assertEqual(config.retrieval.work_order_candidate_top_k, 80)
+        self.assertEqual(config.retrieval.work_order_min_relative_score, 1.0)
+        self.assertEqual(config.retrieval.work_order_max_hits, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,9 +7,11 @@ import csv
 import html
 import hashlib
 import json
+import os
 import posixpath
 import threading
 import time
+import traceback
 import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +61,7 @@ DEFAULT_QUERY = (
     "用户报修机器风扇皮带异响，请回答有可能是哪些故障导致的，如何解决，"
     "相应故障需要更换备件的详细信息（备件的编号及名称，备件编码，备件数量）"
 )
+DEFAULT_SHARED_CONFIG_PATH = PROJECT_ROOT / ".git" / "info" / "waji-rag-shared-config.json"
 
 
 INDEX_HTML = f"""<!doctype html>
@@ -608,6 +611,9 @@ INDEX_HTML = f"""<!doctype html>
       $("query").value = defaultQuery;
       $("topK").value = "1";
       $("evidenceTopK").value = "4";
+      $("workOrderCandidateTopK").value = "50";
+      $("workOrderMinRelativeScore").value = "0.45";
+      $("workOrderMaxHits").value = "10";
       $("workOrderLimit").value = "";
       $("manualLimit").value = "";
       $("ingestReset").checked = true;
@@ -1701,12 +1707,24 @@ def build_redesigned_index_html() -> str:
           </div>
           <div class="query-tools">
             <div>
-              <label for="topK">每路 Top K</label>
+              <label for="topK">手册 / 故障码 Top K</label>
               <input id="topK" type="number" min="1" value="1">
             </div>
             <div>
               <label for="evidenceTopK">答案证据数</label>
               <input id="evidenceTopK" type="number" min="1" value="4">
+            </div>
+            <div>
+              <label for="workOrderCandidateTopK">工单候选上限</label>
+              <input id="workOrderCandidateTopK" type="number" min="1" value="50">
+            </div>
+            <div>
+              <label for="workOrderMinRelativeScore">工单相对阈值</label>
+              <input id="workOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
+            </div>
+            <div>
+              <label for="workOrderMaxHits">工单最大返回</label>
+              <input id="workOrderMaxHits" type="number" min="0" value="10">
             </div>
             <div class="query-actions">
               <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
@@ -2326,6 +2344,11 @@ def build_redesigned_index_html() -> str:
 
     function configOverrides() {
       return {
+        retrieval: {
+          work_order_candidate_top_k: $("workOrderCandidateTopK").value ? Number($("workOrderCandidateTopK").value) : 50,
+          work_order_min_relative_score: $("workOrderMinRelativeScore").value ? Number($("workOrderMinRelativeScore").value) : 0.45,
+          work_order_max_hits: $("workOrderMaxHits").value ? Number($("workOrderMaxHits").value) : 10
+        },
         embedding: {
           enabled: $("enableEmbedding").checked,
           provider: $("embeddingProvider").value,
@@ -2828,7 +2851,10 @@ def build_redesigned_index_html() -> str:
           query: $("query").value,
           question_sidebar_open: appState.questionSidebarOpen,
           top_k: $("topK").value,
-          evidence_top_k: $("evidenceTopK").value
+          evidence_top_k: $("evidenceTopK").value,
+          work_order_candidate_top_k: $("workOrderCandidateTopK").value,
+          work_order_min_relative_score: $("workOrderMinRelativeScore").value,
+          work_order_max_hits: $("workOrderMaxHits").value
         },
         database_url: $("databaseUrl").value,
         env_file: $("envFile").value,
@@ -2897,6 +2923,10 @@ def build_redesigned_index_html() -> str:
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
+      const retrieval = config.retrieval || {};
+      setInputValue("workOrderCandidateTopK", ui.work_order_candidate_top_k ?? retrieval.work_order_candidate_top_k);
+      setInputValue("workOrderMinRelativeScore", ui.work_order_min_relative_score ?? retrieval.work_order_min_relative_score);
+      setInputValue("workOrderMaxHits", ui.work_order_max_hits ?? retrieval.work_order_max_hits);
       if (ui.question_sidebar_open !== undefined) {
         setQuestionSidebar(Boolean(ui.question_sidebar_open), {save: false});
       }
@@ -3004,11 +3034,34 @@ def build_redesigned_index_html() -> str:
       saveConfigToLocalStorage();
     }
 
+    async function restoreSharedConfigFromServer() {
+      try {
+        const data = await getJson("/api/shared-config");
+        if (!data || !data.config) return false;
+        applyConfigSnapshot(data.config, {silent: true});
+        saveConfigToLocalStorage();
+        setStatus("已加载共享配置", "success");
+        return true;
+      } catch (error) {
+        setStatus(`共享配置加载失败：${error}`, "error");
+        return false;
+      }
+    }
+
+    async function saveSharedConfigToServer() {
+      const snapshot = currentConfigSnapshot();
+      const result = await postJson("/api/shared-config", {config: snapshot});
+      setStatus(`共享配置已保存：${result.path || ""}`, "success");
+      return result;
+    }
+
     function bindAutoSave() {
       const ids = [
         "databaseUrl", "envFile", "workOrderDir", "manualDir", "workOrderLimit", "manualLimit", "maxManualChars",
         "apiRequestLoggingEnabled", "apiRequestLogPath",
-        "ingestReset", "ingestResume", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
+        "ingestReset", "ingestResume", "query", "topK", "evidenceTopK",
+        "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
+        "enableEmbedding", "embeddingProvider", "embeddingModel",
         "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
         "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey",
         "enableQueryParser", "queryParserProvider", "queryParserModel", "queryParserBaseUrl", "queryParserNoProxyHosts", "queryParserApiKey",
@@ -3051,14 +3104,20 @@ def build_redesigned_index_html() -> str:
         body: JSON.stringify(payload)
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || response.statusText);
+      if (!response.ok) {
+        const trace = data.traceback ? `\n${String(data.traceback).split("\n").slice(-8).join("\n")}` : "";
+        throw new Error(`${data.error || response.statusText}${trace}`);
+      }
       return data;
     }
 
     async function getJson(url) {
       const response = await fetch(url);
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || response.statusText);
+      if (!response.ok) {
+        const trace = data.traceback ? `\n${String(data.traceback).split("\n").slice(-8).join("\n")}` : "";
+        throw new Error(`${data.error || response.statusText}${trace}`);
+      }
       return data;
     }
 
@@ -4116,9 +4175,13 @@ def build_redesigned_index_html() -> str:
       await refreshTasks({quiet: true});
     });
     $("closeHistoryBtn").addEventListener("click", () => $("taskHistoryModal").classList.remove("open"));
-    $("saveConfigBtn").addEventListener("click", () => {
-      saveConfigToLocalStorage();
-      setStatus("配置已保存到页面状态", "success");
+    $("saveConfigBtn").addEventListener("click", async () => {
+      try {
+        saveConfigToLocalStorage();
+        await saveSharedConfigToServer();
+      } catch (error) {
+        setStatus(`配置保存失败：${error}`, "error");
+      }
     });
     $("loadDemoBtn").addEventListener("click", applyDemoDefaults);
     $("docArborEnvBtn").addEventListener("click", () => {
@@ -4162,25 +4225,30 @@ def build_redesigned_index_html() -> str:
       }
     });
 
-    getJson("/api/doctor").then(data => {
-      $("version").textContent = data.waji_rag_version + " · " + data.platform;
-    }).catch(() => {});
-    resetStages("build", "config");
-    applyDemoDefaults({save: false});
-    bindAutoSave();
-    const restoredConfig = restoreConfigFromLocalStorage();
-    if (!appState.questionTabs.length) {
-      const tab = makeQuestionTab($("query").value || defaultQuery);
-      appState.questionTabs.push(tab);
-      appState.activeQuestionTabId = tab.id;
+    async function initializeWorkbench() {
+      getJson("/api/doctor").then(data => {
+        $("version").textContent = data.waji_rag_version + " · " + data.platform;
+      }).catch(() => {});
+      resetStages("build", "config");
+      applyDemoDefaults({save: false});
+      bindAutoSave();
+      const restoredSharedConfig = await restoreSharedConfigFromServer();
+      const restoredLocalConfig = restoredSharedConfig ? false : restoreConfigFromLocalStorage();
+      if (!appState.questionTabs.length) {
+        const tab = makeQuestionTab($("query").value || defaultQuery);
+        appState.questionTabs.push(tab);
+        appState.activeQuestionTabId = tab.id;
+      }
+      renderQuestionTabs();
+      updateCurrentQuestionTitle();
+      setQuestionSidebar(appState.questionSidebarOpen, {save: false});
+      renderBuildProgress({});
+      if (!restoredSharedConfig && !restoredLocalConfig) switchView("build");
+      refreshTasks({quiet: true});
+      refreshQuestionTabsFromServer({quiet: true});
     }
-    renderQuestionTabs();
-    updateCurrentQuestionTitle();
-    setQuestionSidebar(appState.questionSidebarOpen, {save: false});
-    renderBuildProgress({});
-    if (!restoredConfig) switchView("build");
-    refreshTasks({quiet: true});
-    refreshQuestionTabsFromServer({quiet: true});
+
+    initializeWorkbench().catch(error => setStatus(`页面初始化失败：${error}`, "error"));
   </script>
 </body>
 </html>
@@ -4225,6 +4293,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/doctor":
             self._send_json(doctor_payload())
             return
+        if parsed.path == "/api/shared-config":
+            self._handle_get_shared_config()
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
     def do_POST(self) -> None:
@@ -4233,6 +4304,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/config-preview":
             self._handle_config_preview()
+            return
+        if parsed.path == "/api/shared-config":
+            self._handle_save_shared_config()
             return
         if parsed.path == "/api/init-db":
             self._handle_init_db()
@@ -4287,7 +4361,35 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             )
             self._send_json({"config": config.to_dict(), "database": redact_database_url(database_from_payload(payload).database_url)})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc)
+
+    def _handle_get_shared_config(self) -> None:
+        try:
+            config_path = shared_config_path()
+            if not config_path.exists():
+                self._send_json({"config": None, "path": str(config_path)})
+                return
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("shared config file must contain a JSON object")
+            self._send_json({"config": payload, "path": str(config_path)})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
+
+    def _handle_save_shared_config(self) -> None:
+        payload = self._read_json()
+        try:
+            config = payload.get("config")
+            if not isinstance(config, dict):
+                raise ValueError("config is required")
+            config_path = shared_config_path()
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._send_json({"status": "saved", "path": str(config_path)})
+        except ValueError as exc:
+            self._send_exception_json(exc, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
 
     def _handle_init_db(self) -> None:
         payload = self._read_json()
@@ -4351,10 +4453,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json({"task_id": task_id, "summary": "任务已暂停", "status": "paused"})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
-            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
-            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc, extra=body)
 
     def _handle_embed_db(self) -> None:
         payload = self._read_json()
@@ -4396,10 +4498,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json({"task_id": task_id, "summary": "任务已暂停", "status": "paused"})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
-            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
-            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc, extra=body)
 
     def _handle_retry_failed_items(self) -> None:
         payload = self._read_json()
@@ -4437,10 +4539,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
-            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
-            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc, extra=body)
 
     def _handle_pause_task(self) -> None:
         payload = self._read_json()
@@ -4480,10 +4582,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json(response)
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
-            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
-            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc, extra=body)
 
     def _handle_ask_db(self) -> None:
         payload = self._read_json()
@@ -4512,10 +4614,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json(response)
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
-            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
-            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc, extra=body)
 
     def _handle_tasks(self) -> None:
         payload = self._read_json()
@@ -4573,6 +4675,24 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             raise ValueError("JSON body must be an object")
         return data
+
+    def _send_exception_json(
+        self,
+        exc: Exception,
+        *,
+        status: HTTPStatus = HTTPStatus.INTERNAL_SERVER_ERROR,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        trace = traceback.format_exc()
+        self.log_error("%s %s failed: %s\n%s", self.command, self.path, exc, trace)
+        body: dict[str, object] = {
+            "error_type": type(exc).__name__,
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": trace,
+        }
+        if extra:
+            body.update(extra)
+        self._send_json(body, status=status)
 
     def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -4756,6 +4876,17 @@ def _first_child_text(element: ET.Element, name: str) -> str:
 
 def _xml_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
+
+
+def shared_config_path() -> Path:
+    """Return the server-side shared UI config path."""
+
+    env_path = str(os.getenv("WAJI_WEB_CONFIG_PATH") or "").strip()
+    if env_path:
+        return Path(env_path)
+    if DEFAULT_SHARED_CONFIG_PATH.parent.exists():
+        return DEFAULT_SHARED_CONFIG_PATH
+    return PROJECT_ROOT / ".waji-rag-shared-config.json"
 
 
 def database_from_payload(payload: dict[str, Any]) -> DatabaseOptions:
