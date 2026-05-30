@@ -1076,6 +1076,10 @@ def build_redesigned_index_html() -> str:
       border-style: dashed;
       background: var(--soft);
     }
+    .question-tab.overview {
+      border-color: var(--line-strong);
+      background: #fff;
+    }
     .question-tab.pass.active, .question-tab.fail.active, .question-tab.error.active, .question-tab.skipped.active {
       box-shadow: inset 0 0 0 1px #0f766e;
     }
@@ -1494,6 +1498,30 @@ def build_redesigned_index_html() -> str:
       grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr);
       gap: 12px;
     }
+    .batch-retry-panel {
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+    }
+    .batch-retry-controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .batch-retry-panel label {
+      margin-top: 0;
+    }
+    .batch-retry-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     .json-box {
       min-height: 360px;
       max-height: 640px;
@@ -1697,7 +1725,7 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .batch-retry-controls, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2187,6 +2215,14 @@ def build_redesigned_index_html() -> str:
       activeBatchEvalTaskId: null,
       activeBatchEvalTask: null,
       activeBatchEvalRowNumber: null,
+      activeBatchEvalRetryTaskId: null,
+      batchRetry: {
+        topK: 1,
+        workOrderCandidateTopK: 50,
+        workOrderMinRelativeScore: 0.45,
+        workOrderMaxHits: 10,
+        running: false
+      },
       batchEval: {
         headers: [],
         rows: [],
@@ -2738,8 +2774,7 @@ def build_redesigned_index_html() -> str:
         const data = await postJson("/api/task", taskPayload({task_id: taskId}));
         applyBatchEvalTask(data.task);
         switchView("batch");
-        const rows = orderedBatchEvalResults();
-        if (rows.length) await activateBatchEvalRow(rows[0].rowNumber);
+        activateBatchEvalOverview();
         setStatus(`已载入批量评测 #${taskId}`, "success");
       } catch (error) {
         setStatus(String(error), "error");
@@ -2752,6 +2787,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalTaskId = task.id;
       appState.activeBatchEvalTask = task;
       appState.activeBatchEvalRowNumber = null;
+      appState.activeBatchEvalRetryTaskId = null;
       appState.batchEval.taskId = task.id;
       appState.batchEval.fileName = result.file_name || task.query || "";
       appState.batchEval.headers = result.headers || [];
@@ -2761,13 +2797,27 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.settings = result.settings || null;
       appState.batchEval.partColumns = result.part_columns || null;
       appState.batchEval.questionIndex = result.question_column ?? null;
+      syncBatchRetryDefaults(appState.batchEval.settings);
       renderBatchEvalPage();
+    }
+
+    function syncBatchRetryDefaults(settings) {
+      const retrieval = (settings && settings.retrieval) || {};
+      appState.batchRetry = {
+        ...appState.batchRetry,
+        topK: Number(settings && settings.topK ? settings.topK : appState.batchRetry.topK || 1),
+        workOrderCandidateTopK: Number(retrieval.work_order_candidate_top_k ?? appState.batchRetry.workOrderCandidateTopK ?? 50),
+        workOrderMinRelativeScore: Number(retrieval.work_order_min_relative_score ?? appState.batchRetry.workOrderMinRelativeScore ?? 0.45),
+        workOrderMaxHits: Number(retrieval.work_order_max_hits ?? appState.batchRetry.workOrderMaxHits ?? 10),
+        running: false
+      };
     }
 
     function renderBatchEvalPage() {
       const detailOpen = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId);
+      const overviewOpen = detailOpen && appState.activeBatchEvalRowNumber === null;
       $("batchHomePanel").classList.toggle("hidden", detailOpen);
-      $("batchDetailPanel").classList.toggle("hidden", !detailOpen);
+      $("batchDetailPanel").classList.toggle("hidden", !overviewOpen);
       renderShellMode();
       updateSidebarChrome();
       renderBatchEvalRuns();
@@ -2782,6 +2832,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalTaskId = null;
       appState.activeBatchEvalTask = null;
       appState.activeBatchEvalRowNumber = null;
+      appState.activeBatchEvalRetryTaskId = null;
       switchView("batch");
       refreshBatchEvalRuns({quiet: true});
     }
@@ -2799,30 +2850,49 @@ def build_redesigned_index_html() -> str:
         container.innerHTML = '<div class="empty">本次评测暂无问题结果</div>';
         return;
       }
-      container.innerHTML = rows.map(item => `
+      const overviewActive = appState.activeBatchEvalRowNumber === null;
+      const counts = batchEvalCounts(rows);
+      const overview = `
+        <button class="question-tab overview ${overviewActive ? "active" : ""}" data-batch-overview="1">
+          <div class="question-tab-title">整体进展</div>
+          <div class="question-tab-meta">${escapeHtml(counts.done)} / ${escapeHtml(counts.total)} · 正确 ${escapeHtml(counts.pass)} · 失败 ${escapeHtml(counts.fail)}</div>
+        </button>
+      `;
+      container.innerHTML = overview + rows.map(item => `
         <button class="question-tab ${escapeHtml(item.status || "")} ${Number(item.rowNumber) === Number(appState.activeBatchEvalRowNumber) ? "active" : ""}" data-row-number="${escapeHtml(item.rowNumber)}">
           <div class="question-tab-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(batchEvalStatusText(item.status))} · ${escapeHtml(questionTitle(item.question || ""))}</div>
           <div class="question-tab-meta">${escapeHtml(item.taskId ? `检索 #${item.taskId}` : batchEvalReason(item) || "无检索任务")}</div>
         </button>
       `).join("");
+      const overviewButton = container.querySelector("[data-batch-overview]");
+      if (overviewButton) overviewButton.addEventListener("click", activateBatchEvalOverview);
       for (const button of container.querySelectorAll("[data-row-number]")) {
         button.addEventListener("click", () => activateBatchEvalRow(Number(button.dataset.rowNumber)));
       }
+    }
+
+    function activateBatchEvalOverview() {
+      appState.activeBatchEvalRowNumber = null;
+      appState.activeBatchEvalRetryTaskId = null;
+      renderBatchEvalPage();
+      setStatus("已切换到批量评测整体进展", "success");
     }
 
     async function activateBatchEvalRow(rowNumber) {
       const item = orderedBatchEvalResults().find(row => Number(row.rowNumber) === Number(rowNumber));
       if (!item) return;
       appState.activeBatchEvalRowNumber = item.rowNumber;
+      appState.activeBatchEvalRetryTaskId = null;
       $("query").value = item.question || "";
-      renderBatchEvalQuestionTabs();
       resetStages("batch", "retrieval");
+      renderBatchEvalPage();
       if (!item.taskId) {
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
         renderSelectedEvidence([]);
         $("answer").textContent = item.message || "该行没有可重现的检索任务。";
         setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item) || "无检索任务");
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)}`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
         return;
       }
       try {
@@ -2873,6 +2943,7 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.partColumns = partColumns;
       appState.batchEval.questionIndex = questionIndex;
       appState.batchEval.rowCount = rows.length;
+      syncBatchRetryDefaults(settings);
       appState.batchEval.persistPromise = Promise.resolve();
       appState.batchEval.persistError = null;
       appState.batchEval.running = true;
@@ -2885,6 +2956,8 @@ def build_redesigned_index_html() -> str:
         const created = await createBatchEvalTask(settings, partColumns, questionIndex);
         appState.batchEval.taskId = created.task_id;
         appState.activeBatchEvalTaskId = created.task_id;
+        appState.activeBatchEvalRowNumber = null;
+        appState.activeBatchEvalRetryTaskId = null;
         appState.activeBatchEvalTask = {
           id: created.task_id,
           task_type: "batch_eval",
@@ -3598,8 +3671,9 @@ def build_redesigned_index_html() -> str:
 
     function renderShellMode() {
       const isBatchHome = appState.activeView === "batch" && !appState.activeBatchEvalTaskId;
+      const isBatchOverview = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber === null;
       $("pageShell").classList.toggle("batch-home-mode", isBatchHome);
-      $("workspace").classList.toggle("hidden", isBatchHome);
+      $("workspace").classList.toggle("hidden", isBatchHome || isBatchOverview);
     }
 
     function switchView(view) {
@@ -3718,11 +3792,21 @@ def build_redesigned_index_html() -> str:
           <div class="row-meta">状态：${escapeHtml(state.status || "pending")}</div>
           <div class="row-meta">${escapeHtml(state.summary || note)}</div>
         </div>
+        ${renderBatchRetryControls()}
       `;
       $("stageJson").textContent = JSON.stringify(state.data || {}, null, 2);
+      bindBatchRetryControls();
     }
 
     function renderVisiblePanels(stageId) {
+      const batchQuestionMode = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber !== null;
+      if (batchQuestionMode) {
+        $("answerPanel").classList.add("hidden");
+        $("retrievalPanel").classList.add("hidden");
+        $("evidencePanel").classList.add("hidden");
+        $("inspectorPanel").classList.remove("hidden");
+        return;
+      }
       const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
       const showAnswer = diagnosticView && stageId === "answer";
       const showRetrieval = diagnosticView && stageId === "retrieval";
@@ -3738,6 +3822,147 @@ def build_redesigned_index_html() -> str:
         } else {
           renderSelectedEvidence((appState.lastResult && appState.lastResult.selected_evidence) || []);
         }
+      }
+    }
+
+    function activeBatchEvalRow() {
+      return orderedBatchEvalResults().find(row => Number(row.rowNumber) === Number(appState.activeBatchEvalRowNumber)) || null;
+    }
+
+    function renderBatchRetryControls() {
+      const item = activeBatchEvalRow();
+      if (appState.activeView !== "batch" || !item) return "";
+      const values = batchRetryValues();
+      const retryTask = appState.activeBatchEvalRetryTaskId ? ` · 最近重试 task #${appState.activeBatchEvalRetryTaskId}` : "";
+      const disabled = appState.batchRetry.running ? "disabled" : "";
+      return `
+        <div class="batch-retry-panel">
+          <div>
+            <div class="row-title">单题调参重试</div>
+            <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
+          </div>
+          <div class="batch-retry-controls">
+            <div>
+              <label for="batchRetryTopK">手册 / 故障码 Top K</label>
+              <input id="batchRetryTopK" type="number" min="1" value="${escapeHtml(values.topK)}" ${disabled}>
+            </div>
+            <div>
+              <label for="batchRetryWorkOrderCandidateTopK">工单候选上限</label>
+              <input id="batchRetryWorkOrderCandidateTopK" type="number" min="1" value="${escapeHtml(values.workOrderCandidateTopK)}" ${disabled}>
+            </div>
+            <div>
+              <label for="batchRetryWorkOrderMinRelativeScore">工单相对阈值</label>
+              <input id="batchRetryWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="${escapeHtml(values.workOrderMinRelativeScore)}" ${disabled}>
+            </div>
+            <div>
+              <label for="batchRetryWorkOrderMaxHits">工单最大返回</label>
+              <input id="batchRetryWorkOrderMaxHits" type="number" min="0" value="${escapeHtml(values.workOrderMaxHits)}" ${disabled}>
+            </div>
+          </div>
+          <div class="batch-retry-actions">
+            <div class="row-meta">${escapeHtml(item.question || "")}</div>
+            <button id="retryBatchQuestionBtn" class="secondary" ${disabled}>按当前参数重试检索</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function batchRetryValues() {
+      const settings = appState.batchEval.settings || {};
+      const retrieval = settings.retrieval || {};
+      return {
+        topK: numericValueFromElement("batchRetryTopK", appState.batchRetry.topK ?? settings.topK ?? 1),
+        workOrderCandidateTopK: numericValueFromElement(
+          "batchRetryWorkOrderCandidateTopK",
+          appState.batchRetry.workOrderCandidateTopK ?? retrieval.work_order_candidate_top_k ?? 50
+        ),
+        workOrderMinRelativeScore: numericValueFromElement(
+          "batchRetryWorkOrderMinRelativeScore",
+          appState.batchRetry.workOrderMinRelativeScore ?? retrieval.work_order_min_relative_score ?? 0.45
+        ),
+        workOrderMaxHits: numericValueFromElement(
+          "batchRetryWorkOrderMaxHits",
+          appState.batchRetry.workOrderMaxHits ?? retrieval.work_order_max_hits ?? 10
+        )
+      };
+    }
+
+    function numericValueFromElement(id, fallback) {
+      const element = $(id);
+      if (!element || element.value === "") return Number(fallback);
+      return Number(element.value);
+    }
+
+    function bindBatchRetryControls() {
+      const button = $("retryBatchQuestionBtn");
+      if (!button) return;
+      const ids = [
+        "batchRetryTopK",
+        "batchRetryWorkOrderCandidateTopK",
+        "batchRetryWorkOrderMinRelativeScore",
+        "batchRetryWorkOrderMaxHits"
+      ];
+      for (const id of ids) {
+        const element = $(id);
+        if (!element) continue;
+        element.addEventListener("input", () => {
+          appState.batchRetry = {...appState.batchRetry, ...batchRetryValues()};
+        });
+      }
+      button.addEventListener("click", retryActiveBatchQuestion);
+    }
+
+    function validateBatchRetryValues(values) {
+      if (!Number.isFinite(values.topK) || values.topK < 1) return {ok: false, error: "Top K 必须大于等于 1"};
+      if (!Number.isFinite(values.workOrderCandidateTopK) || values.workOrderCandidateTopK < 1) return {ok: false, error: "工单候选上限必须大于等于 1"};
+      if (!Number.isFinite(values.workOrderMinRelativeScore) || values.workOrderMinRelativeScore < 0 || values.workOrderMinRelativeScore > 1) {
+        return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
+      }
+      if (!Number.isFinite(values.workOrderMaxHits) || values.workOrderMaxHits < 0) return {ok: false, error: "工单最大返回必须大于等于 0"};
+      return {
+        ok: true,
+        topK: Math.floor(values.topK),
+        retrieval: {
+          work_order_candidate_top_k: Math.floor(values.workOrderCandidateTopK),
+          work_order_min_relative_score: values.workOrderMinRelativeScore,
+          work_order_max_hits: Math.floor(values.workOrderMaxHits)
+        }
+      };
+    }
+
+    async function retryActiveBatchQuestion() {
+      const item = activeBatchEvalRow();
+      if (!item || appState.batchRetry.running) return;
+      const values = batchRetryValues();
+      const settings = validateBatchRetryValues(values);
+      if (!settings.ok) {
+        setStatus(settings.error, "error");
+        return;
+      }
+      appState.batchRetry = {
+        ...appState.batchRetry,
+        ...values,
+        topK: settings.topK,
+        workOrderCandidateTopK: settings.retrieval.work_order_candidate_top_k,
+        workOrderMinRelativeScore: settings.retrieval.work_order_min_relative_score,
+        workOrderMaxHits: settings.retrieval.work_order_max_hits,
+        running: true
+      };
+      renderStageInspector();
+      try {
+        const payload = queryPayload(item.question, {topK: settings.topK, retrieval: settings.retrieval});
+        setStatus(`正在重试批量评测第 ${item.rowNumber} 行`);
+        setStage("retrieval", "active", payload, "按当前参数重试检索");
+        const response = await postJson("/api/search-db", payload);
+        appState.activeBatchEvalRetryTaskId = response.task_id || null;
+        renderSearchResult(response);
+        setStatus(`第 ${item.rowNumber} 行重试完成`, "success");
+      } catch (error) {
+        setStage("retrieval", "error", {error: String(error), row: item, settings}, "单题重试失败");
+        setStatus(String(error), "error");
+      } finally {
+        appState.batchRetry.running = false;
+        renderStageInspector();
       }
     }
 
@@ -4551,6 +4776,7 @@ def build_redesigned_index_html() -> str:
         appState.activeBatchEvalTaskId = null;
         appState.activeBatchEvalTask = null;
         appState.activeBatchEvalRowNumber = null;
+        appState.activeBatchEvalRetryTaskId = null;
         appState.batchEval.results = [];
         appState.batchEval.taskId = null;
         appState.questionTabs = appState.questionTabs.map(tab => {
