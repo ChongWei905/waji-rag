@@ -1499,7 +1499,8 @@ def build_redesigned_index_html() -> str:
       gap: 12px;
     }
     .batch-retry-panel {
-      margin-top: 10px;
+      grid-column: 1 / -1;
+      margin-top: 0;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--soft);
@@ -1933,6 +1934,8 @@ def build_redesigned_index_html() -> str:
     </section>
 
     <div id="workspace" class="workspace">
+      <section id="batchRetryPanel" class="panel batch-retry-panel hidden"></section>
+
       <aside class="stage-rail">
         <h2 id="stageListTitle">构建阶段</h2>
         <div id="stageList" class="stage-list"></div>
@@ -3785,6 +3788,7 @@ def build_redesigned_index_html() -> str:
       $("qaViewBtn").classList.toggle("active", appState.activeView === "qa");
       $("batchViewBtn").classList.toggle("active", appState.activeView === "batch");
       renderShellMode();
+      renderBatchRetryPanel();
       renderVisiblePanels(stageId);
       $("stageSummary").innerHTML = `
         <div class="evidence-row">
@@ -3792,21 +3796,11 @@ def build_redesigned_index_html() -> str:
           <div class="row-meta">状态：${escapeHtml(state.status || "pending")}</div>
           <div class="row-meta">${escapeHtml(state.summary || note)}</div>
         </div>
-        ${renderBatchRetryControls()}
       `;
       $("stageJson").textContent = JSON.stringify(state.data || {}, null, 2);
-      bindBatchRetryControls();
     }
 
     function renderVisiblePanels(stageId) {
-      const batchQuestionMode = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber !== null;
-      if (batchQuestionMode) {
-        $("answerPanel").classList.add("hidden");
-        $("retrievalPanel").classList.add("hidden");
-        $("evidencePanel").classList.add("hidden");
-        $("inspectorPanel").classList.remove("hidden");
-        return;
-      }
       const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
       const showAnswer = diagnosticView && stageId === "answer";
       const showRetrieval = diagnosticView && stageId === "retrieval";
@@ -3829,6 +3823,15 @@ def build_redesigned_index_html() -> str:
       return orderedBatchEvalResults().find(row => Number(row.rowNumber) === Number(appState.activeBatchEvalRowNumber)) || null;
     }
 
+    function renderBatchRetryPanel() {
+      const panel = $("batchRetryPanel");
+      if (!panel) return;
+      const html = renderBatchRetryControls();
+      panel.classList.toggle("hidden", !html);
+      panel.innerHTML = html;
+      bindBatchRetryControls();
+    }
+
     function renderBatchRetryControls() {
       const item = activeBatchEvalRow();
       if (appState.activeView !== "batch" || !item) return "";
@@ -3836,33 +3839,31 @@ def build_redesigned_index_html() -> str:
       const retryTask = appState.activeBatchEvalRetryTaskId ? ` · 最近重试 task #${appState.activeBatchEvalRetryTaskId}` : "";
       const disabled = appState.batchRetry.running ? "disabled" : "";
       return `
-        <div class="batch-retry-panel">
+        <div>
+          <div class="row-title">单题调参重试</div>
+          <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
+        </div>
+        <div class="batch-retry-controls">
           <div>
-            <div class="row-title">单题调参重试</div>
-            <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
+            <label for="batchRetryTopK">手册 / 故障码 Top K</label>
+            <input id="batchRetryTopK" type="number" min="1" value="${escapeHtml(values.topK)}" ${disabled}>
           </div>
-          <div class="batch-retry-controls">
-            <div>
-              <label for="batchRetryTopK">手册 / 故障码 Top K</label>
-              <input id="batchRetryTopK" type="number" min="1" value="${escapeHtml(values.topK)}" ${disabled}>
-            </div>
-            <div>
-              <label for="batchRetryWorkOrderCandidateTopK">工单候选上限</label>
-              <input id="batchRetryWorkOrderCandidateTopK" type="number" min="1" value="${escapeHtml(values.workOrderCandidateTopK)}" ${disabled}>
-            </div>
-            <div>
-              <label for="batchRetryWorkOrderMinRelativeScore">工单相对阈值</label>
-              <input id="batchRetryWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="${escapeHtml(values.workOrderMinRelativeScore)}" ${disabled}>
-            </div>
-            <div>
-              <label for="batchRetryWorkOrderMaxHits">工单最大返回</label>
-              <input id="batchRetryWorkOrderMaxHits" type="number" min="0" value="${escapeHtml(values.workOrderMaxHits)}" ${disabled}>
-            </div>
+          <div>
+            <label for="batchRetryWorkOrderCandidateTopK">工单候选上限</label>
+            <input id="batchRetryWorkOrderCandidateTopK" type="number" min="1" value="${escapeHtml(values.workOrderCandidateTopK)}" ${disabled}>
           </div>
-          <div class="batch-retry-actions">
-            <div class="row-meta">${escapeHtml(item.question || "")}</div>
-            <button id="retryBatchQuestionBtn" class="secondary" ${disabled}>按当前参数重试检索</button>
+          <div>
+            <label for="batchRetryWorkOrderMinRelativeScore">工单相对阈值</label>
+            <input id="batchRetryWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="${escapeHtml(values.workOrderMinRelativeScore)}" ${disabled}>
           </div>
+          <div>
+            <label for="batchRetryWorkOrderMaxHits">工单最大返回</label>
+            <input id="batchRetryWorkOrderMaxHits" type="number" min="0" value="${escapeHtml(values.workOrderMaxHits)}" ${disabled}>
+          </div>
+        </div>
+        <div class="batch-retry-actions">
+          <div class="row-meta">${escapeHtml(item.question || "")}</div>
+          <button id="retryBatchQuestionBtn" class="secondary" ${disabled}>按当前参数重试检索</button>
         </div>
       `;
     }
