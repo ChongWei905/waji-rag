@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -12,7 +13,22 @@ from typing import Iterable
 from html_to_markdown import MarkdownConverter, detect_table_count
 
 
-DEFAULT_ENCODINGS = ("utf-8", "utf-8-sig", "gb18030", "gbk")
+DEFAULT_ENCODINGS = ("utf-8", "utf-8-sig", "gb18030", "gbk", "cp936", "big5", "cp950")
+HTML_CHARSET_PATTERN = re.compile(br"charset\s*=\s*['\"]?\s*([A-Za-z0-9._:-]+)", re.IGNORECASE)
+BOM_ENCODINGS = (
+    (b"\xff\xfe\x00\x00", "utf-32-le"),
+    (b"\x00\x00\xfe\xff", "utf-32-be"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe", "utf-16-le"),
+    (b"\xfe\xff", "utf-16-be"),
+)
+ENCODING_ALIASES = {
+    "gb2312": "gb18030",
+    "gb_2312-80": "gb18030",
+    "gb-2312": "gb18030",
+    "x-gbk": "gbk",
+    "unicode": "utf-16",
+}
 
 
 @dataclass(slots=True)
@@ -153,14 +169,88 @@ def iter_html_files(root: Path) -> Iterable[Path]:
 def read_text_with_fallback(path: Path, encodings: tuple[str, ...]) -> tuple[str, str]:
     """Read text with several encodings common on Windows Chinese datasets."""
 
+    raw = path.read_bytes()
     errors: list[str] = []
-    for encoding in encodings:
+    for encoding in candidate_encodings(raw, encodings):
         try:
-            return path.read_text(encoding=encoding), encoding
+            return raw.decode(encoding), encoding
         except UnicodeDecodeError as exc:
             errors.append(f"{encoding}: {exc}")
-    error_preview = "; ".join(errors[:3])
-    raise UnicodeDecodeError("unknown", b"", 0, 1, f"failed encodings: {error_preview}")
+        except LookupError as exc:
+            errors.append(f"{encoding}: {exc}")
+
+    text = raw.decode("gb18030", errors="replace")
+    return text, "gb18030-replace"
+
+
+def candidate_encodings(raw: bytes, encodings: tuple[str, ...]) -> tuple[str, ...]:
+    """Return ordered encoding candidates detected from bytes and configuration."""
+
+    candidates: list[str] = []
+    for marker, encoding in BOM_ENCODINGS:
+        if raw.startswith(marker):
+            candidates.append(encoding)
+
+    utf16_guess = guess_utf16_encoding(raw)
+    if utf16_guess:
+        candidates.append(utf16_guess)
+
+    charset = detect_declared_charset(raw)
+    if charset:
+        candidates.append(charset)
+
+    candidates.extend(encodings)
+    return unique_encoding_candidates(candidates)
+
+
+def detect_declared_charset(raw: bytes) -> str | None:
+    """Read a declared HTML charset from the first bytes when present."""
+
+    head = raw[:4096]
+    match = HTML_CHARSET_PATTERN.search(head)
+    if not match:
+        return None
+    charset = match.group(1).decode("ascii", errors="ignore").strip().lower()
+    return ENCODING_ALIASES.get(charset, charset) or None
+
+
+def guess_utf16_encoding(raw: bytes) -> str | None:
+    """Guess UTF-16 endianness for BOM-less HTML exported by Windows tools."""
+
+    sample = raw[:4096]
+    if len(sample) < 4:
+        return None
+    even_positions = sample[0::2]
+    odd_positions = sample[1::2]
+    if not even_positions or not odd_positions:
+        return None
+    even_null_ratio = even_positions.count(0) / len(even_positions)
+    odd_null_ratio = odd_positions.count(0) / len(odd_positions)
+    if odd_null_ratio > 0.25 and even_null_ratio < 0.05:
+        return "utf-16-le"
+    if even_null_ratio > 0.25 and odd_null_ratio < 0.05:
+        return "utf-16-be"
+    return None
+
+
+def unique_encoding_candidates(encodings: Iterable[str]) -> tuple[str, ...]:
+    """Deduplicate encoding names while preserving order."""
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for encoding in encodings:
+        normalized = ENCODING_ALIASES.get(encoding.strip().lower(), encoding.strip().lower())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return tuple(result)
+
+
+def is_lossy_encoding(encoding: str | None) -> bool:
+    """Return true when a decoded file used replacement characters."""
+
+    return bool(encoding and encoding.endswith("-replace"))
 
 
 def write_report(report: BatchReport, path: Path) -> None:

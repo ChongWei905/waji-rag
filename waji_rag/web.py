@@ -24,6 +24,9 @@ from waji_rag.config import (
 )
 from waji_rag.pg_index import (
     DatabaseOptions,
+    IngestPaused,
+    PgEmbeddingBackfill,
+    PgEmbeddingOptions,
     PgIngestBuilder,
     PgIngestOptions,
     PgPipelineOptions,
@@ -32,6 +35,7 @@ from waji_rag.pg_index import (
     clear_application_data,
     connect,
     create_task_schema,
+    format_embedding_report_summary,
     format_ingest_report_summary,
     format_search_summary,
     json_param,
@@ -546,6 +550,7 @@ INDEX_HTML = f"""<!doctype html>
         work_order_dir: $("workOrderDir").value.trim() || null,
         manual_dir: $("manualDir").value.trim() || null,
         reset: $("ingestReset").checked,
+        resume: $("ingestResume").checked,
         work_order_limit: $("workOrderLimit").value ? Number($("workOrderLimit").value) : null,
         manual_limit: $("manualLimit").value ? Number($("manualLimit").value) : null,
         max_manual_chars: $("maxManualChars").value ? Number($("maxManualChars").value) : 1800
@@ -923,6 +928,59 @@ def build_redesigned_index_html() -> str:
       gap: 14px;
       align-items: end;
     }
+    .question-shell {
+      display: grid;
+      gap: 10px;
+    }
+    .question-tabs-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .question-tabs {
+      min-width: 0;
+      display: flex;
+      flex: 1;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 1px;
+    }
+    .question-tab {
+      min-width: 180px;
+      max-width: 320px;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 7px 9px;
+      text-align: left;
+      display: grid;
+      gap: 3px;
+    }
+    .question-tab.active {
+      border-color: #5eead4;
+      background: var(--accent-soft);
+    }
+    .question-tab-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+      font-weight: 760;
+    }
+    .question-tab-meta {
+      color: var(--muted);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .query-tools {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1012,6 +1070,37 @@ def build_redesigned_index_html() -> str:
     .doc-info {
       display: grid;
       gap: 8px;
+    }
+    .failure-panel {
+      margin-top: 12px;
+      border: 1px solid #fed7aa;
+      border-radius: 8px;
+      background: #fffbeb;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .failure-panel.hidden {
+      display: none;
+    }
+    .failure-row {
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      background: #fff;
+      padding: 8px;
+      min-width: 0;
+    }
+    .failure-path {
+      font-weight: 740;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+    .failure-error {
+      margin-top: 4px;
+      color: var(--danger);
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
     }
     .panel.hidden {
       display: none;
@@ -1141,7 +1230,7 @@ def build_redesigned_index_html() -> str:
       border-color: #bbf7d0;
       background: #f0fdf4;
     }
-    .stage-node.fallback, .stage-node.skipped {
+    .stage-node.fallback, .stage-node.skipped, .stage-node.filtered {
       border-color: #fed7aa;
       background: #fffbeb;
     }
@@ -1400,7 +1489,13 @@ def build_redesigned_index_html() -> str:
       <div class="panel">
         <div class="panel-title-row">
           <h2>索引构建</h2>
-          <button id="clearDataBtn" class="danger">清空数据</button>
+          <div class="actions">
+            <button id="resumeBuildBtn" class="secondary">继续构建</button>
+            <button id="retryFailedBtn" class="secondary">重试失败条目</button>
+            <button id="runEmbeddingBtn" class="secondary">补Embedding</button>
+            <button id="pauseTaskBtn" class="ghost">暂停任务</button>
+            <button id="clearDataBtn" class="danger">清空数据</button>
+          </div>
         </div>
         <div class="build-dashboard">
           <div>
@@ -1421,26 +1516,37 @@ def build_redesigned_index_html() -> str:
             <div id="buildStats" class="stat-grid"></div>
           </div>
         </div>
+        <div id="failedItemsPanel" class="failure-panel hidden"></div>
       </div>
     </section>
 
     <section id="qaView" class="view">
-      <section class="query-band">
-        <div>
-          <label for="query">用户问题</label>
-          <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
+      <div class="question-shell">
+        <div class="question-tabs-row">
+          <div id="questionTabs" class="question-tabs"></div>
+          <button id="newQuestionBtn" class="secondary">新问题</button>
         </div>
-        <div class="query-tools">
+        <section class="query-band">
           <div>
-            <label for="topK">每路 Top K</label>
-            <input id="topK" type="number" min="1" value="1">
+            <label for="query">当前问题</label>
+            <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
           </div>
-          <div>
-            <label for="evidenceTopK">答案证据数</label>
-            <input id="evidenceTopK" type="number" min="1" value="4">
+          <div class="query-tools">
+            <div>
+              <label for="topK">每路 Top K</label>
+              <input id="topK" type="number" min="1" value="1">
+            </div>
+            <div>
+              <label for="evidenceTopK">答案证据数</label>
+              <input id="evidenceTopK" type="number" min="1" value="4">
+            </div>
+            <div class="query-actions">
+              <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
+              <button id="runQuestionAnswerBtn">回答当前问题</button>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      </div>
     </section>
 
     <div class="workspace">
@@ -1478,7 +1584,7 @@ def build_redesigned_index_html() -> str:
         </section>
 
         <section id="evidencePanel" class="panel hidden">
-          <h2>答案生成依据</h2>
+          <h2 id="evidencePanelTitle">答案生成依据</h2>
           <div id="selectedEvidence" class="part-box"><div class="empty">暂无选中证据</div></div>
         </section>
       </div>
@@ -1523,6 +1629,10 @@ def build_redesigned_index_html() -> str:
         <label class="checkline" for="ingestReset">
           <input id="ingestReset" type="checkbox" checked>
           <span>入库前重建</span>
+        </label>
+        <label class="checkline" for="ingestResume">
+          <input id="ingestResume" type="checkbox" checked>
+          <span>断点续跑</span>
         </label>
 
         <label class="checkline" for="enableEmbedding">
@@ -1656,7 +1766,9 @@ def build_redesigned_index_html() -> str:
       ["config", "配置解析", "读取页面配置、env 和模型开关"],
       ["init", "初始化 PG", "创建 PostgreSQL / pgvector 表结构"],
       ["ingest", "构建索引", "解析工单、HTML 转 Markdown、入库、建 BM25/向量"],
+      ["embedding", "补Embedding", "扫描已有索引文档，为缺失向量的文档补齐 embedding"],
       ["retrieval", "多路召回", "历史工单、手册、故障码、备件证据分路召回"],
+      ["evidence_filter", "证据过滤", "按部件锚点过滤同症状但错部件的证据"],
       ["rerank", "重排", "可选 rerank；失败或关闭则保留原顺序"],
       ["answer", "答案生成", "用选中证据和备件候选生成最终答复"]
     ];
@@ -1665,10 +1777,170 @@ def build_redesigned_index_html() -> str:
       selectedStage: "config",
       lastResult: null,
       currentTaskId: null,
+      currentTask: null,
       tasks: [],
+      questionTabs: [],
+      activeQuestionTabId: null,
+      questionTabCounter: 0,
       activeView: "build",
       buildPollTimer: null
     };
+
+    function createStageState(selectedStage = "config") {
+      const stages = {};
+      for (const [id] of stageOrder) stages[id] = {status: "pending", data: null, summary: ""};
+      return {stages, selectedStage};
+    }
+
+    function makeQuestionTab(query = "") {
+      const state = createStageState("retrieval");
+      appState.questionTabCounter += 1;
+      return {
+        id: `q-${Date.now()}-${appState.questionTabCounter}`,
+        query: String(query || "").trim() || defaultQuery,
+        title: questionTitle(query || defaultQuery),
+        stages: state.stages,
+        selectedStage: state.selectedStage,
+        lastResult: null,
+        searchTaskId: null,
+        answerTaskId: null,
+        status: "draft",
+        updatedAt: new Date().toISOString()
+      };
+    }
+
+    function questionTitle(query) {
+      const text = String(query || "").trim().replace(/\s+/g, " ");
+      return text.length > 24 ? `${text.slice(0, 24)}...` : text || "新问题";
+    }
+
+    function activeQuestionTab() {
+      return appState.questionTabs.find(tab => tab.id === appState.activeQuestionTabId) || null;
+    }
+
+    function ensureQuestionTab(query = $("query").value) {
+      if (!appState.questionTabs.length) {
+        const tab = makeQuestionTab(query || defaultQuery);
+        appState.questionTabs.push(tab);
+        appState.activeQuestionTabId = tab.id;
+        return tab;
+      }
+      const current = activeQuestionTab();
+      if (current) return current;
+      appState.activeQuestionTabId = appState.questionTabs[0].id;
+      return appState.questionTabs[0];
+    }
+
+    function ensureQuestionTabForQuery(query) {
+      const normalized = String(query || "").trim();
+      let tab = appState.questionTabs.find(item => item.query.trim() === normalized);
+      if (!tab) {
+        tab = makeQuestionTab(normalized || defaultQuery);
+        appState.questionTabs.push(tab);
+      }
+      activateQuestionTab(tab.id);
+      return tab;
+    }
+
+    function syncActiveQuestionInput() {
+      const tab = activeQuestionTab();
+      if (!tab || document.activeElement !== $("query")) return;
+      if (tab.searchTaskId || tab.answerTaskId) return;
+      tab.query = $("query").value.trim();
+      tab.title = questionTitle(tab.query);
+      tab.status = "draft";
+      tab.updatedAt = new Date().toISOString();
+      renderQuestionTabs();
+    }
+
+    function syncActiveQuestionState() {
+      if (appState.activeView !== "qa") return;
+      const tab = activeQuestionTab();
+      if (!tab) return;
+      tab.stages = appState.stages;
+      tab.selectedStage = appState.selectedStage;
+      tab.lastResult = appState.lastResult;
+      tab.updatedAt = new Date().toISOString();
+      renderQuestionTabs();
+    }
+
+    function activateQuestionTab(tabId) {
+      const tab = appState.questionTabs.find(item => item.id === tabId);
+      if (!tab) return;
+      appState.activeQuestionTabId = tab.id;
+      appState.activeView = "qa";
+      $("query").value = tab.query;
+      appState.stages = tab.stages || createStageState("retrieval").stages;
+      appState.selectedStage = tab.selectedStage || "retrieval";
+      appState.lastResult = tab.lastResult || null;
+      appState.currentTaskId = tab.answerTaskId || tab.searchTaskId || appState.currentTaskId;
+      renderQuestionTabs();
+      renderStages();
+      renderStageInspector();
+      renderQuestionResult(tab);
+      saveConfigToLocalStorage();
+    }
+
+    function renderQuestionTabs() {
+      const container = $("questionTabs");
+      if (!container) return;
+      if (!appState.questionTabs.length) {
+        container.innerHTML = '<div class="empty">暂无问题</div>';
+        return;
+      }
+      container.innerHTML = "";
+      for (const tab of appState.questionTabs) {
+        const button = document.createElement("button");
+        button.className = `question-tab ${tab.id === appState.activeQuestionTabId ? "active" : ""}`;
+        button.innerHTML = `
+          <div class="question-tab-title">${escapeHtml(tab.title || questionTitle(tab.query))}</div>
+          <div class="question-tab-meta">${escapeHtml(questionTabMeta(tab))}</div>
+        `;
+        button.addEventListener("click", () => activateQuestionTab(tab.id));
+        container.appendChild(button);
+      }
+    }
+
+    function questionTabMeta(tab) {
+      const bits = [];
+      if (tab.searchTaskId) bits.push(`检索 #${tab.searchTaskId}`);
+      if (tab.answerTaskId) bits.push(`回答 #${tab.answerTaskId}`);
+      bits.push(tab.status || "draft");
+      return bits.join(" · ");
+    }
+
+    function renderQuestionResult(tab) {
+      const result = tab && tab.lastResult ? tab.lastResult : null;
+      if (!result) {
+        renderAnswer({});
+        renderParts([]);
+        renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
+        renderSelectedEvidence([]);
+        return;
+      }
+      if (result.answer || result.retrieval) {
+        renderAnswer(result.answer || {});
+        renderParts(result.part_candidates || (result.retrieval && result.retrieval.part_candidates) || []);
+        renderRetrievalBoard(result.retrieval || result);
+        renderSelectedEvidence(result.selected_evidence || []);
+      } else {
+        renderRetrievalBoard(result);
+        renderParts(result.part_candidates || []);
+        $("answer").textContent = "已完成检索。请查看“多路召回”和“证据过滤”。";
+        renderSelectedEvidence([]);
+      }
+    }
+
+    function createNewQuestionTab() {
+      const tab = makeQuestionTab(defaultQuery);
+      tab.query = "";
+      tab.title = "新问题";
+      tab.status = "draft";
+      appState.questionTabs.push(tab);
+      activateQuestionTab(tab.id);
+      $("query").focus();
+      saveConfigToLocalStorage();
+    }
 
     function configOverrides() {
       return {
@@ -1739,6 +2011,15 @@ def build_redesigned_index_html() -> str:
         ui: {
           active_view: appState.activeView,
           query: $("query").value,
+          active_question_tab_id: appState.activeQuestionTabId,
+          question_tabs: appState.questionTabs.map(tab => ({
+            id: tab.id,
+            query: tab.query,
+            title: tab.title,
+            search_task_id: tab.searchTaskId,
+            answer_task_id: tab.answerTaskId,
+            status: tab.status
+          })),
           top_k: $("topK").value,
           evidence_top_k: $("evidenceTopK").value
         },
@@ -1750,6 +2031,7 @@ def build_redesigned_index_html() -> str:
         manual_limit: $("manualLimit").value,
         max_manual_chars: $("maxManualChars").value,
         ingest_reset: $("ingestReset").checked,
+        ingest_resume: $("ingestResume").checked,
         model_api_log: {
           enabled: $("apiRequestLoggingEnabled").checked,
           path: $("apiRequestLogPath").value
@@ -1793,12 +2075,29 @@ def build_redesigned_index_html() -> str:
       setInputValue("manualLimit", config.manual_limit);
       setInputValue("maxManualChars", config.max_manual_chars);
       setCheckboxValue("ingestReset", config.ingest_reset);
+      setCheckboxValue("ingestResume", config.ingest_resume);
       const modelApiLog = config.model_api_log || {};
       setCheckboxValue("apiRequestLoggingEnabled", modelApiLog.enabled);
       setInputValue("apiRequestLogPath", modelApiLog.path);
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
+      if (Array.isArray(ui.question_tabs) && ui.question_tabs.length) {
+        appState.questionTabs = ui.question_tabs.map(item => {
+          const tab = makeQuestionTab(item.query || defaultQuery);
+          tab.id = item.id || tab.id;
+          tab.title = item.title || questionTitle(item.query);
+          tab.searchTaskId = item.search_task_id || null;
+          tab.answerTaskId = item.answer_task_id || null;
+          tab.status = item.status || "draft";
+          return tab;
+        });
+        appState.activeQuestionTabId = ui.active_question_tab_id || appState.questionTabs[0].id;
+        const activeTab = activeQuestionTab() || appState.questionTabs[0];
+        appState.activeQuestionTabId = activeTab.id;
+        $("query").value = activeTab.query;
+        renderQuestionTabs();
+      }
 
       const embedding = config.embedding || {};
       if (modelApiLog.enabled === undefined) setCheckboxValue("apiRequestLoggingEnabled", embedding.log_requests_enabled);
@@ -1899,7 +2198,7 @@ def build_redesigned_index_html() -> str:
       const ids = [
         "databaseUrl", "envFile", "workOrderDir", "manualDir", "workOrderLimit", "manualLimit", "maxManualChars",
         "apiRequestLoggingEnabled", "apiRequestLogPath",
-        "ingestReset", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
+        "ingestReset", "ingestResume", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
         "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
         "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey", "enableLlm",
         "llmProvider", "llmModel", "llmBaseUrl", "llmNoProxyHosts", "llmApiKey"
@@ -1924,10 +2223,10 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    function queryPayload() {
+    function queryPayload(query = $("query").value) {
       return {
         ...commonPayload(),
-        query: $("query").value.trim(),
+        query: String(query || "").trim(),
         top_k: $("topK").value ? Number($("topK").value) : 5,
         debug: true
       };
@@ -1958,14 +2257,23 @@ def build_redesigned_index_html() -> str:
 
     function switchView(view) {
       appState.activeView = view;
+      if (view === "qa") {
+        const tab = ensureQuestionTab($("query").value || defaultQuery);
+        appState.activeQuestionTabId = tab.id;
+        appState.stages = tab.stages;
+        appState.selectedStage = tab.selectedStage || "retrieval";
+        appState.lastResult = tab.lastResult || null;
+        $("query").value = tab.query;
+        renderQuestionTabs();
+      }
       $("buildView").classList.toggle("active", view === "build");
       $("qaView").classList.toggle("active", view === "qa");
       $("buildViewBtn").classList.toggle("active", view === "build");
       $("qaViewBtn").classList.toggle("active", view === "qa");
-      if (view === "build" && !["config", "init", "ingest"].includes(appState.selectedStage)) {
+      if (view === "build" && !["config", "init", "ingest", "embedding"].includes(appState.selectedStage)) {
         appState.selectedStage = "ingest";
       }
-      if (view === "qa" && ["config", "init", "ingest"].includes(appState.selectedStage)) {
+      if (view === "qa" && ["config", "init", "ingest", "embedding"].includes(appState.selectedStage)) {
         appState.selectedStage = appState.lastResult ? "retrieval" : "retrieval";
       }
       renderStages();
@@ -1978,6 +2286,7 @@ def build_redesigned_index_html() -> str:
       appState.selectedStage = id;
       renderStages();
       renderStageInspector();
+      syncActiveQuestionState();
     }
 
     function resetStages() {
@@ -1997,14 +2306,14 @@ def build_redesigned_index_html() -> str:
         button.innerHTML = `
           <div class="stage-title">
             <span>${escapeHtml(title)}</span>
-            <span class="pill ${state.status === "done" ? "ok" : state.status === "fallback" || state.status === "skipped" ? "warn" : ""}">${escapeHtml(state.status || "pending")}</span>
+            <span class="pill ${state.status === "done" ? "ok" : state.status === "fallback" || state.status === "skipped" || state.status === "filtered" ? "warn" : ""}">${escapeHtml(state.status || "pending")}</span>
           </div>
           <div class="stage-note">${escapeHtml(state.summary || note)}</div>
         `;
         button.addEventListener("click", () => {
           appState.selectedStage = id;
-          if (["config", "init", "ingest"].includes(id)) appState.activeView = "build";
-          if (["retrieval", "rerank", "answer"].includes(id)) appState.activeView = "qa";
+          if (["config", "init", "ingest", "embedding"].includes(id)) appState.activeView = "build";
+          if (["retrieval", "evidence_filter", "rerank", "answer"].includes(id)) appState.activeView = "qa";
           renderStages();
           renderStageInspector();
         });
@@ -2033,12 +2342,19 @@ def build_redesigned_index_html() -> str:
     function renderVisiblePanels(stageId) {
       const showAnswer = appState.activeView === "qa" && stageId === "answer";
       const showRetrieval = appState.activeView === "qa" && stageId === "retrieval";
-      const showEvidence = appState.activeView === "qa" && stageId === "rerank";
+      const showEvidence = appState.activeView === "qa" && ["evidence_filter", "rerank"].includes(stageId);
       const showInspector = !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
       $("evidencePanel").classList.toggle("hidden", !showEvidence);
       $("inspectorPanel").classList.toggle("hidden", !showInspector);
+      if (showEvidence) {
+        if (stageId === "evidence_filter") {
+          renderEvidenceFilter((appState.lastResult && appState.lastResult.evidence_filter) || {});
+        } else {
+          renderSelectedEvidence((appState.lastResult && appState.lastResult.selected_evidence) || []);
+        }
+      }
     }
 
     function renderBuildProgress(payload = {}) {
@@ -2056,6 +2372,7 @@ def build_redesigned_index_html() -> str:
         文件进度：${escapeHtml(progress.processed_files ?? "-")} / ${escapeHtml(progress.total_files ?? "-")}
       `;
       renderBuildStats(counts, progress, timings);
+      renderBuildFailures(payload);
     }
 
     function renderBuildStats(counts = {}, progress = {}, timings = {}) {
@@ -2069,6 +2386,7 @@ def build_redesigned_index_html() -> str:
         ["索引文档", counts.total_documents ?? 0],
         ["词项行", counts.term_rows ?? 0],
         ["向量", counts.embeddings ?? 0],
+        ["跳过文件", counts.skipped_files ?? 0],
         ["失败", failedValue],
         ["解析耗时", formatSeconds(timings.parse_seconds)],
         ["BM25耗时", formatSeconds(timings.bm25_seconds)],
@@ -2081,6 +2399,39 @@ def build_redesigned_index_html() -> str:
           <div class="row-meta">${escapeHtml(label)}</div>
         </div>
       `).join("");
+    }
+
+    function renderBuildFailures(payload = {}) {
+      const report = payload.report || {};
+      const progress = payload.progress || {};
+      const failedItems = Array.isArray(report.failed_items) ? report.failed_items : (Array.isArray(progress.recent_failures) ? progress.recent_failures : []);
+      const warnings = Array.isArray(report.warnings) ? report.warnings : (Array.isArray(progress.warnings) ? progress.warnings : []);
+      const panel = $("failedItemsPanel");
+      if (!failedItems.length && !warnings.length) {
+        panel.classList.add("hidden");
+        panel.innerHTML = "";
+        return;
+      }
+      const failedHtml = failedItems.length ? failedItems.slice(0, 20).map((item, index) => `
+        <div class="failure-row">
+          <div class="row-meta">#${index + 1} · ${escapeHtml(item.stage || "unknown")}</div>
+          <div class="failure-path">${escapeHtml(item.input || "")}</div>
+          <div class="failure-error">${escapeHtml(item.error || "")}</div>
+        </div>
+      `).join("") : '<div class="empty">暂无失败条目</div>';
+      const warningHtml = warnings.length ? `
+        <div class="row-title">Warnings</div>
+        ${warnings.slice(-8).map(item => `<div class="row-meta">${escapeHtml(item)}</div>`).join("")}
+      ` : "";
+      panel.classList.remove("hidden");
+      panel.innerHTML = `
+        <div class="task-line">
+          <div class="row-title">失败条目</div>
+          <div class="row-meta">${escapeHtml(failedItems.length)} 个可查看</div>
+        </div>
+        ${failedHtml}
+        ${warningHtml}
+      `;
     }
 
     async function refreshTasks(options = {}) {
@@ -2131,36 +2482,46 @@ def build_redesigned_index_html() -> str:
     function renderStoredTask(task) {
       if (!task) return;
       appState.currentTaskId = task.id;
+      appState.currentTask = task;
       renderTaskList();
-      resetStages();
-      if (task.query) $("query").value = task.query;
-      setStage("config", "done", task.request || {}, "已载入任务请求");
-      if (task.task_type === "build") {
+      if (task.task_type === "build" || task.task_type === "build_retry" || task.task_type === "embedding") {
         appState.activeView = "build";
+        resetStages();
+        setStage("config", "done", task.request || {}, "已载入任务请求");
         renderBuildTaskResult(task);
       } else if (task.task_type === "search") {
-        appState.activeView = "qa";
+        const tab = ensureQuestionTabForQuery(task.query || defaultQuery);
+        tab.searchTaskId = task.id;
+        tab.status = task.status || "searched";
+        appState.currentTaskId = task.id;
         renderSearchResult(task.result || {});
+        syncActiveQuestionState();
       } else {
-        appState.activeView = "qa";
+        const tab = ensureQuestionTabForQuery(task.query || defaultQuery);
+        tab.answerTaskId = task.id;
+        tab.status = task.status || "answered";
+        appState.currentTaskId = task.id;
         renderPipelineResult(task.result || {});
+        syncActiveQuestionState();
       }
       if (task.status === "failed") {
-        const failedStage = task.task_type === "build" ? "ingest" : task.task_type === "search" ? "retrieval" : "answer";
+        const failedStage = task.task_type === "build" || task.task_type === "build_retry" ? "ingest" : task.task_type === "embedding" ? "embedding" : task.task_type === "search" ? "retrieval" : "answer";
         setStage(failedStage, "error", task, task.error || "任务失败");
       }
       setStatus(`已载入任务 #${task.id} · ${taskTypeLabel(task.task_type)} · ${task.status}`, task.status === "failed" ? "error" : "success");
     }
 
     function renderBuildTaskResult(task) {
-      const status = task.status === "running" ? "active" : task.status === "failed" ? "error" : task.status === "completed_with_errors" ? "fallback" : "done";
+      const status = ["running", "pause_requested"].includes(task.status) ? "active" : task.status === "failed" ? "error" : task.status === "completed_with_errors" ? "fallback" : task.status === "paused" ? "fallback" : "done";
+      const stageId = task.task_type === "embedding" ? "embedding" : "ingest";
+      appState.currentTask = task;
       renderBuildProgress(task.result || {});
-      setStage("ingest", status, task.result || {}, task.summary || "构建任务已完成");
-      $("answer").textContent = task.summary || "构建任务已完成。可以继续发起检索或回答任务。";
+      setStage(stageId, status, task.result || {}, task.summary || "构建任务已完成");
+      $("answer").textContent = task.summary || "任务已完成。可以继续发起检索或回答任务。";
       renderParts([]);
       renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
       renderSelectedEvidence([]);
-      if (task.status === "running" && !appState.buildPollTimer) startBuildPolling(task.id);
+      if (["running", "pause_requested"].includes(task.status) && !appState.buildPollTimer) startBuildPolling(task.id);
     }
 
     function startBuildPolling(taskId) {
@@ -2171,9 +2532,10 @@ def build_redesigned_index_html() -> str:
           const task = data.task;
           if (!task) return;
           appState.currentTaskId = task.id;
+          appState.currentTask = task;
           renderBuildTaskResult(task);
           await refreshTasks({quiet: true});
-          if (task.status !== "running") {
+          if (!["running", "pause_requested"].includes(task.status)) {
             stopBuildPolling();
             setStatus(`构建任务 #${task.id} ${task.status}`, task.status === "failed" ? "error" : "success");
           }
@@ -2194,6 +2556,8 @@ def build_redesigned_index_html() -> str:
     function taskTypeLabel(taskType) {
       return {
         build: "构建",
+        build_retry: "失败重试",
+        embedding: "补Embedding",
         search: "检索",
         answer: "回答"
       }[taskType] || taskType || "任务";
@@ -2217,6 +2581,10 @@ def build_redesigned_index_html() -> str:
       renderRetrievalBoard(retrieval);
       renderSelectedEvidence(result.selected_evidence || []);
       if (result.retrieval) setStage("retrieval", "done", result.retrieval, formatRetrievalSummary(result.retrieval));
+      if (result.evidence_filter || retrieval.evidence_filter) {
+        const evidenceFilter = result.evidence_filter || retrieval.evidence_filter;
+        setStage("evidence_filter", evidenceFilter.status || "done", evidenceFilter, evidenceFilterSummary(evidenceFilter));
+      }
       if (result.rerank) setStage("rerank", result.rerank.status || "done", result.rerank, rerankSummary(result.rerank));
       if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer));
     }
@@ -2233,6 +2601,9 @@ def build_redesigned_index_html() -> str:
       const result = response.result || response;
       appState.lastResult = result;
       setStage("retrieval", "done", result, formatRetrievalSummary(result));
+      if (result.evidence_filter) {
+        setStage("evidence_filter", result.evidence_filter.status || "done", result.evidence_filter, evidenceFilterSummary(result.evidence_filter));
+      }
       renderRetrievalBoard(result);
       renderParts(result.part_candidates || []);
       $("answer").textContent = "已完成检索。请查看“多路召回”和“阶段返回”。";
@@ -2294,6 +2665,7 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderSelectedEvidence(items) {
+      $("evidencePanelTitle").textContent = "答案生成依据";
       if (!items.length) {
         $("selectedEvidence").innerHTML = '<div class="empty">暂无选中证据</div>';
         return;
@@ -2307,9 +2679,49 @@ def build_redesigned_index_html() -> str:
       `).join("");
     }
 
+    function renderEvidenceFilter(filterPayload) {
+      $("evidencePanelTitle").textContent = "证据过滤";
+      const accepted = Array.isArray(filterPayload.accepted) ? filterPayload.accepted : [];
+      const rejected = Array.isArray(filterPayload.rejected) ? filterPayload.rejected : [];
+      const constraints = filterPayload.constraints || {};
+      const renderGateItem = (item, index, decision) => {
+        const gate = item.evidence_gate || {};
+        const reason = gate.reason || decision;
+        const componentHits = (gate.component_hits || []).join(", ");
+        const symptomHits = (gate.symptom_hits || []).join(", ");
+        return `
+          <div class="evidence-row">
+            <div class="row-title">#${index + 1} ${escapeHtml(decision)} · ${escapeHtml(item.channel || "")} · ${escapeHtml(item.title || "")}</div>
+            <div class="row-meta">reason=${escapeHtml(reason)} · doc_id=${escapeHtml(item.doc_id || "")}</div>
+            <div class="row-meta">component=${escapeHtml(componentHits || "-")} · symptom=${escapeHtml(symptomHits || "-")}</div>
+            <div class="hit-preview">${escapeHtml(item.body_preview || "")}</div>
+          </div>
+        `;
+      };
+      $("selectedEvidence").innerHTML = `
+        <div class="evidence-row">
+          <div class="row-title">${escapeHtml(filterPayload.summary || "证据过滤结果")}</div>
+          <div class="row-meta">故障短语：${escapeHtml(constraints.fault_phrase || "")}</div>
+          <div class="row-meta">部件锚点：${escapeHtml((constraints.component_terms || []).join(", ") || "-")}</div>
+          <div class="row-meta">异常词：${escapeHtml((constraints.symptom_terms || []).join(", ") || "-")}</div>
+        </div>
+        <h3>Accepted ${accepted.length}</h3>
+        ${accepted.length ? accepted.map((item, index) => renderGateItem(item, index, "accepted")).join("") : '<div class="empty">暂无接受证据</div>'}
+        <h3>Rejected ${rejected.length}</h3>
+        ${rejected.length ? rejected.map((item, index) => renderGateItem(item, index, "rejected")).join("") : '<div class="empty">暂无丢弃证据</div>'}
+      `;
+    }
+
     function formatRetrievalSummary(retrieval) {
       const channelsPayload = retrieval.channels || {};
       return `mode=${retrieval.mode || ""} · ` + channels.map(([name, label]) => `${label}:${(channelsPayload[name] || []).length}`).join(" · ");
+    }
+
+    function evidenceFilterSummary(filterPayload) {
+      if (!filterPayload) return "证据过滤未运行";
+      const accepted = Array.isArray(filterPayload.accepted) ? filterPayload.accepted.length : 0;
+      const rejected = Array.isArray(filterPayload.rejected) ? filterPayload.rejected.length : 0;
+      return `${filterPayload.status || "done"} · accepted=${accepted} · rejected=${rejected}`;
     }
 
     function rerankSummary(rerank) {
@@ -2367,8 +2779,98 @@ def build_redesigned_index_html() -> str:
       }
     }
 
+    async function runResumeBuild(button) {
+      button.disabled = true;
+      switchView("build");
+      stopBuildPolling();
+      try {
+        setStatus("继续构建中");
+        setStage("ingest", "active", ingestPayload(), "从断点继续处理未完成文件");
+        const payload = {...ingestPayload(), reset: false, resume: true, async: true};
+        const ingestResult = await postJson("/api/ingest-db", payload);
+        appState.currentTaskId = ingestResult.task_id || null;
+        renderBuildProgress({progress: {message: ingestResult.summary || "继续构建任务已启动", percent: 0}});
+        setStage("ingest", "active", ingestResult, ingestResult.summary || "继续构建任务已启动");
+        await refreshTasks({quiet: true});
+        if (appState.currentTaskId) startBuildPolling(appState.currentTaskId);
+        setStatus("继续构建任务已启动", "success");
+      } catch (error) {
+        setStatus(String(error), "error");
+        setStage("ingest", "error", {error: String(error)}, "继续构建失败");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function retryFailedItems(button) {
+      if (!appState.currentTaskId) {
+        setStatus("请先在左侧任务记录中选择一个有失败条目的构建任务", "error");
+        return;
+      }
+      button.disabled = true;
+      switchView("build");
+      stopBuildPolling();
+      try {
+        setStatus("失败条目重试中");
+        const payload = {...ingestPayload(), task_id: appState.currentTaskId, reset: false, resume: true};
+        setStage("ingest", "active", payload, "只重试当前任务中的失败文件");
+        const result = await postJson("/api/retry-failed-items", payload);
+        appState.currentTaskId = result.task_id || null;
+        renderBuildProgress({progress: {message: result.summary || "失败条目重试任务已启动", percent: 0}});
+        setStage("ingest", "active", result, result.summary || "失败条目重试任务已启动");
+        await refreshTasks({quiet: true});
+        if (appState.currentTaskId) startBuildPolling(appState.currentTaskId);
+        setStatus("失败条目重试任务已启动", "success");
+      } catch (error) {
+        setStatus(String(error), "error");
+        setStage("ingest", "error", {error: String(error)}, "失败条目重试失败");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function runEmbeddingBackfill(button) {
+      button.disabled = true;
+      switchView("build");
+      stopBuildPolling();
+      try {
+        setStatus("Embedding 补齐中");
+        setStage("embedding", "active", commonPayload(), "扫描缺失向量的索引文档");
+        const result = await postJson("/api/embed-db", {...commonPayload(), async: true});
+        appState.currentTaskId = result.task_id || null;
+        renderBuildProgress({progress: {message: result.summary || "Embedding 补齐任务已启动", percent: 0}});
+        setStage("embedding", "active", result, result.summary || "Embedding 补齐任务已启动");
+        await refreshTasks({quiet: true});
+        if (appState.currentTaskId) startBuildPolling(appState.currentTaskId);
+        setStatus("Embedding 补齐任务已启动", "success");
+      } catch (error) {
+        setStatus(String(error), "error");
+        setStage("embedding", "error", {error: String(error)}, "Embedding 补齐失败");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function pauseCurrentTask(button) {
+      if (!appState.currentTaskId) {
+        setStatus("当前没有可暂停的任务", "error");
+        return;
+      }
+      button.disabled = true;
+      try {
+        const result = await postJson("/api/pause-task", taskPayload({task_id: appState.currentTaskId}));
+        setStatus(result.summary || "暂停请求已发送", "success");
+        await refreshTasks({quiet: true});
+      } catch (error) {
+        setStatus(String(error), "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
     async function runFullFlow(button) {
       button.disabled = true;
+      const fullFlowQuery = $("query").value;
       switchView("build");
       resetStages();
       try {
@@ -2393,11 +2895,18 @@ def build_redesigned_index_html() -> str:
 
         setStatus("多路召回与答案生成中");
         switchView("qa");
-        setStage("retrieval", "active", queryPayload(), "分路召回证据");
-        const askResult = await postJson("/api/ask-db", queryPayload());
+        const questionTab = ensureQuestionTabForQuery(fullFlowQuery);
+        questionTab.status = "answering";
+        renderQuestionTabs();
+        const payload = queryPayload(questionTab.query);
+        setStage("retrieval", "active", payload, "分路召回证据");
+        const askResult = await postJson("/api/ask-db", payload);
         appState.currentTaskId = askResult.task_id || appState.currentTaskId;
+        questionTab.answerTaskId = askResult.task_id || questionTab.answerTaskId;
+        questionTab.status = "answered";
         askResult.workflow = {config: preview, init: initResult, ingest: ingestResult};
         renderPipelineResult(askResult);
+        syncActiveQuestionState();
         await refreshTasks({quiet: true});
         setStatus("全流程完成", "success");
       } catch (error) {
@@ -2411,13 +2920,21 @@ def build_redesigned_index_html() -> str:
 
     async function runSearch(button) {
       button.disabled = true;
+      const requestedQuery = $("query").value;
       try {
         switchView("qa");
+        const questionTab = ensureQuestionTabForQuery(requestedQuery);
+        questionTab.status = "searching";
+        renderQuestionTabs();
+        const payload = queryPayload(questionTab.query);
         setStatus("检索中");
-        setStage("retrieval", "active", queryPayload(), "分路召回证据");
-        const result = await postJson("/api/search-db", queryPayload());
+        setStage("retrieval", "active", payload, "分路召回证据");
+        const result = await postJson("/api/search-db", payload);
         appState.currentTaskId = result.task_id || null;
+        questionTab.searchTaskId = result.task_id || questionTab.searchTaskId;
+        questionTab.status = "searched";
         renderSearchResult(result);
+        syncActiveQuestionState();
         await refreshTasks({quiet: true});
         setStatus("检索完成", "success");
       } catch (error) {
@@ -2430,12 +2947,21 @@ def build_redesigned_index_html() -> str:
 
     async function runAsk(button) {
       button.disabled = true;
+      const requestedQuery = $("query").value;
       try {
         switchView("qa");
+        const questionTab = ensureQuestionTabForQuery(requestedQuery);
+        questionTab.status = "answering";
+        renderQuestionTabs();
+        const payload = queryPayload(questionTab.query);
         setStatus("问答中");
-        const result = await postJson("/api/ask-db", queryPayload());
+        setStage("retrieval", "active", payload, "分路召回证据");
+        const result = await postJson("/api/ask-db", payload);
         appState.currentTaskId = result.task_id || null;
+        questionTab.answerTaskId = result.task_id || questionTab.answerTaskId;
+        questionTab.status = "answered";
         renderPipelineResult(result);
+        syncActiveQuestionState();
         await refreshTasks({quiet: true});
         setStatus("问答完成", "success");
       } catch (error) {
@@ -2522,6 +3048,7 @@ def build_redesigned_index_html() -> str:
       $("workOrderLimit").value = "";
       $("manualLimit").value = "";
       $("ingestReset").checked = true;
+      $("ingestResume").checked = true;
       $("envFile").value = "";
       $("enableEmbedding").checked = false;
       $("embeddingProvider").value = "vllm";
@@ -2571,12 +3098,20 @@ def build_redesigned_index_html() -> str:
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
     $("buildViewBtn").addEventListener("click", () => switchView("build"));
     $("qaViewBtn").addEventListener("click", () => switchView("qa"));
+    $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
+    $("query").addEventListener("input", syncActiveQuestionInput);
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
     $("refreshTasksBtn").addEventListener("click", () => refreshTasks());
     $("clearDataBtn").addEventListener("click", () => clearData($("clearDataBtn")));
+    $("resumeBuildBtn").addEventListener("click", () => runResumeBuild($("resumeBuildBtn")));
+    $("retryFailedBtn").addEventListener("click", () => retryFailedItems($("retryFailedBtn")));
+    $("runEmbeddingBtn").addEventListener("click", () => runEmbeddingBackfill($("runEmbeddingBtn")));
+    $("pauseTaskBtn").addEventListener("click", () => pauseCurrentTask($("pauseTaskBtn")));
     $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
     $("runSearchBtn").addEventListener("click", () => runSearch($("runSearchBtn")));
     $("runAnswerBtn").addEventListener("click", () => runAsk($("runAnswerBtn")));
+    $("runQuestionSearchBtn").addEventListener("click", () => runSearch($("runQuestionSearchBtn")));
+    $("runQuestionAnswerBtn").addEventListener("click", () => runAsk($("runQuestionAnswerBtn")));
     $("runFullFlowBtn").addEventListener("click", () => runFullFlow($("runFullFlowBtn")));
     $("doctorBtn").addEventListener("click", async () => {
       try {
@@ -2595,6 +3130,12 @@ def build_redesigned_index_html() -> str:
     applyDemoDefaults({save: false});
     bindAutoSave();
     const restoredConfig = restoreConfigFromLocalStorage();
+    if (!appState.questionTabs.length) {
+      const tab = makeQuestionTab($("query").value || defaultQuery);
+      appState.questionTabs.push(tab);
+      appState.activeQuestionTabId = tab.id;
+    }
+    renderQuestionTabs();
     renderBuildProgress({});
     if (!restoredConfig) switchView("build");
     refreshTasks({quiet: true});
@@ -2659,6 +3200,15 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/ingest-db":
             self._handle_ingest_db()
+            return
+        if parsed.path == "/api/retry-failed-items":
+            self._handle_retry_failed_items()
+            return
+        if parsed.path == "/api/embed-db":
+            self._handle_embed_db()
+            return
+        if parsed.path == "/api/pause-task":
+            self._handle_pause_task()
             return
         if parsed.path == "/api/search-db":
             self._handle_search_db()
@@ -2747,12 +3297,114 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 response,
                 status=HTTPStatus.OK if not report.failed_items else HTTPStatus.MULTI_STATUS,
             )
+        except IngestPaused as exc:
+            if task_id is not None:
+                finish_task(database, task_id, "paused", {"task_id": task_id, "summary": str(exc)}, "任务已暂停")
+            self._send_json({"task_id": task_id, "summary": "任务已暂停", "status": "paused"})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
             body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
             if task_update_error:
                 body["task_update_error"] = task_update_error
             self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_embed_db(self) -> None:
+        payload = self._read_json()
+        database = database_from_payload(payload)
+        task_id: int | None = None
+        try:
+            task_id = create_task(database, "embedding", None, task_request_payload(payload))
+            if bool(payload.get("async", True)):
+                update_task_progress(
+                    database,
+                    task_id,
+                    {"phase": "embedding", "message": "Embedding 补齐任务已进入后台队列", "percent": 0, "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")},
+                    "Embedding 补齐任务已启动",
+                )
+                thread = threading.Thread(
+                    target=run_embedding_task,
+                    args=(database, task_id, payload),
+                    name=f"waji-embedding-{task_id}",
+                    daemon=True,
+                )
+                thread.start()
+                self._send_json({"task_id": task_id, "summary": "Embedding 补齐任务已启动", "status": "running"}, status=HTTPStatus.ACCEPTED)
+                return
+
+            options = embedding_options_from_payload(payload, database)
+            report = PgEmbeddingBackfill(options).backfill()
+            response = {"task_id": task_id, "summary": format_embedding_report_summary(report), "report": report.to_dict()}
+            finish_task(
+                database,
+                task_id,
+                "completed_with_errors" if report.failed_items else "completed",
+                response,
+                str(response["summary"]),
+            )
+            self._send_json(response, status=HTTPStatus.OK if not report.failed_items else HTTPStatus.MULTI_STATUS)
+        except IngestPaused as exc:
+            if task_id is not None:
+                finish_task(database, task_id, "paused", {"task_id": task_id, "summary": str(exc)}, "任务已暂停")
+            self._send_json({"task_id": task_id, "summary": "任务已暂停", "status": "paused"})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            task_update_error = mark_task_failed(database, task_id, exc)
+            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            if task_update_error:
+                body["task_update_error"] = task_update_error
+            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_retry_failed_items(self) -> None:
+        payload = self._read_json()
+        database = database_from_payload(payload)
+        task_id: int | None = None
+        try:
+            source_task_id = int(payload.get("task_id") or 0)
+            if source_task_id <= 0:
+                self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            source_task = get_task(database, source_task_id)
+            if source_task is None:
+                self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            failed_items = build_failed_items_from_task(source_task)
+            source_request = source_task.get("request") if isinstance(source_task.get("request"), dict) else {}
+            retry_payload = retry_ingest_payload(payload, failed_items, source_request)
+            task_id = create_task(database, "build_retry", None, task_request_payload({**retry_payload, "retry_source_task_id": source_task_id}))
+            update_task_progress(
+                database,
+                task_id,
+                {"phase": "queued", "message": f"失败条目重试任务已进入后台队列，共 {len(failed_items)} 个文件", "percent": 0},
+                "失败条目重试任务已启动",
+            )
+            thread = threading.Thread(
+                target=run_failed_item_retry_task,
+                args=(database, task_id, source_task_id, retry_payload, failed_items),
+                name=f"waji-retry-{task_id}",
+                daemon=True,
+            )
+            thread.start()
+            self._send_json(
+                {"task_id": task_id, "summary": f"失败条目重试任务已启动，共 {len(failed_items)} 个文件", "status": "running"},
+                status=HTTPStatus.ACCEPTED,
+            )
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            task_update_error = mark_task_failed(database, task_id, exc)
+            body: dict[str, object] = {"task_id": task_id, "error": f"{type(exc).__name__}: {exc}"}
+            if task_update_error:
+                body["task_update_error"] = task_update_error
+            self._send_json(body, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_pause_task(self) -> None:
+        payload = self._read_json()
+        try:
+            task_id = int(payload.get("task_id") or 0)
+            if task_id <= 0:
+                self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            result = request_task_pause(database_from_payload(payload), task_id)
+            self._send_json(result)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _handle_search_db(self) -> None:
         payload = self._read_json()
@@ -2887,6 +3539,16 @@ def optional_int(value: object) -> int | None:
     return int(value)
 
 
+def path_list_payload(value: object) -> tuple[Path, ...]:
+    """Return a tuple of non-empty paths from a JSON list payload."""
+
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("path list payload must be an array")
+    return tuple(Path(str(item)) for item in value if str(item or "").strip())
+
+
 def object_payload(value: object) -> dict[str, Any] | None:
     """Return a dict payload or None."""
 
@@ -2914,6 +3576,7 @@ def ingest_options_from_payload(
     database: DatabaseOptions,
     *,
     progress_callback: Any | None = None,
+    pause_callback: Any | None = None,
 ) -> PgIngestOptions:
     """Build ingest options from a web request payload."""
 
@@ -2921,6 +3584,8 @@ def ingest_options_from_payload(
         database=database,
         work_order_dir=optional_path(payload.get("work_order_dir")),
         manual_dir=optional_path(payload.get("manual_dir")),
+        work_order_paths=path_list_payload(payload.get("work_order_paths")),
+        manual_paths=path_list_payload(payload.get("manual_paths")),
         config_path=optional_path(payload.get("config")),
         config_overrides=object_payload(payload.get("config_overrides")),
         env_path=optional_path(payload.get("env_file")),
@@ -2928,7 +3593,29 @@ def ingest_options_from_payload(
         work_order_limit=optional_int(payload.get("work_order_limit")),
         manual_limit=optional_int(payload.get("manual_limit")),
         max_manual_chars=int(payload.get("max_manual_chars") or 1800),
+        resume=bool(payload.get("resume", True)),
         progress_callback=progress_callback,
+        pause_callback=pause_callback,
+    )
+
+
+def embedding_options_from_payload(
+    payload: dict[str, Any],
+    database: DatabaseOptions,
+    *,
+    progress_callback: Any | None = None,
+    pause_callback: Any | None = None,
+) -> PgEmbeddingOptions:
+    """Build embedding backfill options from a web request payload."""
+
+    return PgEmbeddingOptions(
+        database=database,
+        config_path=optional_path(payload.get("config")),
+        config_overrides=object_payload(payload.get("config_overrides")),
+        env_path=optional_path(payload.get("env_file")),
+        limit=optional_int(payload.get("embedding_limit")),
+        progress_callback=progress_callback,
+        pause_callback=pause_callback,
     )
 
 
@@ -2940,6 +3627,7 @@ def run_ingest_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
             payload,
             database,
             progress_callback=lambda progress: update_task_progress(database, task_id, progress, str(progress.get("message") or "构建中")),
+            pause_callback=lambda: is_task_pause_requested(database, task_id),
         )
         report = PgIngestBuilder(options).ingest()
         response = {"task_id": task_id, "summary": format_ingest_report_summary(report), "report": report.to_dict()}
@@ -2950,8 +3638,184 @@ def run_ingest_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
             response,
             str(response["summary"]),
         )
+    except IngestPaused:
+        finish_task(database, task_id, "paused", {"task_id": task_id, "summary": "任务已暂停"}, "任务已暂停")
     except Exception as exc:  # noqa: BLE001 - background task must persist failure.
         mark_task_failed(database, task_id, exc)
+
+
+def run_embedding_task(database: DatabaseOptions, task_id: int, payload: dict[str, Any]) -> None:
+    """Run one embedding backfill task in the background and persist progress."""
+
+    try:
+        options = embedding_options_from_payload(
+            payload,
+            database,
+            progress_callback=lambda progress: update_task_progress(database, task_id, progress, str(progress.get("message") or "Embedding 补齐中")),
+            pause_callback=lambda: is_task_pause_requested(database, task_id),
+        )
+        report = PgEmbeddingBackfill(options).backfill()
+        response = {"task_id": task_id, "summary": format_embedding_report_summary(report), "report": report.to_dict()}
+        finish_task(
+            database,
+            task_id,
+            "completed_with_errors" if report.failed_items else "completed",
+            response,
+            str(response["summary"]),
+        )
+    except IngestPaused:
+        finish_task(database, task_id, "paused", {"task_id": task_id, "summary": "任务已暂停"}, "任务已暂停")
+    except Exception as exc:  # noqa: BLE001 - background task must persist failure.
+        mark_task_failed(database, task_id, exc)
+
+
+def run_failed_item_retry_task(
+    database: DatabaseOptions,
+    task_id: int,
+    source_task_id: int,
+    payload: dict[str, Any],
+    failed_items: list[dict[str, str]],
+) -> None:
+    """Run a build retry for only the failed source files from a previous task."""
+
+    try:
+        options = ingest_options_from_payload(
+            payload,
+            database,
+            progress_callback=lambda progress: update_task_progress(database, task_id, progress, str(progress.get("message") or "失败条目重试中")),
+            pause_callback=lambda: is_task_pause_requested(database, task_id),
+        )
+        report = PgIngestBuilder(options).ingest()
+        response = {
+            "task_id": task_id,
+            "retry_source_task_id": source_task_id,
+            "retried_items": failed_items,
+            "summary": format_ingest_report_summary(report),
+            "report": report.to_dict(),
+        }
+        finish_task(
+            database,
+            task_id,
+            "completed_with_errors" if report.failed_items else "completed",
+            response,
+            str(response["summary"]),
+        )
+        resolve_source_task_failures(database, source_task_id, task_id, failed_items, report.failed_items)
+    except IngestPaused:
+        finish_task(database, task_id, "paused", {"task_id": task_id, "summary": "任务已暂停"}, "任务已暂停")
+    except Exception as exc:  # noqa: BLE001 - background task must persist failure.
+        mark_task_failed(database, task_id, exc)
+
+
+def build_failed_items_from_task(task: dict[str, Any]) -> list[dict[str, str]]:
+    """Extract retryable build failed items from a persisted task."""
+
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    report = result.get("report") if isinstance(result.get("report"), dict) else {}
+    raw_items = report.get("failed_items") if isinstance(report.get("failed_items"), list) else []
+    failed_items: list[dict[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        stage = str(item.get("stage") or "").strip()
+        source_path = str(item.get("input") or "").strip()
+        if stage not in {"work_order", "manual"} or not source_path:
+            continue
+        failed_items.append({"stage": stage, "input": source_path, "error": str(item.get("error") or "")})
+    if not failed_items:
+        raise ValueError("selected task has no retryable failed build items")
+    return failed_items
+
+
+def retry_ingest_payload(
+    request_payload: dict[str, Any],
+    failed_items: list[dict[str, str]],
+    source_request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an ingest payload that targets only failed source files."""
+
+    retry_payload = dict(source_request or {})
+    retry_payload.update(request_payload)
+    retry_payload.pop("task_id", None)
+    work_order_paths = [item["input"] for item in failed_items if item["stage"] == "work_order"]
+    manual_paths = [item["input"] for item in failed_items if item["stage"] == "manual"]
+    retry_payload["reset"] = False
+    retry_payload["resume"] = True
+    retry_payload["async"] = False
+    retry_payload["work_order_paths"] = work_order_paths
+    retry_payload["manual_paths"] = manual_paths
+    if not work_order_paths:
+        retry_payload["work_order_dir"] = None
+    if not manual_paths:
+        retry_payload["manual_dir"] = None
+    return retry_payload
+
+
+def resolve_source_task_failures(
+    database: DatabaseOptions,
+    source_task_id: int,
+    retry_task_id: int,
+    attempted_items: list[dict[str, str]],
+    retry_failed_items: list[dict[str, str]],
+) -> None:
+    """Mark retried failures as resolved on the original task when possible."""
+
+    source_task = get_task(database, source_task_id)
+    if source_task is None:
+        return
+    result = source_task.get("result") if isinstance(source_task.get("result"), dict) else {}
+    report = result.get("report") if isinstance(result.get("report"), dict) else None
+    if report is None:
+        return
+    original_failed = report.get("failed_items") if isinstance(report.get("failed_items"), list) else []
+    attempted_keys = failed_item_keys(attempted_items)
+    retry_failed_keys = failed_item_keys(retry_failed_items)
+    resolved_keys = attempted_keys - retry_failed_keys
+    unresolved: list[dict[str, Any]] = []
+    for item in original_failed:
+        key = failed_item_key(item)
+        if key and key in resolved_keys:
+            continue
+        if isinstance(item, dict):
+            unresolved.append(item)
+    report["failed_items"] = unresolved
+    retry_history = report.get("retry_history") if isinstance(report.get("retry_history"), list) else []
+    retry_history.append(
+        {
+            "retry_task_id": retry_task_id,
+            "attempted_count": len(attempted_items),
+            "resolved_count": len(resolved_keys),
+            "unresolved_count": len(unresolved),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    report["retry_history"] = retry_history
+    status = "completed" if not unresolved else "completed_with_errors"
+    summary = f"失败条目重试完成：已解决 {len(resolved_keys)} 个，剩余 {len(unresolved)} 个"
+    finish_task(database, source_task_id, status, result, summary, error=None if status == "completed" else source_task.get("error"))
+
+
+def failed_item_keys(items: list[dict[str, str]]) -> set[tuple[str, str]]:
+    """Return stable failed-item keys for comparison across retry reports."""
+
+    keys: set[tuple[str, str]] = set()
+    for item in items:
+        key = failed_item_key(item)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def failed_item_key(item: object) -> tuple[str, str] | None:
+    """Return a comparable failed-item key when an item has stage and input."""
+
+    if not isinstance(item, dict):
+        return None
+    stage = str(item.get("stage") or "").strip()
+    source_path = str(item.get("input") or "").strip()
+    if not stage or not source_path:
+        return None
+    return stage, source_path
 
 
 def create_task(database: DatabaseOptions, task_type: str, query: str | None, request: dict[str, Any]) -> int:
@@ -2984,7 +3848,10 @@ def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict
             cur.execute(
                 """
                 UPDATE rag_tasks
-                SET updated_at = now(), status = %s, result = %s, summary = %s
+                SET updated_at = now(),
+                    status = CASE WHEN status = 'pause_requested' THEN status ELSE %s END,
+                    result = %s,
+                    summary = %s
                 WHERE id = %s
                 """,
                 ("running", json_param({"task_id": task_id, "progress": redact_secrets(progress)}), summary, task_id),
@@ -2992,6 +3859,39 @@ def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict
             if cur.rowcount != 1:
                 raise LookupError(f"task not found: {task_id}")
         conn.commit()
+
+
+def request_task_pause(database: DatabaseOptions, task_id: int) -> dict[str, Any]:
+    """Request a running task to pause at its next checkpoint."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                UPDATE rag_tasks
+                SET updated_at = now(), status = 'pause_requested', summary = %s
+                WHERE id = %s AND status IN ('running', 'pause_requested')
+                RETURNING id, status
+                """,
+                ("暂停请求已发送", task_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"running task not found: {task_id}")
+        conn.commit()
+    return {"task_id": int(row[0]), "status": str(row[1]), "summary": "暂停请求已发送"}
+
+
+def is_task_pause_requested(database: DatabaseOptions, task_id: int) -> bool:
+    """Return whether a task has a pending pause request."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute("SELECT status FROM rag_tasks WHERE id = %s", (task_id,))
+            row = cur.fetchone()
+    return bool(row and str(row[0]) == "pause_requested")
 
 
 def finish_task(

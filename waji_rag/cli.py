@@ -125,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for embedding calls.",
     )
     ingest_db.add_argument("--reset", action="store_true", help="Reset schema before ingesting.")
+    ingest_db.add_argument("--no-resume", action="store_true", help="Reprocess sources even when checkpoint metadata says they are complete.")
     ingest_db.add_argument("--work-order-limit", type=int, help="Optional maximum number of work-order files.")
     ingest_db.add_argument("--manual-limit", type=int, help="Optional maximum number of manual files.")
     ingest_db.add_argument(
@@ -266,6 +267,7 @@ def run_build_index(args: argparse.Namespace) -> int:
         output_dir=Path(args.out_dir),
         manual_limit=args.manual_limit,
         max_manual_chars=args.max_manual_chars,
+        resume=not args.no_resume,
     )
     try:
         report = LocalIndexBuilder(options).build()
@@ -321,6 +323,7 @@ def run_ingest_db(args: argparse.Namespace) -> int:
         work_order_limit=args.work_order_limit,
         manual_limit=args.manual_limit,
         max_manual_chars=args.max_manual_chars,
+        resume=not args.no_resume,
     )
     try:
         report = PgIngestBuilder(options).ingest()

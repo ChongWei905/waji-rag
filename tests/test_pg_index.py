@@ -6,9 +6,13 @@ from pathlib import Path
 from waji_rag.pg_index import (
     APPLICATION_DATA_TABLES,
     PgIngestReport,
+    RetrievalHit,
     build_documents_for_work_order,
+    build_query_constraints,
     bulk_insert_rows,
     clear_application_data_with_cursor,
+    filter_evidence_for_answer,
+    prioritize_hits_by_constraints,
     store_embedding_batch,
     unique_terms,
     vector_literal,
@@ -101,6 +105,64 @@ class PgIndexHelpersTests(unittest.TestCase):
         )
 
         self.assertEqual(cursor.executemany_calls, [("INSERT INTO demo_table(value) VALUES (%s)", [("a",), ("b",)])])
+
+    def test_evidence_filter_rejects_same_symptom_wrong_component(self) -> None:
+        constraints = build_query_constraints("用户报修机器风扇皮带异响，请回答可能原因")
+        evidence_items = [
+            {
+                "channel": "manual_typical_faults",
+                "doc_id": "manual:fan",
+                "title": "风扇皮带异响",
+                "body_preview": "风扇皮带松动会出现尖叫声。",
+            },
+            {
+                "channel": "manual_typical_faults",
+                "doc_id": "manual:aircon",
+                "title": "空调有异响",
+                "body_preview": "空调压缩机或鼓风机异常声音。",
+            },
+        ]
+
+        result = filter_evidence_for_answer(
+            query="用户报修机器风扇皮带异响，请回答可能原因",
+            evidence_items=evidence_items,
+            constraints=constraints,
+        )
+
+        self.assertEqual([item["doc_id"] for item in result["accepted"]], ["manual:fan"])
+        self.assertEqual([item["doc_id"] for item in result["rejected"]], ["manual:aircon"])
+        self.assertEqual(result["rejected"][0]["evidence_gate"]["reason"], "missing_component_anchor")
+
+    def test_prioritize_hits_by_constraints_prefers_component_anchor(self) -> None:
+        constraints = build_query_constraints("风扇皮带异响")
+        hits = [
+            RetrievalHit(
+                document_id=1,
+                doc_id="aircon",
+                doc_type="manual_typical_fault",
+                title="空调有异响",
+                score=10.0,
+                body_preview="空调出风口有异常声音。",
+                work_order_id=None,
+                source_path="空调系统/故障现象：空调有异响.html",
+                metadata={},
+            ),
+            RetrievalHit(
+                document_id=2,
+                doc_id="fan",
+                doc_type="manual_typical_fault",
+                title="风扇皮带异响",
+                score=5.0,
+                body_preview="风扇皮带张紧不足会产生异响。",
+                work_order_id=None,
+                source_path="动力系统/故障现象：风扇皮带异响.html",
+                metadata={},
+            ),
+        ]
+
+        prioritized = prioritize_hits_by_constraints(hits, constraints, top_k=1)
+
+        self.assertEqual(prioritized[0].doc_id, "fan")
 
 
 class FakeCursor:

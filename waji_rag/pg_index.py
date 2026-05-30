@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -16,7 +17,7 @@ from html_to_markdown import MarkdownConverter, detect_table_count
 
 from waji_rag.config import AppConfig, load_config, redact_secrets
 from waji_rag.embedding import CommandEmbeddingProvider, EmbeddingProviderError, OpenAICompatibleEmbeddingProvider
-from waji_rag.html_batch import DEFAULT_ENCODINGS, read_text_with_fallback
+from waji_rag.html_batch import DEFAULT_ENCODINGS, is_lossy_encoding, read_text_with_fallback
 from waji_rag.index_build import (
     FIELD_WEIGHTS,
     IndexDocument,
@@ -37,8 +38,90 @@ SCHEMA_VERSION = 1
 DEFAULT_BM25_K1 = 1.5
 DEFAULT_BM25_B = 0.75
 DEFAULT_BM25_BATCH_TERM_ROWS = 100_000
+DEFAULT_SOURCE_CHECKPOINT_FILES = 50
 MANUAL_SUFFIXES = {".html", ".htm", ".md", ".markdown"}
 FAULT_CODE_IN_QUERY = re.compile(r"\b[A-Za-z]\d{3,}[A-Za-z0-9_-]*\b")
+FAULT_PHRASE_SPLIT_PATTERN = re.compile(r"请|回答|如何|怎么|有哪些|哪些|相应|需要|（|\(")
+QUERY_LABEL_PATTERN = re.compile(r"^(问题|用户问题|用户报修内容|报修内容)\s*[:：]?\s*")
+REPORT_PREFIX_PATTERN = re.compile(r"^(用户|客户|司机)?\s*(报修|保修|反馈|反映)\s*(机器|设备|挖机|挖掘机|该机)?\s*")
+LEADING_MACHINE_PATTERN = re.compile(r"^(机器|设备|挖机|挖掘机|该机|车辆|车)\s*")
+SYMPTOM_TERMS = {
+    "异响",
+    "噪声",
+    "噪音",
+    "响声",
+    "尖叫",
+    "尖叫声",
+    "异常声音",
+    "摩擦声",
+    "慢",
+    "单边慢",
+    "无力",
+    "高温",
+    "漏油",
+    "渗油",
+    "报警",
+    "报错",
+    "开裂",
+    "损坏",
+    "不制冷",
+    "不启动",
+    "不起动",
+    "不工作",
+    "不动作",
+    "无法动作",
+    "无法行走",
+}
+GENERIC_QUERY_TERMS = {
+    "用户",
+    "客户",
+    "司机",
+    "报修",
+    "保修",
+    "反馈",
+    "机器",
+    "设备",
+    "挖机",
+    "挖掘机",
+    "该机",
+    "故障",
+    "原因",
+    "可能",
+    "导致",
+    "如何",
+    "解决",
+    "需要",
+    "更换",
+    "备件",
+    "详细",
+    "信息",
+    "编号",
+    "名称",
+    "编码",
+    "数量",
+}
+COMMON_COMPONENT_TERMS = {
+    "风扇",
+    "皮带",
+    "发动机",
+    "张紧轮",
+    "皮带轮",
+    "空调",
+    "压缩机",
+    "鼓风机",
+    "行走",
+    "马达",
+    "主泵",
+    "液压",
+    "动臂",
+    "斗杆",
+    "铲斗",
+    "油缸",
+    "回转",
+    "电瓶",
+    "发电机",
+    "gps",
+}
 APPLICATION_DATA_TABLES = (
     "rag_tasks",
     "document_embeddings",
@@ -48,6 +131,7 @@ APPLICATION_DATA_TABLES = (
     "manual_chunks",
     "part_evidence",
     "work_orders",
+    "ingest_items",
     "ingest_runs",
 )
 
@@ -72,6 +156,8 @@ class PgIngestOptions:
     database: DatabaseOptions
     work_order_dir: Path | None = None
     manual_dir: Path | None = None
+    work_order_paths: tuple[Path, ...] = ()
+    manual_paths: tuple[Path, ...] = ()
     config_path: Path | None = None
     config_overrides: dict[str, Any] | None = None
     env_path: Path | None = None
@@ -80,8 +166,10 @@ class PgIngestOptions:
     manual_limit: int | None = None
     max_manual_chars: int = 1800
     bm25_batch_term_rows: int = DEFAULT_BM25_BATCH_TERM_ROWS
+    resume: bool = True
     encodings: tuple[str, ...] = DEFAULT_ENCODINGS
     progress_callback: Callable[[dict[str, object]], None] | None = None
+    pause_callback: Callable[[], bool] | None = None
 
 
 @dataclass(slots=True)
@@ -102,6 +190,8 @@ class PgIngestReport:
     term_rows: int = 0
     embeddings: int = 0
     html_converted_in_memory: int = 0
+    skipped_files: int = 0
+    paused: bool = False
     timing_seconds: dict[str, float] = field(default_factory=dict)
     failed_items: list[dict[str, str]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -141,6 +231,42 @@ class PgPipelineOptions:
 
 
 @dataclass(slots=True)
+class PgEmbeddingOptions:
+    """Configuration for adding missing embeddings to existing documents."""
+
+    database: DatabaseOptions
+    config_path: Path | None = None
+    config_overrides: dict[str, Any] | None = None
+    env_path: Path | None = None
+    limit: int | None = None
+    progress_callback: Callable[[dict[str, object]], None] | None = None
+    pause_callback: Callable[[], bool] | None = None
+
+
+@dataclass(slots=True)
+class PgEmbeddingReport:
+    """Summary report for an embedding backfill run."""
+
+    started_at: str
+    elapsed_seconds: float
+    database_url: str
+    total_candidates: int = 0
+    processed_documents: int = 0
+    embeddings: int = 0
+    paused: bool = False
+    timing_seconds: dict[str, float] = field(default_factory=dict)
+    failed_items: list[dict[str, str]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable report dictionary."""
+
+        payload = asdict(self)
+        payload["timing_seconds"] = {key: round(value, 3) for key, value in self.timing_seconds.items()}
+        return payload
+
+
+@dataclass(slots=True)
 class RetrievalHit:
     """One retrieved document hit."""
 
@@ -163,6 +289,21 @@ class RetrievalHit:
 
 
 @dataclass(slots=True)
+class QueryConstraints:
+    """Deterministic evidence constraints parsed from a diagnostic query."""
+
+    fault_phrase: str
+    component_text: str
+    component_terms: list[str]
+    symptom_terms: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-serializable constraints payload."""
+
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class SearchDocumentUpsertResult:
     """Search document upsert output plus deferred BM25 rows."""
 
@@ -171,6 +312,20 @@ class SearchDocumentUpsertResult:
     timings: dict[str, float]
     field_rows: list[tuple[object, ...]]
     term_row_values: list[tuple[object, ...]]
+
+
+@dataclass(slots=True)
+class SourceCompletion:
+    """One source file that can be marked complete after BM25 rows are durable."""
+
+    source_kind: str
+    source_path: str
+    content_hash: str
+    counts: dict[str, int]
+
+
+class IngestPaused(RuntimeError):
+    """Raised when an ingest or embedding task is paused by user request."""
 
 
 class PgSchemaManager:
@@ -226,6 +381,7 @@ class PgIngestBuilder:
         self.pending_embeddings: list[tuple[int, IndexDocument]] = []
         self.pending_bm25_field_rows: list[tuple[object, ...]] = []
         self.pending_bm25_term_rows: list[tuple[object, ...]] = []
+        self.pending_source_completions: list[SourceCompletion] = []
         self.bm25_batch_term_rows = max(1, options.bm25_batch_term_rows)
         self.processed_file_count = 0
 
@@ -237,7 +393,17 @@ class PgIngestBuilder:
         PgSchemaManager(self.options.database).initialize(reset=self.options.reset)
         work_order_dir = self.options.work_order_dir.resolve() if self.options.work_order_dir else None
         manual_dir = self.options.manual_dir.resolve() if self.options.manual_dir else None
-        validate_ingest_inputs(work_order_dir, manual_dir)
+        work_order_files = resolve_work_order_input_files(
+            work_order_dir,
+            self.options.work_order_paths,
+            limit=self.options.work_order_limit,
+        )
+        manual_files = resolve_manual_input_files(
+            manual_dir,
+            self.options.manual_paths,
+            limit=self.options.manual_limit,
+        )
+        validate_ingest_inputs(work_order_dir, manual_dir, work_order_files, manual_files)
         self._emit_progress(
             {
                 "phase": "scan_inputs",
@@ -256,9 +422,13 @@ class PgIngestBuilder:
             manual_dir=str(manual_dir) if manual_dir else None,
         )
         if work_order_dir is not None:
-            report.work_order_files = len(limited_paths(list(iter_txt_files(work_order_dir)), self.options.work_order_limit))
+            report.work_order_files = len(work_order_files)
         if manual_dir is not None:
-            report.manual_files = len(limited_paths(list(iter_manual_files(manual_dir)), self.options.manual_limit))
+            report.manual_files = len(manual_files)
+        if work_order_dir is None and work_order_files:
+            report.work_order_files = len(work_order_files)
+        if manual_dir is None and manual_files:
+            report.manual_files = len(manual_files)
         self._emit_progress(
             self._progress_payload(
                 phase="plan",
@@ -270,13 +440,15 @@ class PgIngestBuilder:
         with connect(self.options.database.database_url) as conn:
             with conn.cursor() as cur:
                 run_id = create_ingest_run(cur, self.config)
-                if work_order_dir is not None:
-                    self._ingest_work_orders(cur, work_order_dir, report)
+                if work_order_files:
+                    self._ingest_work_orders(cur, work_order_files, report)
                     self._flush_bm25_batch(cur, report)
+                    self._maybe_pause(cur, report)
                     self._flush_embedding_batch(cur, report)
-                if manual_dir is not None:
-                    self._ingest_manuals(cur, manual_dir, report)
+                if manual_files:
+                    self._ingest_manuals(cur, manual_dir, manual_files, report)
                     self._flush_bm25_batch(cur, report)
+                    self._maybe_pause(cur, report)
                     self._flush_embedding_batch(cur, report)
                 finish_ingest_run(cur, run_id, report)
             conn.commit()
@@ -292,8 +464,7 @@ class PgIngestBuilder:
         )
         return report
 
-    def _ingest_work_orders(self, cur: Any, root: Path, report: PgIngestReport) -> None:
-        txt_files = limited_paths(list(iter_txt_files(root)), self.options.work_order_limit)
+    def _ingest_work_orders(self, cur: Any, txt_files: list[Path], report: PgIngestReport) -> None:
         report.work_order_files = len(txt_files)
         self._emit_progress(
             self._progress_payload(
@@ -306,7 +477,15 @@ class PgIngestBuilder:
         )
 
         for file_index, txt_path in enumerate(txt_files, start=1):
+            source_hash = ""
             try:
+                self._maybe_pause(cur, report)
+                source_hash = file_content_hash(txt_path)
+                if self.options.resume and source_is_completed(cur, "work_order", str(txt_path), source_hash):
+                    report.skipped_files += 1
+                    self.processed_file_count = file_index
+                    continue
+                mark_source_running(cur, "work_order", str(txt_path), source_hash)
                 parse_started = time.perf_counter()
                 self._emit_progress(
                     self._progress_payload(
@@ -319,6 +498,8 @@ class PgIngestBuilder:
                     )
                 )
                 text, encoding = read_text_with_fallback(txt_path, self.options.encodings)
+                if is_lossy_encoding(encoding):
+                    report.warnings.append(f"lossy_decode:{txt_path}:{encoding}")
                 record = self.parser.parse(text, source_path=txt_path, encoding=encoding)
                 add_timing(report, "parse_seconds", time.perf_counter() - parse_started)
 
@@ -332,15 +513,48 @@ class PgIngestBuilder:
 
                 documents = build_documents_for_work_order(record)
                 self.processed_file_count = file_index
+                source_document_count = 0
+                source_term_rows = 0
+                source_field_rows: list[tuple[object, ...]] = []
+                source_term_row_values: list[tuple[object, ...]] = []
+                source_embedding_items: list[tuple[int, IndexDocument]] = []
                 for document in documents:
                     result = upsert_search_document(cur, document, write_bm25=False)
                     merge_timings(report, result.timings)
                     report.total_documents += 1
                     report.term_rows += result.term_rows
-                    self._queue_bm25_rows(cur, result, report)
-                    self._queue_embedding(cur, result.document_id, document, report)
+                    source_document_count += 1
+                    source_term_rows += result.term_rows
+                    source_field_rows.extend(result.field_rows)
+                    source_term_row_values.extend(result.term_row_values)
+                    source_embedding_items.append((result.document_id, document))
+                self.pending_bm25_field_rows.extend(source_field_rows)
+                self.pending_bm25_term_rows.extend(source_term_row_values)
+                self.pending_source_completions.append(
+                    SourceCompletion(
+                        source_kind="work_order",
+                        source_path=str(txt_path),
+                        content_hash=source_hash,
+                        counts={
+                            "documents": source_document_count,
+                            "term_rows": source_term_rows,
+                            "parts": len(record.parts),
+                        },
+                    )
+                )
+                for document_id, document in source_embedding_items:
+                    self._queue_embedding(cur, document_id, document, report)
+                if (
+                    len(self.pending_bm25_term_rows) >= self.bm25_batch_term_rows
+                    or len(self.pending_source_completions) >= DEFAULT_SOURCE_CHECKPOINT_FILES
+                ):
+                    self._flush_bm25_batch(cur, report)
                 report.part_records += len(record.parts)
+            except IngestPaused:
+                raise
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
+                rollback_source_failure(cur, "work_order", str(txt_path), source_hash, exc)
+                commit_cursor(cur)
                 report.failed_items.append(
                     {"stage": "work_order", "input": str(txt_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
@@ -356,9 +570,9 @@ class PgIngestBuilder:
                         current_total=len(txt_files),
                     )
                 )
+            self._maybe_pause(cur, report)
 
-    def _ingest_manuals(self, cur: Any, root: Path, report: PgIngestReport) -> None:
-        manual_files = limited_paths(list(iter_manual_files(root)), self.options.manual_limit)
+    def _ingest_manuals(self, cur: Any, root: Path | None, manual_files: list[Path], report: PgIngestReport) -> None:
         report.manual_files = len(manual_files)
         self._emit_progress(
             self._progress_payload(
@@ -371,7 +585,15 @@ class PgIngestBuilder:
         )
 
         for file_index, manual_path in enumerate(manual_files, start=1):
+            source_hash = ""
             try:
+                self._maybe_pause(cur, report)
+                source_hash = file_content_hash(manual_path)
+                if self.options.resume and source_is_completed(cur, "manual", str(manual_path), source_hash):
+                    report.skipped_files += 1
+                    self.processed_file_count = report.work_order_files + file_index
+                    continue
+                mark_source_running(cur, "manual", str(manual_path), source_hash)
                 parse_started = time.perf_counter()
                 self._emit_progress(
                     self._progress_payload(
@@ -388,17 +610,34 @@ class PgIngestBuilder:
                     encodings=self.options.encodings,
                     converter=self.converter,
                 )
-                metadata = infer_manual_metadata(manual_path, root)
+                if is_lossy_encoding(encoding):
+                    report.warnings.append(f"lossy_decode:{manual_path}:{encoding}")
+                document_root = source_root_for_path(manual_path, root)
+                metadata = infer_manual_metadata(manual_path, document_root)
                 chunks = chunk_markdown(markdown_text, max_chars=max(self.options.max_manual_chars, 200))
                 add_timing(report, "parse_seconds", time.perf_counter() - parse_started)
                 if not chunks:
                     report.warnings.append(f"empty_manual_file: {manual_path}")
+                    self.pending_source_completions.append(
+                        SourceCompletion(
+                            source_kind="manual",
+                            source_path=str(manual_path),
+                            content_hash=source_hash,
+                            counts={"documents": 0, "term_rows": 0, "chunks": 0},
+                        )
+                    )
+                    self._flush_bm25_batch(cur, report)
                     continue
 
                 self.processed_file_count = report.work_order_files + file_index
                 pg_started = time.perf_counter()
                 delete_source_records(cur, str(manual_path))
                 add_timing(report, "pg_write_seconds", time.perf_counter() - pg_started)
+                source_document_count = 0
+                source_term_rows = 0
+                source_field_rows: list[tuple[object, ...]] = []
+                source_term_row_values: list[tuple[object, ...]] = []
+                source_embedding_items: list[tuple[int, IndexDocument]] = []
                 for chunk_index, chunk_text in enumerate(chunks):
                     chunk_metadata = {
                         **metadata,
@@ -410,7 +649,7 @@ class PgIngestBuilder:
                     }
                     document = build_manual_document(
                         manual_path=manual_path,
-                        root=root,
+                        root=document_root,
                         metadata=chunk_metadata,
                         chunk_text=chunk_text,
                         chunk_index=chunk_index,
@@ -423,11 +662,39 @@ class PgIngestBuilder:
                     report.manual_chunks += 1
                     report.total_documents += 1
                     report.term_rows += result.term_rows
+                    source_document_count += 1
+                    source_term_rows += result.term_rows
                     if converted_from_html:
                         report.html_converted_in_memory += 1 if chunk_index == 0 else 0
-                    self._queue_bm25_rows(cur, result, report)
-                    self._queue_embedding(cur, result.document_id, document, report)
+                    source_field_rows.extend(result.field_rows)
+                    source_term_row_values.extend(result.term_row_values)
+                    source_embedding_items.append((result.document_id, document))
+                self.pending_bm25_field_rows.extend(source_field_rows)
+                self.pending_bm25_term_rows.extend(source_term_row_values)
+                self.pending_source_completions.append(
+                    SourceCompletion(
+                        source_kind="manual",
+                        source_path=str(manual_path),
+                        content_hash=source_hash,
+                        counts={
+                            "documents": source_document_count,
+                            "term_rows": source_term_rows,
+                            "chunks": len(chunks),
+                        },
+                    )
+                )
+                for document_id, document in source_embedding_items:
+                    self._queue_embedding(cur, document_id, document, report)
+                if (
+                    len(self.pending_bm25_term_rows) >= self.bm25_batch_term_rows
+                    or len(self.pending_source_completions) >= DEFAULT_SOURCE_CHECKPOINT_FILES
+                ):
+                    self._flush_bm25_batch(cur, report)
+            except IngestPaused:
+                raise
             except Exception as exc:  # noqa: BLE001 - keep per-file diagnostics.
+                rollback_source_failure(cur, "manual", str(manual_path), source_hash, exc)
+                commit_cursor(cur)
                 report.failed_items.append(
                     {"stage": "manual", "input": str(manual_path), "error": f"{type(exc).__name__}: {exc}"}
                 )
@@ -443,20 +710,17 @@ class PgIngestBuilder:
                         current_total=len(manual_files),
                     )
                 )
-
-    def _queue_bm25_rows(self, cur: Any, result: SearchDocumentUpsertResult, report: PgIngestReport) -> None:
-        self.pending_bm25_field_rows.extend(result.field_rows)
-        self.pending_bm25_term_rows.extend(result.term_row_values)
-        if len(self.pending_bm25_term_rows) >= self.bm25_batch_term_rows:
-            self._flush_bm25_batch(cur, report)
+            self._maybe_pause(cur, report)
 
     def _flush_bm25_batch(self, cur: Any, report: PgIngestReport) -> None:
-        if not self.pending_bm25_field_rows and not self.pending_bm25_term_rows:
+        if not self.pending_bm25_field_rows and not self.pending_bm25_term_rows and not self.pending_source_completions:
             return
         field_rows = self.pending_bm25_field_rows
         term_rows = self.pending_bm25_term_rows
+        source_completions = self.pending_source_completions
         self.pending_bm25_field_rows = []
         self.pending_bm25_term_rows = []
+        self.pending_source_completions = []
         self._emit_progress(
             self._progress_payload(
                 phase="bm25",
@@ -466,7 +730,10 @@ class PgIngestBuilder:
         )
         started_at = time.perf_counter()
         insert_bm25_rows(cur, field_rows=field_rows, term_rows=term_rows)
+        for completion in source_completions:
+            mark_source_completed(cur, completion)
         add_timing(report, "bm25_seconds", time.perf_counter() - started_at)
+        commit_cursor(cur)
         self._emit_progress(
             self._progress_payload(
                 phase="bm25",
@@ -474,6 +741,22 @@ class PgIngestBuilder:
                 report=report,
             )
         )
+
+    def _maybe_pause(self, cur: Any, report: PgIngestReport) -> None:
+        if self.options.pause_callback is None or not self.options.pause_callback():
+            return
+        self._emit_progress(
+            self._progress_payload(
+                phase="paused",
+                message="收到暂停请求，正在保存断点",
+                report=report,
+            )
+        )
+        self._flush_bm25_batch(cur, report)
+        self._flush_embedding_batch(cur, report)
+        commit_cursor(cur)
+        report.paused = True
+        raise IngestPaused("ingest paused by user request")
 
     def _queue_embedding(self, cur: Any, document_id: int, document: IndexDocument, report: PgIngestReport) -> None:
         if self.embedding_provider is None:
@@ -499,7 +782,11 @@ class PgIngestBuilder:
                 report=report,
             )
         )
-        stored_count = store_embedding_batch(cur, items, self.config, self.embedding_provider, report)
+        try:
+            stored_count = store_embedding_batch(cur, items, self.config, self.embedding_provider, report)
+        except Exception as exc:  # noqa: BLE001 - embedding can be retried by backfill.
+            report.warnings.append(f"embedding_flush_failed:{len(items)}: {type(exc).__name__}: {exc}")
+            stored_count = 0
         report.embeddings += stored_count
         self._emit_progress(
             self._progress_payload(
@@ -535,7 +822,7 @@ class PgIngestBuilder:
             processed_files = current_index
         elif phase == "manuals" and current_index is not None:
             processed_files = report.work_order_files + current_index
-        elif phase in {"bm25", "embedding"}:
+        elif phase in {"bm25", "embedding", "paused"}:
             processed_files = min(total_files, self.processed_file_count)
         percent = round((processed_files / total_files) * 100, 1) if total_files else 0.0
         if phase == "completed":
@@ -560,6 +847,92 @@ class PgIngestBuilder:
         }
 
 
+class PgEmbeddingBackfill:
+    """Generate missing document embeddings for an existing PostgreSQL index."""
+
+    def __init__(self, options: PgEmbeddingOptions) -> None:
+        """Store embedding backfill options and provider."""
+
+        self.options = options
+        self.config = load_config(
+            options.config_path,
+            overrides=options.config_overrides,
+            env_path=options.env_path,
+        )
+        self.embedding_provider = build_embedding_provider(self.config)
+
+    def backfill(self) -> PgEmbeddingReport:
+        """Scan documents missing embeddings and write vectors in batches."""
+
+        if self.embedding_provider is None:
+            raise ValueError("embedding config is not available")
+        started_at = time.time()
+        report = PgEmbeddingReport(
+            started_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+            elapsed_seconds=0.0,
+            database_url=redact_database_url(self.options.database.database_url),
+        )
+        self._emit_progress({"phase": "embedding", "message": "初始化 Embedding 补齐任务", "percent": 0})
+        PgSchemaManager(self.options.database).initialize(reset=False)
+        with connect(self.options.database.database_url) as conn:
+            with conn.cursor() as cur:
+                report.total_candidates = count_missing_embeddings(cur, self.config, limit=self.options.limit)
+                self._emit_progress(self._progress_payload(report, message=f"待补向量 {report.total_candidates} 条"))
+                while report.processed_documents < report.total_candidates:
+                    self._maybe_pause(cur, report)
+                    batch_limit = min(self.config.embedding.batch_size, report.total_candidates - report.processed_documents)
+                    documents = fetch_missing_embedding_documents(cur, self.config, limit=max(batch_limit, 1))
+                    if not documents:
+                        break
+                    stored_count = store_embedding_batch(cur, documents, self.config, self.embedding_provider, report)
+                    report.processed_documents += len(documents)
+                    report.embeddings += stored_count
+                    commit_cursor(cur)
+                    self._emit_progress(self._progress_payload(report, message=f"已补向量 {report.embeddings} 条"))
+            conn.commit()
+        report.elapsed_seconds = round(time.time() - started_at, 3)
+        self._emit_progress(self._progress_payload(report, message="Embedding 补齐完成", completed=True))
+        return report
+
+    def _emit_progress(self, progress: dict[str, object]) -> None:
+        """Emit embedding progress when a callback was configured."""
+
+        if self.options.progress_callback is None:
+            return
+        self.options.progress_callback(progress)
+
+    def _maybe_pause(self, cur: Any, report: PgEmbeddingReport) -> None:
+        if self.options.pause_callback is None or not self.options.pause_callback():
+            return
+        commit_cursor(cur)
+        report.paused = True
+        self._emit_progress(self._progress_payload(report, message="Embedding 补齐已暂停"))
+        raise IngestPaused("embedding backfill paused by user request")
+
+    @staticmethod
+    def _progress_payload(report: PgEmbeddingReport, *, message: str, completed: bool = False) -> dict[str, object]:
+        total = max(report.total_candidates, 0)
+        processed = min(report.processed_documents, total) if total else report.processed_documents
+        percent = 100.0 if completed else round((processed / total) * 100, 1) if total else 0.0
+        return {
+            "phase": "embedding",
+            "message": message,
+            "percent": percent,
+            "processed_files": processed,
+            "total_files": total,
+            "counts": {
+                "total_documents": report.total_candidates,
+                "embeddings": report.embeddings,
+                "failed_items": len(report.failed_items),
+            },
+            "timing_seconds": rounded_timings(report.timing_seconds),
+            "failed_count": len(report.failed_items),
+            "recent_failures": report.failed_items[-5:],
+            "warnings": report.warnings[-5:],
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+
 class PgRetriever:
     """Retrieve work-order, manual, and part evidence from PostgreSQL."""
 
@@ -578,6 +951,7 @@ class PgRetriever:
             raise ValueError("query must not be empty")
 
         terms = unique_terms(tokenize_text(query))
+        constraints = build_query_constraints(query, terms)
         effective_mode = self.config.retrieval_mode()
         retrieval_events: list[dict[str, object]] = []
         channels: dict[str, list[RetrievalHit]] = {}
@@ -591,6 +965,7 @@ class PgRetriever:
                     doc_types=["work_order"],
                     mode=effective_mode,
                     channel_name="work_orders",
+                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 typical_hits = self._search_channel(
@@ -601,6 +976,7 @@ class PgRetriever:
                     doc_types=["manual_typical_fault"],
                     mode=effective_mode,
                     channel_name="manual_typical_faults",
+                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 fault_code_hits = self._search_fault_code_channel(
@@ -609,6 +985,7 @@ class PgRetriever:
                     terms,
                     top_k=top_k,
                     mode=effective_mode,
+                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 part_hits = self._search_channel(
@@ -619,6 +996,7 @@ class PgRetriever:
                     doc_types=["part_evidence"],
                     mode=effective_mode,
                     channel_name="part_evidence",
+                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 channels = {
@@ -636,6 +1014,13 @@ class PgRetriever:
             "channels": {name: [hit.to_dict() for hit in hits] for name, hits in channels.items()},
             "part_candidates": part_candidates,
         }
+        evidence_filter = filter_evidence_for_answer(
+            query=query,
+            evidence_items=flatten_evidence(payload, limit=max(self.config.answer.evidence_top_k, top_k, 1) * 4),
+            constraints=constraints,
+        )
+        payload["evidence_filter"] = evidence_filter
+        payload["filtered_part_candidates"] = filter_part_candidates_by_evidence(part_candidates, evidence_filter)
         fallback_events = [event for event in retrieval_events if event.get("status") == "fallback"]
         if fallback_events:
             payload["warnings"] = [
@@ -644,6 +1029,7 @@ class PgRetriever:
         if include_debug:
             payload["debug"] = {
                 "query_terms": terms,
+                "query_constraints": constraints.to_dict(),
                 "bm25": {"k1": DEFAULT_BM25_K1, "b": DEFAULT_BM25_B, "field_weights": FIELD_WEIGHTS},
                 "embedding_enabled": self.config.embedding.is_available(),
                 "retrieval_events": retrieval_events,
@@ -659,6 +1045,7 @@ class PgRetriever:
         *,
         top_k: int,
         mode: str,
+        constraints: QueryConstraints,
         debug_events: list[dict[str, object]],
     ) -> list[RetrievalHit]:
         codes = [code.upper() for code in FAULT_CODE_IN_QUERY.findall(query)]
@@ -674,6 +1061,7 @@ class PgRetriever:
                 doc_types=["manual_fault_code"],
                 mode=mode,
                 channel_name="manual_fault_codes",
+                constraints=constraints,
                 debug_events=debug_events,
             )
         return []
@@ -688,11 +1076,13 @@ class PgRetriever:
         doc_types: list[str],
         mode: str,
         channel_name: str,
+        constraints: QueryConstraints,
         debug_events: list[dict[str, object]],
     ) -> list[RetrievalHit]:
-        bm25_hits = search_bm25(cur, terms, top_k=top_k, doc_types=doc_types)
+        candidate_top_k = max(top_k, self.config.retrieval.bm25_top_k)
+        bm25_hits = search_bm25(cur, terms, top_k=candidate_top_k, doc_types=doc_types)
         if mode != "hybrid" or self.embedding_provider is None:
-            return bm25_hits
+            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
 
         try:
             query_vector = self.embedding_provider.embed_texts([query], text_type="query")[0]
@@ -706,14 +1096,14 @@ class PgRetriever:
                     "bm25_hits": len(bm25_hits),
                 }
             )
-            return bm25_hits
+            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
         try:
             vector_hits = search_vectors(
                 cur,
                 query_vector,
                 provider=self.config.embedding.provider,
                 model=self.config.embedding.model,
-                top_k=max(top_k, self.config.retrieval.vector_top_k),
+                top_k=max(candidate_top_k, self.config.retrieval.vector_top_k),
                 doc_types=doc_types,
             )
         except Exception as exc:  # noqa: BLE001 - hybrid search can degrade to BM25.
@@ -726,7 +1116,7 @@ class PgRetriever:
                     "bm25_hits": len(bm25_hits),
                 }
             )
-            return bm25_hits
+            return prioritize_hits_by_constraints(bm25_hits, constraints, top_k=top_k)
         debug_events.append(
             {
                 "channel": channel_name,
@@ -736,12 +1126,13 @@ class PgRetriever:
                 "vector_hits": len(vector_hits),
             }
         )
-        return merge_hybrid_hits(
+        merged_hits = merge_hybrid_hits(
             bm25_hits,
             vector_hits,
-            top_k=top_k,
+            top_k=candidate_top_k,
             bm25_weight=self.config.retrieval.hybrid_alpha,
         )
+        return prioritize_hits_by_constraints(merged_hits, constraints, top_k=top_k)
 
 
 class RagPipeline:
@@ -762,6 +1153,7 @@ class RagPipeline:
         retriever = PgRetriever(self.database, self.config)
         retrieve_started_at = time.time()
         retrieval = retriever.retrieve(query, top_k=top_k, include_debug=include_debug)
+        evidence_filter = object_payload_or_empty(retrieval.get("evidence_filter"))
         trace.append(
             stage_event(
                 "retrieval",
@@ -775,21 +1167,37 @@ class RagPipeline:
             )
         )
 
-        evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
+        evidence_items = list_payload(evidence_filter.get("accepted"))
+        if not evidence_items:
+            evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
+        trace.append(
+            stage_event(
+                "evidence_filter",
+                str(evidence_filter.get("status") or "ok"),
+                {
+                    "summary": evidence_filter.get("summary"),
+                    "accepted_count": len(list_payload(evidence_filter.get("accepted"))),
+                    "rejected_count": len(list_payload(evidence_filter.get("rejected"))),
+                    "constraints": evidence_filter.get("constraints") or {},
+                },
+            )
+        )
+        part_candidates = list_payload(retrieval.get("filtered_part_candidates")) or list_payload(retrieval.get("part_candidates"))
         rerank_payload = self._rerank(query, evidence_items, trace)
         selected_evidence = list(rerank_payload.get("evidence") or evidence_items)
-        answer_payload = self._answer(query, selected_evidence, list(retrieval.get("part_candidates") or []), trace)
+        answer_payload = self._answer(query, selected_evidence, part_candidates, trace)
         payload: dict[str, object] = {
             "query": query,
             "answer": answer_payload,
             "retrieval": retrieval,
+            "evidence_filter": evidence_filter,
             "rerank": {
                 "enabled": self.config.rerank.enabled,
                 "available": self.config.rerank.is_available(),
                 **{key: value for key, value in rerank_payload.items() if key != "evidence"},
             },
             "selected_evidence": selected_evidence,
-            "part_candidates": retrieval.get("part_candidates") or [],
+            "part_candidates": part_candidates,
             "trace": trace,
             "elapsed_seconds": round(time.time() - started_at, 3),
         }
@@ -1001,6 +1409,7 @@ def drop_schema_objects(cur: Any) -> None:
             manual_chunks,
             part_evidence,
             work_orders,
+            ingest_items,
             ingest_runs,
             schema_migrations
         CASCADE
@@ -1066,6 +1475,22 @@ def create_schema(cur: Any) -> None:
         );
         CREATE INDEX IF NOT EXISTS work_orders_work_order_id_idx
             ON work_orders(work_order_id);
+
+        CREATE TABLE IF NOT EXISTS ingest_items (
+            id bigserial PRIMARY KEY,
+            source_kind text NOT NULL,
+            source_path text NOT NULL,
+            content_hash text NOT NULL DEFAULT '',
+            status text NOT NULL,
+            started_at timestamptz,
+            completed_at timestamptz,
+            updated_at timestamptz NOT NULL DEFAULT now(),
+            counts jsonb NOT NULL DEFAULT '{}'::jsonb,
+            error text,
+            UNIQUE(source_kind, source_path)
+        );
+        CREATE INDEX IF NOT EXISTS ingest_items_status_idx ON ingest_items(status);
+        CREATE INDEX IF NOT EXISTS ingest_items_source_idx ON ingest_items(source_kind, source_path);
 
         CREATE TABLE IF NOT EXISTS part_evidence (
             id bigserial PRIMARY KEY,
@@ -1158,10 +1583,15 @@ def create_schema(cur: Any) -> None:
     create_task_schema(cur)
 
 
-def validate_ingest_inputs(work_order_dir: Path | None, manual_dir: Path | None) -> None:
-    """Validate ingest input directories."""
+def validate_ingest_inputs(
+    work_order_dir: Path | None,
+    manual_dir: Path | None,
+    work_order_files: Sequence[Path] = (),
+    manual_files: Sequence[Path] = (),
+) -> None:
+    """Validate ingest input directories and explicit retry files."""
 
-    if work_order_dir is None and manual_dir is None:
+    if work_order_dir is None and manual_dir is None and not work_order_files and not manual_files:
         raise ValueError("at least one of work_order_dir or manual_dir is required")
     for label, path in (("work_order_dir", work_order_dir), ("manual_dir", manual_dir)):
         if path is None:
@@ -1170,6 +1600,157 @@ def validate_ingest_inputs(work_order_dir: Path | None, manual_dir: Path | None)
             raise FileNotFoundError(f"{label} does not exist: {path}")
         if not path.is_dir():
             raise NotADirectoryError(f"{label} is not a directory: {path}")
+    for label, paths in (("work_order_paths", work_order_files), ("manual_paths", manual_files)):
+        for path in paths:
+            if not path.exists():
+                raise FileNotFoundError(f"{label} item does not exist: {path}")
+            if not path.is_file():
+                raise IsADirectoryError(f"{label} item is not a file: {path}")
+
+
+def resolve_work_order_input_files(root: Path | None, explicit_paths: Sequence[Path], *, limit: int | None) -> list[Path]:
+    """Return work-order files from explicit retry paths or a scanned directory."""
+
+    if explicit_paths:
+        return unique_existing_paths(path for path in explicit_paths if path.suffix.lower() == ".txt")
+    if root is None:
+        return []
+    return limited_paths(list(iter_txt_files(root)), limit)
+
+
+def resolve_manual_input_files(root: Path | None, explicit_paths: Sequence[Path], *, limit: int | None) -> list[Path]:
+    """Return manual files from explicit retry paths or a scanned directory."""
+
+    if explicit_paths:
+        return unique_existing_paths(path for path in explicit_paths if path.suffix.lower() in MANUAL_SUFFIXES)
+    if root is None:
+        return []
+    return limited_paths(list(iter_manual_files(root)), limit)
+
+
+def unique_existing_paths(paths: Iterable[Path]) -> list[Path]:
+    """Return unique resolved paths while preserving input order."""
+
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return result
+
+
+def source_root_for_path(path: Path, preferred_root: Path | None) -> Path:
+    """Return a metadata root that contains the source path."""
+
+    if preferred_root is not None:
+        try:
+            path.relative_to(preferred_root)
+            return preferred_root
+        except ValueError:
+            pass
+    return path.parent
+
+
+def file_content_hash(path: Path) -> str:
+    """Return a stable SHA-256 hash for one source file."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_is_completed(cur: Any, source_kind: str, source_path: str, content_hash: str) -> bool:
+    """Return whether one source file is already fully ingested."""
+
+    cur.execute(
+        """
+        SELECT 1
+        FROM ingest_items
+        WHERE source_kind = %s AND source_path = %s AND content_hash = %s AND status = 'completed'
+        LIMIT 1
+        """,
+        (source_kind, source_path, content_hash),
+    )
+    return cur.fetchone() is not None
+
+
+def mark_source_running(cur: Any, source_kind: str, source_path: str, content_hash: str) -> None:
+    """Mark a source file as currently being ingested."""
+
+    cur.execute(
+        """
+        INSERT INTO ingest_items(source_kind, source_path, content_hash, status, started_at, completed_at, counts, error)
+        VALUES (%s, %s, %s, 'running', now(), NULL, '{}'::jsonb, NULL)
+        ON CONFLICT(source_kind, source_path) DO UPDATE SET
+            content_hash = EXCLUDED.content_hash,
+            status = 'running',
+            started_at = now(),
+            completed_at = NULL,
+            updated_at = now(),
+            counts = '{}'::jsonb,
+            error = NULL
+        """,
+        (source_kind, source_path, content_hash),
+    )
+
+
+def mark_source_completed(cur: Any, completion: SourceCompletion) -> None:
+    """Mark a source file as fully ingested."""
+
+    cur.execute(
+        """
+        INSERT INTO ingest_items(source_kind, source_path, content_hash, status, started_at, completed_at, counts, error)
+        VALUES (%s, %s, %s, 'completed', now(), now(), %s, NULL)
+        ON CONFLICT(source_kind, source_path) DO UPDATE SET
+            content_hash = EXCLUDED.content_hash,
+            status = 'completed',
+            completed_at = now(),
+            updated_at = now(),
+            counts = EXCLUDED.counts,
+            error = NULL
+        """,
+        (completion.source_kind, completion.source_path, completion.content_hash, json_param(completion.counts)),
+    )
+
+
+def mark_source_failed(cur: Any, source_kind: str, source_path: str, content_hash: str, exc: Exception) -> None:
+    """Mark a source file as failed without making it resumable as completed."""
+
+    cur.execute(
+        """
+        INSERT INTO ingest_items(source_kind, source_path, content_hash, status, started_at, completed_at, counts, error)
+        VALUES (%s, %s, %s, 'failed', now(), NULL, '{}'::jsonb, %s)
+        ON CONFLICT(source_kind, source_path) DO UPDATE SET
+            content_hash = EXCLUDED.content_hash,
+            status = 'failed',
+            updated_at = now(),
+            completed_at = NULL,
+            error = EXCLUDED.error
+        """,
+        (source_kind, source_path, content_hash, f"{type(exc).__name__}: {exc}"),
+    )
+
+
+def rollback_source_failure(cur: Any, source_kind: str, source_path: str, content_hash: str, exc: Exception) -> None:
+    """Remove partial source records and persist failure metadata."""
+
+    delete_source_records(cur, source_path)
+    mark_source_failed(cur, source_kind, source_path, content_hash, exc)
+
+
+def commit_cursor(cur: Any) -> None:
+    """Commit through a psycopg cursor when a real connection is available."""
+
+    connection = getattr(cur, "connection", None)
+    commit = getattr(connection, "commit", None)
+    if callable(commit):
+        commit()
 
 
 def create_ingest_run(cur: Any, config: AppConfig) -> int:
@@ -1212,11 +1793,12 @@ def ingest_report_counts(report: PgIngestReport) -> dict[str, int]:
         "term_rows": report.term_rows,
         "embeddings": report.embeddings,
         "html_converted_in_memory": report.html_converted_in_memory,
+        "skipped_files": report.skipped_files,
         "failed_items": len(report.failed_items),
     }
 
 
-def add_timing(report: PgIngestReport, key: str, elapsed_seconds: float) -> None:
+def add_timing(report: PgIngestReport | PgEmbeddingReport, key: str, elapsed_seconds: float) -> None:
     """Accumulate a positive timing value on an ingest report."""
 
     report.timing_seconds[key] = report.timing_seconds.get(key, 0.0) + max(0.0, elapsed_seconds)
@@ -1547,11 +2129,81 @@ def maybe_store_embedding(
     document: IndexDocument,
     config: AppConfig,
     provider: CommandEmbeddingProvider | OpenAICompatibleEmbeddingProvider | None,
-    report: PgIngestReport,
+    report: PgIngestReport | PgEmbeddingReport,
 ) -> bool:
     """Store an optional embedding for one document when configured."""
 
     return store_embedding_batch(cur, [(document_id, document)], config, provider, report) == 1
+
+
+def count_missing_embeddings(cur: Any, config: AppConfig, *, limit: int | None = None) -> int:
+    """Count documents that do not yet have embeddings for the configured provider/model."""
+
+    params: list[object] = [config.embedding.provider, config.embedding.model]
+    limit_clause = ""
+    if limit is not None:
+        limit_clause = "LIMIT %s"
+        params.append(max(limit, 0))
+    cur.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM (
+            SELECT d.id
+            FROM documents d
+            LEFT JOIN document_embeddings e
+                ON e.document_id = d.id AND e.provider = %s AND e.model = %s
+            WHERE e.document_id IS NULL
+            ORDER BY d.id ASC
+            {limit_clause}
+        ) missing
+        """,
+        params,
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+def fetch_missing_embedding_documents(
+    cur: Any,
+    config: AppConfig,
+    *,
+    limit: int,
+) -> list[tuple[int, IndexDocument]]:
+    """Fetch documents missing embeddings for the configured provider/model."""
+
+    cur.execute(
+        """
+        SELECT d.id, d.doc_id, d.doc_type, d.title, d.body, d.work_order_id, d.source_path, d.metadata
+        FROM documents d
+        LEFT JOIN document_embeddings e
+            ON e.document_id = d.id AND e.provider = %s AND e.model = %s
+        WHERE e.document_id IS NULL
+        ORDER BY d.id ASC
+        LIMIT %s
+        """,
+        (config.embedding.provider, config.embedding.model, max(limit, 1)),
+    )
+    documents: list[tuple[int, IndexDocument]] = []
+    for row in cur.fetchall():
+        document_id, doc_id, doc_type, title, body, work_order_id, source_path, metadata = row
+        document_metadata = dict(metadata or {}) if isinstance(metadata, dict) else {}
+        if work_order_id and "work_order_id" not in document_metadata:
+            document_metadata["work_order_id"] = work_order_id
+        documents.append(
+            (
+                int(document_id),
+                IndexDocument(
+                    doc_id=str(doc_id),
+                    doc_type=str(doc_type),
+                    title=str(title or ""),
+                    text=str(body or ""),
+                    fields={"body": str(body or "")},
+                    metadata=document_metadata,
+                    source_path=str(source_path or ""),
+                ),
+            )
+        )
+    return documents
 
 
 def store_embedding_batch(
@@ -1559,7 +2211,7 @@ def store_embedding_batch(
     items: list[tuple[int, IndexDocument]],
     config: AppConfig,
     provider: CommandEmbeddingProvider | OpenAICompatibleEmbeddingProvider | None,
-    report: PgIngestReport,
+    report: PgIngestReport | PgEmbeddingReport,
 ) -> int:
     """Embed and store a batch of documents, falling back to single-item retries on provider errors."""
 
@@ -1588,7 +2240,7 @@ def store_embedding_items_individually(
     items: list[tuple[int, IndexDocument]],
     config: AppConfig,
     provider: CommandEmbeddingProvider | OpenAICompatibleEmbeddingProvider,
-    report: PgIngestReport,
+    report: PgIngestReport | PgEmbeddingReport,
 ) -> int:
     """Retry document embeddings one by one after a failed batch request."""
 
@@ -1861,6 +2513,239 @@ def collect_work_order_ids(*hit_groups: list[RetrievalHit]) -> list[str]:
     return ids
 
 
+def build_query_constraints(query: str, terms: list[str] | None = None) -> QueryConstraints:
+    """Extract high-precision component and symptom anchors from a diagnostic query."""
+
+    fault_phrase = extract_fault_phrase(query)
+    symptom_terms = extract_symptom_terms(fault_phrase or query)
+    component_text = strip_symptom_terms(fault_phrase, symptom_terms)
+    component_terms = extract_component_terms(component_text, terms or unique_terms(tokenize_text(query)))
+    return QueryConstraints(
+        fault_phrase=fault_phrase,
+        component_text=component_text,
+        component_terms=component_terms,
+        symptom_terms=symptom_terms,
+    )
+
+
+def extract_fault_phrase(query: str) -> str:
+    """Return the most likely user-reported fault phrase from a full question."""
+
+    normalized = clean_string(query)
+    if not normalized:
+        return ""
+    fragment = FAULT_PHRASE_SPLIT_PATTERN.split(normalized, maxsplit=1)[0]
+    fragment = QUERY_LABEL_PATTERN.sub("", fragment).strip()
+    fragment = REPORT_PREFIX_PATTERN.sub("", fragment).strip()
+    fragment = LEADING_MACHINE_PATTERN.sub("", fragment).strip()
+    fragment = fragment.strip(" :：，,。；;")
+    return fragment or normalized
+
+
+def extract_symptom_terms(text: str) -> list[str]:
+    """Return known symptom words that appear in the query phrase."""
+
+    normalized = normalize_for_gate(text)
+    terms = [term for term in sorted(SYMPTOM_TERMS, key=len, reverse=True) if term in normalized]
+    return unique_terms(terms)
+
+
+def strip_symptom_terms(text: str, symptom_terms: list[str]) -> str:
+    """Remove known symptom terms from a fault phrase to leave likely components."""
+
+    component_text = normalize_for_gate(text)
+    for term in sorted(symptom_terms, key=len, reverse=True):
+        component_text = component_text.replace(term, "")
+    component_text = REPORT_PREFIX_PATTERN.sub("", component_text).strip()
+    component_text = LEADING_MACHINE_PATTERN.sub("", component_text).strip()
+    return component_text.strip(" :：，,。；;")
+
+
+def extract_component_terms(component_text: str, fallback_terms: list[str]) -> list[str]:
+    """Return component anchor terms that should dominate evidence filtering."""
+
+    terms: list[str] = []
+    normalized_component = normalize_for_gate(component_text)
+    if len(normalized_component) >= 2:
+        terms.append(normalized_component)
+        known_terms = sorted(
+            (term for term in COMMON_COMPONENT_TERMS if term in normalized_component),
+            key=lambda term: (normalized_component.find(term), -len(term)),
+        )
+        terms.extend(known_terms or tokenize_text(normalized_component))
+    if not terms:
+        terms.extend(fallback_terms)
+    return unique_terms(
+        term
+        for term in terms
+        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
+    )[:12]
+
+
+def normalize_for_gate(value: object) -> str:
+    """Normalize text for deterministic evidence gate substring checks."""
+
+    return re.sub(r"\s+", "", clean_string(value).lower())
+
+
+def prioritize_hits_by_constraints(
+    hits: list[RetrievalHit],
+    constraints: QueryConstraints,
+    *,
+    top_k: int,
+) -> list[RetrievalHit]:
+    """Prefer hits that mention component anchors before applying the final limit."""
+
+    if not constraints.component_terms:
+        return hits[:top_k]
+
+    def sort_key(hit: RetrievalHit) -> tuple[int, int, float, int]:
+        match = match_query_constraints(hit_filter_text(hit), constraints)
+        has_component = bool(match["component_hits"])
+        has_symptom = bool(match["symptom_hits"])
+        return (0 if has_component else 1, 0 if has_symptom else 1, -hit.score, hit.document_id)
+
+    return sorted(hits, key=sort_key)[:top_k]
+
+
+def filter_evidence_for_answer(
+    *,
+    query: str,
+    evidence_items: list[dict[str, object]],
+    constraints: QueryConstraints | None = None,
+) -> dict[str, object]:
+    """Split retrieved evidence into accepted and rejected items before rerank/answer."""
+
+    active_constraints = constraints or build_query_constraints(query)
+    decorated: list[dict[str, object]] = []
+    for item in evidence_items:
+        text = evidence_item_filter_text(item)
+        match = match_query_constraints(text, active_constraints)
+        decorated_item = dict(item)
+        decorated_item["evidence_gate"] = match
+        decorated.append(decorated_item)
+
+    component_required = bool(active_constraints.component_terms)
+    component_supported = component_required and any(item["evidence_gate"]["component_hits"] for item in decorated)
+    accepted: list[dict[str, object]] = []
+    rejected: list[dict[str, object]] = []
+    for item in decorated:
+        gate = dict(item.get("evidence_gate") or {})
+        if not component_required:
+            gate["decision"] = "accepted"
+            gate["reason"] = "no_component_anchor"
+            item["evidence_gate"] = gate
+            accepted.append(item)
+        elif not component_supported:
+            gate["decision"] = "accepted"
+            gate["reason"] = "no_component_supported_in_retrieval"
+            item["evidence_gate"] = gate
+            accepted.append(item)
+        elif gate.get("component_hits"):
+            gate["decision"] = "accepted"
+            gate["reason"] = "component_anchor_matched"
+            item["evidence_gate"] = gate
+            accepted.append(item)
+        else:
+            gate["decision"] = "rejected"
+            gate["reason"] = "missing_component_anchor"
+            item["evidence_gate"] = gate
+            rejected.append(item)
+
+    status = "ok" if not rejected else "filtered"
+    return {
+        "status": status,
+        "query": query,
+        "constraints": active_constraints.to_dict(),
+        "component_supported": component_supported,
+        "summary": f"accepted={len(accepted)}, rejected={len(rejected)}",
+        "accepted": accepted,
+        "rejected": rejected,
+    }
+
+
+def match_query_constraints(text: str, constraints: QueryConstraints) -> dict[str, object]:
+    """Return component and symptom anchor matches for one evidence text."""
+
+    normalized = normalize_for_gate(text)
+    token_set = set(tokenize_text(text))
+    component_hits = [
+        term for term in constraints.component_terms if term and (term in normalized or term in token_set)
+    ]
+    symptom_hits = [
+        term for term in constraints.symptom_terms if term and (term in normalized or term in token_set)
+    ]
+    return {
+        "component_hits": unique_terms(component_hits),
+        "symptom_hits": unique_terms(symptom_hits),
+    }
+
+
+def hit_filter_text(hit: RetrievalHit) -> str:
+    """Build searchable text for filtering one retrieval hit."""
+
+    return join_text(
+        [
+            hit.title,
+            hit.body_preview,
+            hit.source_path,
+            metadata_filter_text(hit.metadata),
+        ]
+    )
+
+
+def evidence_item_filter_text(item: dict[str, object]) -> str:
+    """Build searchable text for filtering one flattened evidence item."""
+
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return join_text(
+        [
+            item.get("title"),
+            item.get("body_preview"),
+            item.get("source_path"),
+            metadata_filter_text(metadata),
+        ]
+    )
+
+
+def metadata_filter_text(metadata: dict[str, object]) -> str:
+    """Return compact metadata text useful for evidence gating."""
+
+    keys = ("fault_title", "fault_description", "file_name", "system_dir", "manual_section", "part_name", "part_code")
+    return join_text(metadata.get(key) for key in keys)
+
+
+def filter_part_candidates_by_evidence(
+    part_candidates: list[dict[str, object]],
+    evidence_filter: dict[str, object],
+) -> list[dict[str, object]]:
+    """Keep part candidates tied to accepted work orders when the gate has such IDs."""
+
+    accepted = list_payload(evidence_filter.get("accepted"))
+    accepted_ids = {
+        str(item.get("work_order_id"))
+        for item in accepted
+        if isinstance(item, dict) and item.get("work_order_id")
+    }
+    if not accepted_ids:
+        return part_candidates
+    return [part for part in part_candidates if str(part.get("work_order_id")) in accepted_ids]
+
+
+def object_payload_or_empty(value: object) -> dict[str, object]:
+    """Return a dict payload or an empty dict."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def list_payload(value: object) -> list[dict[str, object]]:
+    """Return a list of dict payloads from JSON-like data."""
+
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def flatten_evidence(payload: dict[str, object], *, limit: int) -> list[dict[str, object]]:
     """Flatten channel hits into a single evidence list for rerank and answers."""
 
@@ -2025,6 +2910,16 @@ def format_ingest_report_summary(report: PgIngestReport) -> str:
         f"work_orders={report.work_orders}, part_records={report.part_records}, "
         f"manual_files={report.manual_files}, manual_chunks={report.manual_chunks}, "
         f"documents={report.total_documents}, term_rows={report.term_rows}, "
+        f"embeddings={report.embeddings}, skipped_files={report.skipped_files}, failed_items={len(report.failed_items)}, "
+        f"elapsed={report.elapsed_seconds}s"
+    )
+
+
+def format_embedding_report_summary(report: PgEmbeddingReport) -> str:
+    """Return a compact embedding backfill summary."""
+
+    return (
+        f"candidates={report.total_candidates}, processed={report.processed_documents}, "
         f"embeddings={report.embeddings}, failed_items={len(report.failed_items)}, "
         f"elapsed={report.elapsed_seconds}s"
     )
