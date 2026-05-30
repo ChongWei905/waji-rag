@@ -65,6 +65,8 @@ DEFAULT_QUERY = (
 DEFAULT_SHARED_CONFIG_PATH = PROJECT_ROOT / ".git" / "info" / "waji-rag-shared-config.json"
 _TASK_SCHEMA_LOCK = threading.Lock()
 _TASK_SCHEMA_DATABASES: set[str] = set()
+_TASK_DB_RETRY_SQLSTATES = {"40P01", "40001", "55P03"}
+_TASK_DB_MAX_ATTEMPTS = 5
 
 
 INDEX_HTML = f"""<!doctype html>
@@ -5781,54 +5783,93 @@ def ensure_task_schema(database: DatabaseOptions) -> None:
     with _TASK_SCHEMA_LOCK:
         if database_key in _TASK_SCHEMA_DATABASES:
             return
-        with connect(database.database_url) as conn:
-            with conn.cursor() as cur:
-                create_task_schema(cur)
-            conn.commit()
+        for attempt in range(_TASK_DB_MAX_ATTEMPTS):
+            try:
+                with connect(database.database_url) as conn:
+                    with conn.cursor() as cur:
+                        create_task_schema(cur)
+                    conn.commit()
+                break
+            except Exception as exc:  # noqa: BLE001 - inspect SQLSTATE without importing psycopg.
+                if attempt >= _TASK_DB_MAX_ATTEMPTS - 1 or not is_retryable_task_db_error(exc):
+                    raise
+                task_retry_sleep(attempt)
         _TASK_SCHEMA_DATABASES.add(database_key)
+
+
+def is_retryable_task_db_error(exc: Exception) -> bool:
+    """Return whether a PostgreSQL task-history transaction should be retried."""
+
+    sqlstate = str(getattr(exc, "sqlstate", "") or "")
+    if sqlstate in _TASK_DB_RETRY_SQLSTATES:
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "deadlock detected" in text or "could not serialize access" in text or "lock not available" in text
+
+
+def task_retry_sleep(attempt: int) -> None:
+    """Sleep briefly before retrying a task-history transaction."""
+
+    time.sleep(min(0.8, 0.05 * (2**attempt)))
+
+
+def run_task_transaction(database: DatabaseOptions, operation: Any) -> Any:
+    """Run a task-history transaction and retry transient PostgreSQL lock failures."""
+
+    ensure_task_schema(database)
+    for attempt in range(_TASK_DB_MAX_ATTEMPTS):
+        try:
+            with connect(database.database_url) as conn:
+                with conn.cursor() as cur:
+                    result = operation(cur)
+                conn.commit()
+            return result
+        except Exception as exc:  # noqa: BLE001 - inspect SQLSTATE without importing psycopg.
+            if attempt >= _TASK_DB_MAX_ATTEMPTS - 1 or not is_retryable_task_db_error(exc):
+                raise
+            task_retry_sleep(attempt)
+    raise RuntimeError("task transaction retry loop exhausted")
 
 
 def create_task(database: DatabaseOptions, task_type: str, query: str | None, request: dict[str, Any]) -> int:
     """Create a persistent workbench task and return its task ID."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO rag_tasks(task_type, status, query, request)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id
-                """,
-                (task_type, "running", query, json_param(redact_secrets(request))),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise RuntimeError("failed to create task")
-        conn.commit()
-    return int(row[0])
+    def operation(cur: Any) -> int:
+        cur.execute(
+            """
+            INSERT INTO rag_tasks(task_type, status, query, request)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (task_type, "running", query, json_param(redact_secrets(request))),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("failed to create task")
+        return int(row[0])
+
+    return int(run_task_transaction(database, operation))
 
 
 def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict[str, object], summary: str) -> None:
     """Persist running progress for a task."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE rag_tasks
-                SET updated_at = now(),
-                    status = CASE WHEN status = 'pause_requested' THEN status ELSE %s END,
-                    result = %s,
-                    summary = %s
-                WHERE id = %s
-                """,
-                ("running", json_param({"task_id": task_id, "progress": redact_secrets(progress)}), summary, task_id),
-            )
-            if cur.rowcount != 1:
-                raise LookupError(f"task not found: {task_id}")
-        conn.commit()
+    def operation(cur: Any) -> None:
+        cur.execute(
+            """
+            UPDATE rag_tasks
+            SET updated_at = now(),
+                status = CASE WHEN status = 'pause_requested' THEN status ELSE %s END,
+                result = %s,
+                summary = %s
+            WHERE id = %s
+            """,
+            ("running", json_param({"task_id": task_id, "progress": redact_secrets(progress)}), summary, task_id),
+        )
+        if cur.rowcount != 1:
+            raise LookupError(f"task not found: {task_id}")
+
+    run_task_transaction(database, operation)
 
 
 def update_task_result(
@@ -5842,42 +5883,40 @@ def update_task_result(
 ) -> None:
     """Persist a task result snapshot while preserving the existing task row."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE rag_tasks
-                SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
-                WHERE id = %s
-                """,
-                (status, json_param(redact_secrets(result)), summary, error, task_id),
-            )
-            if cur.rowcount != 1:
-                raise LookupError(f"task not found: {task_id}")
-        conn.commit()
+    def operation(cur: Any) -> None:
+        cur.execute(
+            """
+            UPDATE rag_tasks
+            SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
+            WHERE id = %s
+            """,
+            (status, json_param(redact_secrets(result)), summary, error, task_id),
+        )
+        if cur.rowcount != 1:
+            raise LookupError(f"task not found: {task_id}")
+
+    run_task_transaction(database, operation)
 
 
 def request_task_pause(database: DatabaseOptions, task_id: int) -> dict[str, Any]:
     """Request a running task to pause at its next checkpoint."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE rag_tasks
-                SET updated_at = now(), status = 'pause_requested', summary = %s
-                WHERE id = %s AND status IN ('running', 'pause_requested')
-                RETURNING id, status
-                """,
-                ("暂停请求已发送", task_id),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise LookupError(f"running task not found: {task_id}")
-        conn.commit()
-    return {"task_id": int(row[0]), "status": str(row[1]), "summary": "暂停请求已发送"}
+    def operation(cur: Any) -> dict[str, Any]:
+        cur.execute(
+            """
+            UPDATE rag_tasks
+            SET updated_at = now(), status = 'pause_requested', summary = %s
+            WHERE id = %s AND status IN ('running', 'pause_requested')
+            RETURNING id, status
+            """,
+            ("暂停请求已发送", task_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise LookupError(f"running task not found: {task_id}")
+        return {"task_id": int(row[0]), "status": str(row[1]), "summary": "暂停请求已发送"}
+
+    return dict(run_task_transaction(database, operation))
 
 
 def is_task_pause_requested(database: DatabaseOptions, task_id: int) -> bool:
@@ -5902,20 +5941,19 @@ def finish_task(
 ) -> None:
     """Persist the final state, result payload, and summary for a task."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE rag_tasks
-                SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
-                WHERE id = %s
-                """,
-                (status, json_param(redact_secrets(result)), summary, error, task_id),
-            )
-            if cur.rowcount != 1:
-                raise LookupError(f"task not found: {task_id}")
-        conn.commit()
+    def operation(cur: Any) -> None:
+        cur.execute(
+            """
+            UPDATE rag_tasks
+            SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
+            WHERE id = %s
+            """,
+            (status, json_param(redact_secrets(result)), summary, error, task_id),
+        )
+        if cur.rowcount != 1:
+            raise LookupError(f"task not found: {task_id}")
+
+    run_task_transaction(database, operation)
 
 
 def mark_task_failed(database: DatabaseOptions, task_id: int | None, exc: Exception) -> str | None:

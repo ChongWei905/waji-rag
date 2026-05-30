@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from waji_rag.web import batch_eval_summary, build_failed_items_from_task, build_question_tabs_from_tasks, retry_ingest_payload
+from waji_rag.web import (
+    batch_eval_summary,
+    build_failed_items_from_task,
+    build_question_tabs_from_tasks,
+    is_retryable_task_db_error,
+    retry_ingest_payload,
+)
 
 
 class WebRetryTests(unittest.TestCase):
@@ -105,6 +111,12 @@ class WebRetryTests(unittest.TestCase):
         )
 
         self.assertEqual(summary, "completed · 3/3 · 正确 2 · 失败 1 · 错误 0")
+
+    def test_deadlock_errors_are_retryable(self) -> None:
+        class FakeDeadlock(Exception):
+            sqlstate = "40P01"
+
+        self.assertTrue(is_retryable_task_db_error(FakeDeadlock("deadlock detected")))
 
 
 if __name__ == "__main__":
