@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 import zipfile
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, StringIO
@@ -967,7 +968,13 @@ def build_redesigned_index_html() -> str:
     .page-shell.history-collapsed {
       grid-template-columns: minmax(0, 1fr);
     }
+    .page-shell.batch-home-mode {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .page-shell.history-collapsed .question-sidebar {
+      display: none;
+    }
+    .page-shell.batch-home-mode .question-sidebar {
       display: none;
     }
     .page-shell:not(.history-collapsed) #openQuestionSidebarBtn {
@@ -1052,6 +1059,21 @@ def build_redesigned_index_html() -> str:
     .question-tab.active {
       border-color: #5eead4;
       background: var(--accent-soft);
+    }
+    .question-tab.pass {
+      border-color: #86efac;
+      background: #f0fdf4;
+    }
+    .question-tab.fail, .question-tab.error {
+      border-color: #fecaca;
+      background: #fff1f2;
+    }
+    .question-tab.skipped {
+      border-style: dashed;
+      background: var(--soft);
+    }
+    .question-tab.pass.active, .question-tab.fail.active, .question-tab.error.active, .question-tab.skipped.active {
+      box-shadow: inset 0 0 0 1px #0f766e;
     }
     .question-tab-title {
       overflow: hidden;
@@ -1191,12 +1213,18 @@ def build_redesigned_index_html() -> str:
     .panel.hidden {
       display: none;
     }
+    .hidden {
+      display: none !important;
+    }
     .workspace {
       margin-top: 14px;
       display: grid;
       grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
       gap: 14px;
       align-items: start;
+    }
+    .workspace.hidden {
+      display: none;
     }
     .stage-rail, .panel {
       background: var(--surface);
@@ -1244,6 +1272,10 @@ def build_redesigned_index_html() -> str:
       background: #eff6ff;
     }
     .task-card.completed_with_errors {
+      border-color: #fed7aa;
+      background: #fffbeb;
+    }
+    .task-card.stopped {
       border-color: #fed7aa;
       background: #fffbeb;
     }
@@ -1536,6 +1568,49 @@ def build_redesigned_index_html() -> str:
       display: grid;
       gap: 14px;
     }
+    .batch-home-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr);
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .batch-detail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .batch-eval-run-list {
+      display: grid;
+      gap: 8px;
+      max-height: min(560px, calc(100vh - 320px));
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .batch-eval-run-card {
+      width: 100%;
+      text-align: left;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 10px;
+      display: grid;
+      gap: 5px;
+    }
+    .batch-eval-run-card.active {
+      border-color: #5eead4;
+      background: var(--accent-soft);
+    }
+    .batch-eval-run-card.completed_with_errors, .batch-eval-run-card.stopped {
+      border-color: #fed7aa;
+      background: #fffbeb;
+    }
+    .batch-eval-run-card.failed {
+      border-color: #fecdd3;
+      background: #fff1f2;
+    }
     .batch-eval-controls {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1618,7 +1693,7 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .eval-row-grid { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1644,7 +1719,7 @@ def build_redesigned_index_html() -> str:
   <div id="pageShell" class="page-shell">
     <aside id="questionSidebar" class="question-sidebar">
       <div class="question-sidebar-head">
-        <h2>历史回答</h2>
+        <h2 id="questionSidebarTitle">历史回答</h2>
         <button id="closeQuestionSidebarBtn" class="ghost">收起</button>
       </div>
       <div id="questionTabs" class="question-tabs"></div>
@@ -1655,6 +1730,7 @@ def build_redesigned_index_html() -> str:
     <div class="view-tabs">
       <button id="buildViewBtn" class="view-tab active">索引构建</button>
       <button id="qaViewBtn" class="view-tab">检索与回答</button>
+      <button id="batchViewBtn" class="view-tab">批量评测</button>
     </div>
 
     <div id="status" class="status">页面已载入。可以单独运行“构建 / 检索 / 回答”，也可以运行“全流程”。</div>
@@ -1735,7 +1811,96 @@ def build_redesigned_index_html() -> str:
       </div>
     </section>
 
-    <div class="workspace">
+    <section id="batchView" class="view">
+      <div id="batchHomePanel" class="batch-home-layout">
+        <div class="panel">
+          <div class="panel-title-row">
+            <h2>发起批量评测</h2>
+            <div class="actions">
+              <button id="runBatchEvalBtn">开始评测</button>
+            </div>
+          </div>
+          <div class="batch-eval-body">
+            <div>
+              <label for="batchEvalCsv">CSV / XLSX 文件</label>
+              <input id="batchEvalCsv" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+              <div id="batchEvalFileMeta" class="row-meta">尚未载入 CSV / XLSX。第一行会作为列名。</div>
+            </div>
+            <div class="batch-eval-controls">
+              <div>
+                <label for="batchEvalTopK">手册 / 故障码 Top K</label>
+                <input id="batchEvalTopK" type="number" min="1" value="1">
+              </div>
+              <div>
+                <label for="batchEvalWorkOrderCandidateTopK">工单候选上限</label>
+                <input id="batchEvalWorkOrderCandidateTopK" type="number" min="1" value="50">
+              </div>
+              <div>
+                <label for="batchEvalWorkOrderMinRelativeScore">工单相对阈值</label>
+                <input id="batchEvalWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
+              </div>
+              <div>
+                <label for="batchEvalWorkOrderMaxHits">工单最大返回</label>
+                <input id="batchEvalWorkOrderMaxHits" type="number" min="0" value="10">
+              </div>
+              <div>
+                <label for="batchEvalConcurrency">并发数</label>
+                <select id="batchEvalConcurrency">
+                  <option value="1">1</option>
+                  <option value="4" selected>4</option>
+                  <option value="8">8</option>
+                  <option value="16">16</option>
+                </select>
+              </div>
+              <div>
+                <label for="batchEvalQuestionColumn">问题列</label>
+                <select id="batchEvalQuestionColumn"></select>
+              </div>
+              <div>
+                <label for="batchEvalPartNameColumn">新件备件名称列</label>
+                <select id="batchEvalPartNameColumn"></select>
+              </div>
+              <div>
+                <label for="batchEvalPartCodeColumn">新件物料编码列</label>
+                <select id="batchEvalPartCodeColumn"></select>
+              </div>
+              <div>
+                <label for="batchEvalPartQuantityColumn">新件数量列</label>
+                <select id="batchEvalPartQuantityColumn"></select>
+              </div>
+            </div>
+            <div id="batchEvalHomeStatus" class="row-meta">载入 CSV / XLSX 并配置列、检索参数和并发数后点击开始评测。</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title-row">
+            <h2>历史批量评测</h2>
+            <div class="actions">
+              <button id="refreshBatchEvalRunsBtn" class="secondary">刷新</button>
+            </div>
+          </div>
+          <div id="batchEvalRunList" class="batch-eval-run-list"><div class="empty">暂无批量评测记录</div></div>
+        </div>
+      </div>
+      <div id="batchDetailPanel" class="panel hidden">
+        <div class="batch-detail-head">
+          <div>
+            <h2 id="batchEvalDetailTitle">批量评测详情</h2>
+            <div id="batchEvalStatus" class="row-meta">选择左侧评测问题即可重现对应检索结果。</div>
+          </div>
+          <div class="actions">
+            <button id="backToBatchHomeBtn" class="secondary">返回批量评测</button>
+            <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
+            <button id="exportBatchEvalBtn" class="secondary" disabled>导出结果</button>
+          </div>
+        </div>
+        <div class="progress-track"><div id="batchEvalProgressBar" class="progress-bar"></div></div>
+        <div id="batchEvalSummary" class="stat-grid"></div>
+        <div id="batchEvalResults" class="batch-eval-results"><div class="empty">暂无评测结果</div></div>
+      </div>
+    </section>
+
+    <div id="workspace" class="workspace">
       <aside class="stage-rail">
         <h2 id="stageListTitle">构建阶段</h2>
         <div id="stageList" class="stage-list"></div>
@@ -1783,78 +1948,6 @@ def build_redesigned_index_html() -> str:
       </div>
       <div class="history-body">
         <div id="taskList" class="task-list"><div class="empty">暂无历史任务</div></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="batchEvalModal" class="modal-backdrop">
-    <div class="modal batch-eval-modal">
-      <div class="modal-head">
-        <h2>批量问题评测</h2>
-        <div class="actions">
-          <button id="closeBatchEvalBtn" class="ghost">关闭</button>
-        </div>
-      </div>
-      <div class="batch-eval-body">
-        <div>
-          <label for="batchEvalCsv">CSV / XLSX 文件</label>
-          <input id="batchEvalCsv" type="file" accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
-          <div id="batchEvalFileMeta" class="row-meta">尚未载入 CSV / XLSX。第一行会作为列名。</div>
-        </div>
-        <div class="batch-eval-controls">
-          <div>
-            <label for="batchEvalTopK">手册 / 故障码 Top K</label>
-            <input id="batchEvalTopK" type="number" min="1" value="1">
-          </div>
-          <div>
-            <label for="batchEvalWorkOrderCandidateTopK">工单候选上限</label>
-            <input id="batchEvalWorkOrderCandidateTopK" type="number" min="1" value="50">
-          </div>
-          <div>
-            <label for="batchEvalWorkOrderMinRelativeScore">工单相对阈值</label>
-            <input id="batchEvalWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
-          </div>
-          <div>
-            <label for="batchEvalWorkOrderMaxHits">工单最大返回</label>
-            <input id="batchEvalWorkOrderMaxHits" type="number" min="0" value="10">
-          </div>
-          <div>
-            <label for="batchEvalConcurrency">并发数</label>
-            <select id="batchEvalConcurrency">
-              <option value="1">1</option>
-              <option value="4" selected>4</option>
-              <option value="8">8</option>
-              <option value="16">16</option>
-            </select>
-          </div>
-          <div>
-            <label for="batchEvalQuestionColumn">问题列</label>
-            <select id="batchEvalQuestionColumn"></select>
-          </div>
-          <div>
-            <label for="batchEvalPartNameColumn">新件备件名称列</label>
-            <select id="batchEvalPartNameColumn"></select>
-          </div>
-          <div>
-            <label for="batchEvalPartCodeColumn">新件物料编码列</label>
-            <select id="batchEvalPartCodeColumn"></select>
-          </div>
-          <div>
-            <label for="batchEvalPartQuantityColumn">新件数量列</label>
-            <select id="batchEvalPartQuantityColumn"></select>
-          </div>
-        </div>
-        <div class="batch-eval-toolbar">
-          <div id="batchEvalStatus" class="row-meta">载入 CSV / XLSX 并配置列、检索参数和并发数后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
-          <div class="actions">
-            <button id="runBatchEvalBtn">开始评测</button>
-            <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
-            <button id="exportBatchEvalBtn" class="secondary" disabled>导出结果</button>
-          </div>
-        </div>
-        <div class="progress-track"><div id="batchEvalProgressBar" class="progress-bar"></div></div>
-        <div id="batchEvalSummary" class="stat-grid"></div>
-        <div id="batchEvalResults" class="batch-eval-results"><div class="empty">暂无评测结果</div></div>
       </div>
     </div>
   </div>
@@ -2086,22 +2179,33 @@ def build_redesigned_index_html() -> str:
       questionSidebarOpen: true,
       activeView: "build",
       buildPollTimer: null,
+      batchEvalRuns: [],
+      activeBatchEvalTaskId: null,
+      activeBatchEvalTask: null,
+      activeBatchEvalRowNumber: null,
       batchEval: {
         headers: [],
         rows: [],
         results: [],
         running: false,
         stopRequested: false,
-        fileName: ""
+        fileName: "",
+        rowCount: 0,
+        taskId: null,
+        settings: null,
+        partColumns: null,
+        questionIndex: null,
+        persistPromise: Promise.resolve(),
+        persistError: null
       }
     };
 
     function stageOrderForView(view = appState.activeView) {
-      return view === "qa" ? qaStageOrder : buildStageOrder;
+      return view === "qa" || view === "batch" ? qaStageOrder : buildStageOrder;
     }
 
     function initialStageForView(view = appState.activeView) {
-      return view === "qa" ? "retrieval" : "config";
+      return view === "qa" || view === "batch" ? "retrieval" : "config";
     }
 
     function stageIdSetForView(view = appState.activeView) {
@@ -2250,6 +2354,10 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderQuestionTabs() {
+      if (appState.activeView === "batch") {
+        renderBatchEvalQuestionTabs();
+        return;
+      }
       const container = $("questionTabs");
       if (!container) return;
       if (!appState.questionTabs.length) {
@@ -2287,6 +2395,14 @@ def build_redesigned_index_html() -> str:
       const headerButton = $("openQuestionSidebarHeaderBtn");
       if (headerButton) headerButton.style.display = appState.questionSidebarOpen ? "none" : "";
       if (options.save !== false) saveConfigToLocalStorage();
+    }
+
+    function updateSidebarChrome() {
+      const isBatch = appState.activeView === "batch";
+      $("questionSidebarTitle").textContent = isBatch ? "本次评测问题" : "历史回答";
+      $("openQuestionSidebarHeaderBtn").textContent = isBatch ? "评测问题" : "回答历史";
+      $("openQuestionSidebarBtn").textContent = isBatch ? "评测问题" : "历史回答";
+      $("newQuestionBtn").classList.toggle("hidden", isBatch);
     }
 
     function questionTabMeta(tab) {
@@ -2497,14 +2613,17 @@ def build_redesigned_index_html() -> str:
         appState.batchEval.rows = parsed.rows;
         appState.batchEval.results = [];
         appState.batchEval.fileName = file.name;
+        appState.batchEval.rowCount = parsed.rows.length;
+        appState.batchEval.taskId = null;
         renderBatchEvalColumns();
         renderBatchEvalResults();
         $("batchEvalFileMeta").textContent = `${file.name} · ${parsed.rows.length} 行数据 · ${parsed.headers.length} 列`;
-        $("batchEvalStatus").textContent = `${parsed.format || "表格"} 已载入，请确认列映射后开始评测。`;
+        $("batchEvalHomeStatus").textContent = `${parsed.format || "表格"} 已载入，请确认列映射后开始评测。`;
+        $("batchEvalStatus").textContent = "准备发起新的批量评测。";
         $("exportBatchEvalBtn").disabled = true;
       } catch (error) {
         setStatus(String(error), "error");
-        $("batchEvalStatus").textContent = String(error);
+        $("batchEvalHomeStatus").textContent = String(error);
       }
     }
 
@@ -2565,6 +2684,165 @@ def build_redesigned_index_html() -> str:
       return -1;
     }
 
+    async function refreshBatchEvalRuns(options = {}) {
+      try {
+        const data = await postJson("/api/batch-evals", taskPayload({limit: 120}));
+        appState.batchEvalRuns = data.batch_evals || [];
+        renderBatchEvalRuns();
+        return data;
+      } catch (error) {
+        if (!options.quiet) setStatus(String(error), "error");
+        appState.batchEvalRuns = [];
+        renderBatchEvalRuns();
+        return {batch_evals: []};
+      }
+    }
+
+    function renderBatchEvalRuns() {
+      const container = $("batchEvalRunList");
+      if (!container) return;
+      if (!appState.batchEvalRuns.length) {
+        container.innerHTML = '<div class="empty">暂无批量评测记录</div>';
+        return;
+      }
+      container.innerHTML = appState.batchEvalRuns.map(task => {
+        const counts = task.counts || {};
+        const active = Number(task.id) === Number(appState.activeBatchEvalTaskId);
+        return `
+          <button class="batch-eval-run-card ${escapeHtml(task.status || "")} ${active ? "active" : ""}" data-task-id="${escapeHtml(task.id)}">
+            <div class="task-line">
+              <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(batchEvalTaskTitle(task))}</span>
+              <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
+            </div>
+            <div class="task-subtitle">正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
+            <div class="row-meta">${escapeHtml(compactTime(task.updated_at || task.created_at))}</div>
+          </button>
+        `;
+      }).join("");
+      for (const button of container.querySelectorAll("[data-task-id]")) {
+        button.addEventListener("click", () => loadBatchEvalRun(Number(button.dataset.taskId)));
+      }
+    }
+
+    function batchEvalTaskTitle(task) {
+      const result = task && task.result ? task.result : {};
+      return result.file_name || task.file_name || task.query || "批量评测";
+    }
+
+    async function loadBatchEvalRun(taskId) {
+      try {
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        applyBatchEvalTask(data.task);
+        switchView("batch");
+        const rows = orderedBatchEvalResults();
+        if (rows.length) await activateBatchEvalRow(rows[0].rowNumber);
+        setStatus(`已载入批量评测 #${taskId}`, "success");
+      } catch (error) {
+        setStatus(String(error), "error");
+      }
+    }
+
+    function applyBatchEvalTask(task) {
+      if (!task) return;
+      const result = task.result || {};
+      appState.activeBatchEvalTaskId = task.id;
+      appState.activeBatchEvalTask = task;
+      appState.activeBatchEvalRowNumber = null;
+      appState.batchEval.taskId = task.id;
+      appState.batchEval.fileName = result.file_name || task.query || "";
+      appState.batchEval.headers = result.headers || [];
+      appState.batchEval.rows = [];
+      appState.batchEval.rowCount = Number(result.row_count || result.total || (result.rows || []).length || 0);
+      appState.batchEval.results = Array.isArray(result.rows) ? result.rows : [];
+      appState.batchEval.settings = result.settings || null;
+      appState.batchEval.partColumns = result.part_columns || null;
+      appState.batchEval.questionIndex = result.question_column ?? null;
+      renderBatchEvalPage();
+    }
+
+    function renderBatchEvalPage() {
+      const detailOpen = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId);
+      $("batchHomePanel").classList.toggle("hidden", detailOpen);
+      $("batchDetailPanel").classList.toggle("hidden", !detailOpen);
+      renderShellMode();
+      updateSidebarChrome();
+      renderBatchEvalRuns();
+      renderBatchEvalResults();
+      renderBatchEvalQuestionTabs();
+      const task = appState.activeBatchEvalTask || {};
+      $("batchEvalDetailTitle").textContent = detailOpen ? `批量评测 #${task.id || appState.activeBatchEvalTaskId} · ${batchEvalTaskTitle(task)}` : "批量评测详情";
+      $("exportBatchEvalBtn").disabled = !appState.batchEval.results.length;
+    }
+
+    function openBatchEvalHome() {
+      appState.activeBatchEvalTaskId = null;
+      appState.activeBatchEvalTask = null;
+      appState.activeBatchEvalRowNumber = null;
+      switchView("batch");
+      refreshBatchEvalRuns({quiet: true});
+    }
+
+    function renderBatchEvalQuestionTabs() {
+      const container = $("questionTabs");
+      if (!container) return;
+      if (appState.activeView !== "batch") return;
+      const rows = orderedBatchEvalResults();
+      if (!appState.activeBatchEvalTaskId) {
+        container.innerHTML = '<div class="empty">选择或发起一个批量评测后，这里会显示该批次的问题。</div>';
+        return;
+      }
+      if (!rows.length) {
+        container.innerHTML = '<div class="empty">本次评测暂无问题结果</div>';
+        return;
+      }
+      container.innerHTML = rows.map(item => `
+        <button class="question-tab ${escapeHtml(item.status || "")} ${Number(item.rowNumber) === Number(appState.activeBatchEvalRowNumber) ? "active" : ""}" data-row-number="${escapeHtml(item.rowNumber)}">
+          <div class="question-tab-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(batchEvalStatusText(item.status))} · ${escapeHtml(questionTitle(item.question || ""))}</div>
+          <div class="question-tab-meta">${escapeHtml(item.taskId ? `检索 #${item.taskId}` : batchEvalReason(item) || "无检索任务")}</div>
+        </button>
+      `).join("");
+      for (const button of container.querySelectorAll("[data-row-number]")) {
+        button.addEventListener("click", () => activateBatchEvalRow(Number(button.dataset.rowNumber)));
+      }
+    }
+
+    async function activateBatchEvalRow(rowNumber) {
+      const item = orderedBatchEvalResults().find(row => Number(row.rowNumber) === Number(rowNumber));
+      if (!item) return;
+      appState.activeBatchEvalRowNumber = item.rowNumber;
+      $("query").value = item.question || "";
+      renderBatchEvalQuestionTabs();
+      resetStages("batch", "retrieval");
+      if (!item.taskId) {
+        renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
+        renderParts([]);
+        renderSelectedEvidence([]);
+        $("answer").textContent = item.message || "该行没有可重现的检索任务。";
+        setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item) || "无检索任务");
+        return;
+      }
+      try {
+        const data = await postJson("/api/task", taskPayload({task_id: item.taskId}));
+        const task = data.task;
+        if (!task) throw new Error(`task not found: ${item.taskId}`);
+        appState.currentTaskId = task.id;
+        renderSearchResult(task.result || {});
+        setStatus(`已重现批量评测第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)}`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
+      } catch (error) {
+        setStage("retrieval", "error", {error: String(error), row: item}, "重现检索失败");
+        setStatus(String(error), "error");
+      }
+    }
+
+    function batchEvalStatusText(status) {
+      return {
+        pass: "正确",
+        fail: "失败",
+        error: "错误",
+        skipped: "跳过"
+      }[status] || status || "未知";
+    }
+
     async function runBatchEval() {
       if (appState.batchEval.running) return;
       const rows = appState.batchEval.rows || [];
@@ -2582,18 +2860,43 @@ def build_redesigned_index_html() -> str:
         setStatus(settings.error, "error");
         return;
       }
+      const partColumns = {
+        name: optionalColumnIndex("batchEvalPartNameColumn"),
+        code: optionalColumnIndex("batchEvalPartCodeColumn"),
+        quantity: optionalColumnIndex("batchEvalPartQuantityColumn")
+      };
+      appState.batchEval.settings = settings;
+      appState.batchEval.partColumns = partColumns;
+      appState.batchEval.questionIndex = questionIndex;
+      appState.batchEval.rowCount = rows.length;
+      appState.batchEval.persistPromise = Promise.resolve();
+      appState.batchEval.persistError = null;
       appState.batchEval.running = true;
       appState.batchEval.stopRequested = false;
       appState.batchEval.results = [];
       $("runBatchEvalBtn").disabled = true;
       $("stopBatchEvalBtn").disabled = false;
       $("exportBatchEvalBtn").disabled = true;
-      renderBatchEvalResults();
-      const partColumns = {
-        name: optionalColumnIndex("batchEvalPartNameColumn"),
-        code: optionalColumnIndex("batchEvalPartCodeColumn"),
-        quantity: optionalColumnIndex("batchEvalPartQuantityColumn")
-      };
+      try {
+        const created = await createBatchEvalTask(settings, partColumns, questionIndex);
+        appState.batchEval.taskId = created.task_id;
+        appState.activeBatchEvalTaskId = created.task_id;
+        appState.activeBatchEvalTask = {
+          id: created.task_id,
+          task_type: "batch_eval",
+          status: "running",
+          query: created.query,
+          result: batchEvalResultPayload("running")
+        };
+        switchView("batch");
+        renderBatchEvalPage();
+      } catch (error) {
+        appState.batchEval.running = false;
+        $("runBatchEvalBtn").disabled = false;
+        $("stopBatchEvalBtn").disabled = true;
+        setStatus(`批量评测创建失败：${error}`, "error");
+        return;
+      }
       let nextIndex = 0;
       let completed = 0;
       const workerCount = Math.min(settings.concurrency, Math.max(rows.length, 1));
@@ -2612,18 +2915,86 @@ def build_redesigned_index_html() -> str:
           completed += 1;
           $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · 并发 ${workerCount}`;
           renderBatchEvalResults(completed, rows.length);
+          renderBatchEvalQuestionTabs();
+          scheduleBatchEvalPersist("running");
         }
       };
       try {
         await Promise.all(Array.from({length: workerCount}, () => runWorker()));
-        $("batchEvalStatus").textContent = appState.batchEval.stopRequested ? "评测已停止" : "评测完成";
+        const finalStatus = appState.batchEval.stopRequested ? "stopped" : appState.batchEval.results.some(item => item.status === "error") ? "completed_with_errors" : "completed";
+        $("batchEvalStatus").textContent = finalStatus === "stopped" ? "评测已停止" : "评测完成";
+        await scheduleBatchEvalPersist(finalStatus);
+        await refreshBatchEvalRuns({quiet: true});
       } finally {
         appState.batchEval.running = false;
         appState.batchEval.stopRequested = false;
         $("runBatchEvalBtn").disabled = false;
         $("stopBatchEvalBtn").disabled = true;
         $("exportBatchEvalBtn").disabled = !appState.batchEval.results.length;
+        renderBatchEvalPage();
       }
+    }
+
+    async function createBatchEvalTask(settings, partColumns, questionIndex) {
+      const payload = {
+        ...commonPayload({retrieval: settings.retrieval}),
+        batch_eval: {
+          file_name: appState.batchEval.fileName || "未命名表格",
+          row_count: appState.batchEval.rows.length,
+          headers: appState.batchEval.headers,
+          settings,
+          question_column: questionIndex,
+          part_columns: partColumns
+        }
+      };
+      return postJson("/api/create-batch-eval", payload);
+    }
+
+    function scheduleBatchEvalPersist(status) {
+      if (!appState.batchEval.taskId) return Promise.resolve();
+      const taskId = appState.batchEval.taskId;
+      appState.batchEval.persistPromise = (appState.batchEval.persistPromise || Promise.resolve())
+        .catch(() => {})
+        .then(() => postJson("/api/update-batch-eval", {
+          ...taskPayload({task_id: taskId}),
+          status,
+          result: batchEvalResultPayload(status)
+        }))
+        .catch(error => {
+          appState.batchEval.persistError = String(error);
+          setStatus(`批量评测进度保存失败：${error}`, "error");
+        });
+      return appState.batchEval.persistPromise;
+    }
+
+    function batchEvalResultPayload(status) {
+      const rows = orderedBatchEvalResults();
+      const counts = batchEvalCounts(rows);
+      return {
+        task_id: appState.batchEval.taskId,
+        status,
+        file_name: appState.batchEval.fileName || "未命名表格",
+        headers: appState.batchEval.headers || [],
+        row_count: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
+        settings: appState.batchEval.settings || null,
+        question_column: appState.batchEval.questionIndex,
+        part_columns: appState.batchEval.partColumns || null,
+        counts,
+        rows,
+        updated_at: new Date().toISOString()
+      };
+    }
+
+    function batchEvalCounts(results = appState.batchEval.results) {
+      const rows = results || [];
+      return {
+        total: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
+        done: rows.length,
+        pass: rows.filter(item => item.status === "pass").length,
+        fail: rows.filter(item => item.status === "fail").length,
+        error: rows.filter(item => item.status === "error").length,
+        skipped: rows.filter(item => item.status === "skipped").length
+      };
     }
 
     function batchEvalSettings() {
@@ -2801,15 +3172,9 @@ def build_redesigned_index_html() -> str:
 
     function renderBatchEvalResults(done = appState.batchEval.results.length, total = appState.batchEval.rows.length) {
       const results = appState.batchEval.results || [];
-      const counts = {
-        total: appState.batchEval.rows.length,
-        done: results.length,
-        pass: results.filter(item => item.status === "pass").length,
-        fail: results.filter(item => item.status === "fail").length,
-        error: results.filter(item => item.status === "error").length,
-        skipped: results.filter(item => item.status === "skipped").length
-      };
-      const percent = total ? Math.round((done / total) * 100) : 0;
+      const counts = batchEvalCounts(results);
+      const safeTotal = total || counts.total || results.length;
+      const percent = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
       $("batchEvalProgressBar").style.width = `${Math.min(Math.max(percent, 0), 100)}%`;
       $("batchEvalSummary").innerHTML = [
         ["总行数", counts.total],
@@ -3070,7 +3435,7 @@ def build_redesigned_index_html() -> str:
       setInputValue("llmNoProxyHosts", llm.no_proxy_hosts);
       setInputValue("llmApiKey", llm.api_key);
 
-      if (ui.active_view) switchView(ui.active_view === "qa" ? "qa" : "build");
+      if (ui.active_view) switchView(["qa", "batch"].includes(ui.active_view) ? ui.active_view : "build");
       if (!options.silent) setStatus("配置已导入", "success");
     }
 
@@ -3227,6 +3592,12 @@ def build_redesigned_index_html() -> str:
       $("status").textContent = text;
     }
 
+    function renderShellMode() {
+      const isBatchHome = appState.activeView === "batch" && !appState.activeBatchEvalTaskId;
+      $("pageShell").classList.toggle("batch-home-mode", isBatchHome);
+      $("workspace").classList.toggle("hidden", isBatchHome);
+    }
+
     function switchView(view) {
       if (appState.activeView === "build") {
         appState.buildStages = appState.stages;
@@ -3246,6 +3617,12 @@ def build_redesigned_index_html() -> str:
         appState.lastResult = tab.lastResult || null;
         $("query").value = tab.query;
         renderQuestionTabs();
+      } else if (view === "batch") {
+        const batchState = hydrateStageState("batch", appState.stages, appState.selectedStage || "retrieval");
+        appState.stages = batchState.stages;
+        appState.selectedStage = batchState.selectedStage;
+        renderBatchEvalPage();
+        refreshBatchEvalRuns({quiet: true});
       } else {
         const buildState = hydrateStageState("build", appState.buildStages, appState.buildSelectedStage || "config");
         appState.buildStages = buildState.stages;
@@ -3255,8 +3632,12 @@ def build_redesigned_index_html() -> str:
       }
       $("buildView").classList.toggle("active", view === "build");
       $("qaView").classList.toggle("active", view === "qa");
+      $("batchView").classList.toggle("active", view === "batch");
       $("buildViewBtn").classList.toggle("active", view === "build");
       $("qaViewBtn").classList.toggle("active", view === "qa");
+      $("batchViewBtn").classList.toggle("active", view === "batch");
+      renderShellMode();
+      updateSidebarChrome();
       renderTaskList();
       renderStages();
       renderStageInspector();
@@ -3283,7 +3664,7 @@ def build_redesigned_index_html() -> str:
       if (view === "build") {
         appState.buildStages = state.stages;
         appState.buildSelectedStage = state.selectedStage;
-      } else {
+      } else if (view === "qa") {
         syncActiveQuestionState();
       }
       renderStages();
@@ -3291,7 +3672,7 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderStages() {
-      $("stageListTitle").textContent = appState.activeView === "qa" ? "回答阶段" : "构建阶段";
+      $("stageListTitle").textContent = appState.activeView === "build" ? "构建阶段" : "回答阶段";
       $("stageList").innerHTML = "";
       for (const [id, title, note] of stageOrderForView(appState.activeView)) {
         const state = appState.stages[id] || {status: "pending", summary: ""};
@@ -3321,8 +3702,11 @@ def build_redesigned_index_html() -> str:
       const state = appState.stages[stageId] || {status: "pending", data: null, summary: ""};
       $("buildView").classList.toggle("active", appState.activeView === "build");
       $("qaView").classList.toggle("active", appState.activeView === "qa");
+      $("batchView").classList.toggle("active", appState.activeView === "batch");
       $("buildViewBtn").classList.toggle("active", appState.activeView === "build");
       $("qaViewBtn").classList.toggle("active", appState.activeView === "qa");
+      $("batchViewBtn").classList.toggle("active", appState.activeView === "batch");
+      renderShellMode();
       renderVisiblePanels(stageId);
       $("stageSummary").innerHTML = `
         <div class="evidence-row">
@@ -3335,9 +3719,10 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderVisiblePanels(stageId) {
-      const showAnswer = appState.activeView === "qa" && stageId === "answer";
-      const showRetrieval = appState.activeView === "qa" && stageId === "retrieval";
-      const showEvidence = appState.activeView === "qa" && ["evidence_filter", "rerank"].includes(stageId);
+      const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
+      const showAnswer = diagnosticView && stageId === "answer";
+      const showRetrieval = diagnosticView && stageId === "retrieval";
+      const showEvidence = diagnosticView && ["evidence_filter", "rerank"].includes(stageId);
       const showInspector = !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
@@ -3512,7 +3897,7 @@ def build_redesigned_index_html() -> str:
         button.innerHTML = `
           <div class="task-line">
             <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(taskTypeLabel(task.task_type))}</span>
-            <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
+            <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
           </div>
           <div class="task-subtitle">${escapeHtml(task.query || task.summary || "知识库构建任务")}</div>
           <div class="row-meta">${escapeHtml(compactTime(task.created_at))}</div>
@@ -3542,6 +3927,9 @@ def build_redesigned_index_html() -> str:
         resetStages("build", "config");
         setStage("config", "done", task.request || {}, "已载入任务请求");
         renderBuildTaskResult(task);
+      } else if (task.task_type === "batch_eval") {
+        applyBatchEvalTask(task);
+        switchView("batch");
       } else if (task.task_type === "search") {
         const tab = ensureQuestionTabForQuery(task.query || defaultQuery, {loadPersisted: false});
         tab.searchTaskId = task.id;
@@ -3612,7 +4000,8 @@ def build_redesigned_index_html() -> str:
         build_retry: "失败重试",
         embedding: "补Embedding",
         search: "检索",
-        answer: "回答"
+        answer: "回答",
+        batch_eval: "批量评测"
       }[taskType] || taskType || "任务";
     }
 
@@ -3626,7 +4015,7 @@ def build_redesigned_index_html() -> str:
     function renderPipelineResult(response) {
       const result = response.result || response;
       appState.lastResult = result;
-      resetStages("qa", "retrieval");
+      resetStages(appState.activeView === "batch" ? "batch" : "qa", "retrieval");
       const retrieval = result.retrieval || result;
       const answer = result.answer || {};
       setStageFromTrace(result);
@@ -3654,7 +4043,7 @@ def build_redesigned_index_html() -> str:
     function renderSearchResult(response) {
       const result = response.result || response;
       appState.lastResult = result;
-      resetStages("qa", "retrieval");
+      resetStages(appState.activeView === "batch" ? "batch" : "qa", "retrieval");
       setStage("retrieval", "done", result, formatRetrievalSummary(result));
       if (result.evidence_filter) {
         setStage("evidence_filter", result.evidence_filter.status || "done", result.evidence_filter, evidenceFilterSummary(result.evidence_filter));
@@ -4154,6 +4543,12 @@ def build_redesigned_index_html() -> str:
         appState.currentTaskId = null;
         appState.lastResult = null;
         appState.tasks = [];
+        appState.batchEvalRuns = [];
+        appState.activeBatchEvalTaskId = null;
+        appState.activeBatchEvalTask = null;
+        appState.activeBatchEvalRowNumber = null;
+        appState.batchEval.results = [];
+        appState.batchEval.taskId = null;
         appState.questionTabs = appState.questionTabs.map(tab => {
           const state = createStageState("qa", "retrieval");
           return {
@@ -4270,8 +4665,7 @@ def build_redesigned_index_html() -> str:
 
     $("openConfigBtn").addEventListener("click", () => $("configModal").classList.add("open"));
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
-    $("openBatchEvalBtn").addEventListener("click", () => $("batchEvalModal").classList.add("open"));
-    $("closeBatchEvalBtn").addEventListener("click", () => $("batchEvalModal").classList.remove("open"));
+    $("openBatchEvalBtn").addEventListener("click", openBatchEvalHome);
     $("batchEvalCsv").addEventListener("change", loadBatchEvalCsv);
     $("runBatchEvalBtn").addEventListener("click", () => runBatchEval());
     $("stopBatchEvalBtn").addEventListener("click", () => {
@@ -4279,6 +4673,10 @@ def build_redesigned_index_html() -> str:
       $("batchEvalStatus").textContent = "正在停止，当前请求结束后停止。";
     });
     $("exportBatchEvalBtn").addEventListener("click", exportBatchEvalResults);
+    $("refreshBatchEvalRunsBtn").addEventListener("click", () => refreshBatchEvalRuns());
+    $("backToBatchHomeBtn").addEventListener("click", () => {
+      openBatchEvalHome();
+    });
     $("openHistoryBtn").addEventListener("click", async () => {
       $("taskHistoryModal").classList.add("open");
       await refreshTasks({quiet: true});
@@ -4302,6 +4700,7 @@ def build_redesigned_index_html() -> str:
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
     $("buildViewBtn").addEventListener("click", () => switchView("build"));
     $("qaViewBtn").addEventListener("click", () => switchView("qa"));
+    $("batchViewBtn").addEventListener("click", openBatchEvalHome);
     $("openQuestionSidebarHeaderBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
@@ -4355,6 +4754,7 @@ def build_redesigned_index_html() -> str:
       if (!restoredSharedConfig && !restoredLocalConfig) switchView("build");
       refreshTasks({quiet: true});
       refreshQuestionTabsFromServer({quiet: true});
+      refreshBatchEvalRuns({quiet: true});
     }
 
     initializeWorkbench().catch(error => setStatus(`页面初始化失败：${error}`, "error"));
@@ -4452,6 +4852,15 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/parse-table":
             self._handle_parse_table()
+            return
+        if parsed.path == "/api/create-batch-eval":
+            self._handle_create_batch_eval()
+            return
+        if parsed.path == "/api/update-batch-eval":
+            self._handle_update_batch_eval()
+            return
+        if parsed.path == "/api/batch-evals":
+            self._handle_batch_evals()
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -4774,6 +5183,68 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json(parse_table_file(filename, content))
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_create_batch_eval(self) -> None:
+        payload = self._read_json()
+        database = database_from_payload(payload)
+        try:
+            batch_eval = object_payload(payload.get("batch_eval")) or {}
+            file_name = str(batch_eval.get("file_name") or "未命名表格")
+            row_count = int(batch_eval.get("row_count") or 0)
+            query = f"{file_name} · {row_count} 行"
+            task_id = create_task(database, "batch_eval", query, task_request_payload(payload))
+            result = {
+                "task_id": task_id,
+                "status": "running",
+                "file_name": file_name,
+                "headers": batch_eval.get("headers") if isinstance(batch_eval.get("headers"), list) else [],
+                "row_count": row_count,
+                "settings": batch_eval.get("settings") if isinstance(batch_eval.get("settings"), dict) else {},
+                "question_column": batch_eval.get("question_column"),
+                "part_columns": batch_eval.get("part_columns") if isinstance(batch_eval.get("part_columns"), dict) else {},
+                "counts": {"total": row_count, "done": 0, "pass": 0, "fail": 0, "error": 0, "skipped": 0},
+                "rows": [],
+                "updated_at": iso_datetime(datetime.now(timezone.utc)),
+            }
+            update_task_result(database, task_id, "running", result, "批量评测运行中：0 / %s" % row_count)
+            self._send_json({"task_id": task_id, "query": query, "result": result}, status=HTTPStatus.ACCEPTED)
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
+
+    def _handle_update_batch_eval(self) -> None:
+        payload = self._read_json()
+        try:
+            task_id = int(payload.get("task_id") or 0)
+            if task_id <= 0:
+                self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            result = object_payload(payload.get("result")) or {}
+            status = str(payload.get("status") or result.get("status") or "running")
+            if status not in {"running", "completed", "completed_with_errors", "stopped", "failed"}:
+                status = "running"
+            result["status"] = status
+            result["task_id"] = task_id
+            summary = batch_eval_summary(result)
+            error_message = str(result.get("error") or "") if status == "failed" else None
+            update_task_result(
+                database_from_payload(payload),
+                task_id,
+                status,
+                result,
+                summary,
+                error=error_message or None,
+            )
+            self._send_json({"task_id": task_id, "status": status, "summary": summary})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
+
+    def _handle_batch_evals(self) -> None:
+        payload = self._read_json()
+        try:
+            batch_evals = list_batch_eval_tasks(database_from_payload(payload), limit=int(payload.get("limit") or 80))
+            self._send_json({"batch_evals": batch_evals})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -5342,6 +5813,33 @@ def update_task_progress(database: DatabaseOptions, task_id: int, progress: dict
         conn.commit()
 
 
+def update_task_result(
+    database: DatabaseOptions,
+    task_id: int,
+    status: str,
+    result: dict[str, Any],
+    summary: str,
+    *,
+    error: str | None = None,
+) -> None:
+    """Persist a task result snapshot while preserving the existing task row."""
+
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                UPDATE rag_tasks
+                SET updated_at = now(), status = %s, result = %s, summary = %s, error = %s
+                WHERE id = %s
+                """,
+                (status, json_param(redact_secrets(result)), summary, error, task_id),
+            )
+            if cur.rowcount != 1:
+                raise LookupError(f"task not found: {task_id}")
+        conn.commit()
+
+
 def request_task_pause(database: DatabaseOptions, task_id: int) -> dict[str, Any]:
     """Request a running task to pause at its next checkpoint."""
 
@@ -5446,6 +5944,46 @@ def list_tasks(database: DatabaseOptions, *, limit: int = 40) -> list[dict[str, 
         }
         for row in rows
     ]
+
+
+def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list[dict[str, Any]]:
+    """Return recent batch-evaluation tasks with compact result counts."""
+
+    safe_limit = max(1, min(limit, 200))
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            create_task_schema(cur)
+            cur.execute(
+                """
+                SELECT id, task_type, status, query, summary, result, error, created_at, updated_at
+                FROM rag_tasks
+                WHERE task_type = 'batch_eval'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT %s
+                """,
+                (safe_limit,),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        result = row[5] if isinstance(row[5], dict) else {}
+        counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        items.append(
+            {
+                "id": int(row[0]),
+                "task_type": row[1],
+                "status": row[2],
+                "query": row[3],
+                "summary": row[4],
+                "counts": counts,
+                "file_name": result.get("file_name"),
+                "error": row[6],
+                "created_at": iso_datetime(row[7]),
+                "updated_at": iso_datetime(row[8]),
+            }
+        )
+    return items
 
 
 def list_question_tabs(database: DatabaseOptions, *, limit: int = 120) -> list[dict[str, Any]]:
@@ -5556,6 +6094,19 @@ def question_status_from_task(task: dict[str, Any], *, answered_label: str) -> s
     if status == "completed":
         return answered_label
     return status or "persisted"
+
+
+def batch_eval_summary(result: dict[str, Any]) -> str:
+    """Return a compact summary for one stored batch-evaluation result."""
+
+    counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+    done = int(counts.get("done") or len(result.get("rows") or []))
+    total = int(counts.get("total") or result.get("row_count") or done)
+    passed = int(counts.get("pass") or 0)
+    failed = int(counts.get("fail") or 0)
+    errors = int(counts.get("error") or 0)
+    status = str(result.get("status") or "running")
+    return f"{status} · {done}/{total} · 正确 {passed} · 失败 {failed} · 错误 {errors}"
 
 
 def max_iso_datetime(left: object, right: object) -> object:

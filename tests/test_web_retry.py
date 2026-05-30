@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from waji_rag.web import build_failed_items_from_task, build_question_tabs_from_tasks, retry_ingest_payload
+from waji_rag.web import batch_eval_summary, build_failed_items_from_task, build_question_tabs_from_tasks, retry_ingest_payload
 
 
 class WebRetryTests(unittest.TestCase):
@@ -94,6 +94,17 @@ class WebRetryTests(unittest.TestCase):
         self.assertEqual(retry_payload["manual_dir"], "D:/manuals-current")
         self.assertEqual(retry_payload["work_order_paths"], [])
         self.assertEqual(retry_payload["manual_paths"], ["D:/manuals-current/a.html"])
+
+    def test_batch_eval_summary_uses_counts(self) -> None:
+        summary = batch_eval_summary(
+            {
+                "status": "completed",
+                "row_count": 3,
+                "counts": {"done": 3, "total": 3, "pass": 2, "fail": 1, "error": 0},
+            }
+        )
+
+        self.assertEqual(summary, "completed · 3/3 · 正确 2 · 失败 1 · 错误 0")
 
 
 if __name__ == "__main__":
