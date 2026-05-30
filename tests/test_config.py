@@ -41,6 +41,13 @@ class ConfigTests(unittest.TestCase):
     def test_llm_and_rerank_no_proxy_hosts_parse_from_comma_string(self) -> None:
         config = config_from_payload(
             {
+                "query_parser": {
+                    "enabled": True,
+                    "provider": "vllm",
+                    "model": "query-parser-local",
+                    "base_url": "http://10.30.4.6:8000/v1",
+                    "no_proxy_hosts": "10.30.4.6,172.16.0.0/12",
+                },
                 "llm": {
                     "enabled": True,
                     "provider": "vllm",
@@ -56,9 +63,33 @@ class ConfigTests(unittest.TestCase):
             }
         )
 
+        self.assertTrue(config.query_parser.is_available())
+        self.assertEqual(config.query_parser.no_proxy_hosts, ["10.30.4.6", "172.16.0.0/12"])
         self.assertTrue(config.llm.is_available())
         self.assertEqual(config.llm.no_proxy_hosts, ["10.30.4.5", "192.168.0.0/16"])
         self.assertEqual(config.rerank.no_proxy_hosts, ["10.30.4.5", "*.company.local"])
+
+    def test_query_parser_config_is_independent_from_answer_llm(self) -> None:
+        config = config_from_payload(
+            {
+                "query_parser": {
+                    "enabled": True,
+                    "provider": "vllm",
+                    "model": "parser-model",
+                    "base_url": "http://127.0.0.1:8010/v1",
+                },
+                "llm": {
+                    "enabled": False,
+                    "provider": "dashscope",
+                    "model": "answer-model",
+                },
+            }
+        )
+
+        self.assertTrue(config.query_parser.is_available())
+        self.assertFalse(config.llm.is_available())
+        self.assertEqual(config.query_parser.model, "parser-model")
+        self.assertEqual(config.llm.model, "answer-model")
 
     def test_model_request_logging_defaults_to_enabled_and_can_be_disabled(self) -> None:
         default_config = config_from_payload({})
@@ -71,6 +102,7 @@ class ConfigTests(unittest.TestCase):
         )
 
         self.assertTrue(default_config.embedding.log_requests_enabled)
+        self.assertTrue(default_config.query_parser.log_requests_enabled)
         self.assertTrue(default_config.llm.log_requests_enabled)
         self.assertFalse(disabled_config.embedding.log_requests_enabled)
         self.assertFalse(disabled_config.llm.log_requests_enabled)

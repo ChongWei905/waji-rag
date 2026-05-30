@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from waji_rag.config import AppConfig, EmbeddingConfig, LLMConfig
+from waji_rag.config import AppConfig, EmbeddingConfig, QueryParserConfig
 from waji_rag.llm import QueryParseResult
 from waji_rag.pg_index import (
     APPLICATION_DATA_TABLES,
@@ -172,7 +172,7 @@ class PgIndexHelpersTests(unittest.TestCase):
 
     def test_resolve_query_constraints_uses_llm_when_available(self) -> None:
         config = AppConfig(
-            llm=LLMConfig(
+            query_parser=QueryParserConfig(
                 enabled=True,
                 provider="vllm",
                 model="demo-chat",

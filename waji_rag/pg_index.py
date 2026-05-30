@@ -2648,33 +2648,34 @@ def resolve_query_constraints(
     """Resolve query constraints through LLM parsing with deterministic fallback."""
 
     fallback = build_query_constraints(query, terms)
-    if not config.llm.enabled:
+    parser_config = config.query_parser
+    if not parser_config.enabled:
         retrieval_events.append(
             {
                 "channel": "query_parser",
                 "stage": "constraints",
                 "status": "fallback",
                 "mode": "rules",
-                "reason": "llm_disabled",
+                "reason": "query_parser_disabled",
                 "constraints": fallback.to_dict(),
             }
         )
         return fallback
-    if not config.llm.is_available():
+    if not parser_config.is_available():
         retrieval_events.append(
             {
                 "channel": "query_parser",
                 "stage": "constraints",
                 "status": "fallback",
                 "mode": "rules",
-                "reason": "missing_llm_config",
+                "reason": "missing_query_parser_config",
                 "constraints": fallback.to_dict(),
             }
         )
         return fallback
     try:
         started_at = time.time()
-        result = parse_diagnostic_query_constraints(query=query, config=config.llm)
+        result = parse_diagnostic_query_constraints(query=query, config=parser_config)
         constraints = query_constraints_from_llm_payload(query, terms, result.payload, fallback=fallback)
         retrieval_events.append(
             {
@@ -2682,7 +2683,7 @@ def resolve_query_constraints(
                 "stage": "constraints",
                 "status": "ok",
                 "mode": "llm",
-                "model": config.llm.model,
+                "model": parser_config.model,
                 "elapsed_ms": elapsed_ms(started_at),
                 "constraints": constraints.to_dict(),
                 "usage": result.debug.get("usage"),

@@ -398,9 +398,38 @@ INDEX_HTML = f"""<!doctype html>
         <input id="rerankModel" value="qwen3-rerank">
         <label for="rerankBaseUrl">Rerank Base URL</label>
         <input id="rerankBaseUrl" value="{DEFAULT_DASHSCOPE_RERANK_BASE_URL}">
+        <label class="checkline" for="enableQueryParser">
+          <input id="enableQueryParser" type="checkbox">
+          <span>启用 LLM 问题解析</span>
+        </label>
+        <div>
+          <label for="queryParserProvider">问题解析 Provider</label>
+          <select id="queryParserProvider">
+            <option value="dashscope">DashScope</option>
+            <option value="openai">OpenAI compatible</option>
+            <option value="vllm">vLLM / local</option>
+          </select>
+        </div>
+        <div>
+          <label for="queryParserModel">问题解析模型</label>
+          <input id="queryParserModel" value="qwen3.5-plus">
+        </div>
+        <div class="full">
+          <label for="queryParserBaseUrl">问题解析 Base URL</label>
+          <input id="queryParserBaseUrl" value="__DASHSCOPE_BASE_URL__">
+        </div>
+        <div class="full">
+          <label for="queryParserNoProxyHosts">问题解析 No Proxy Hosts</label>
+          <input id="queryParserNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
+        </div>
+        <div class="full">
+          <label for="queryParserApiKey">问题解析 API Key</label>
+          <input id="queryParserApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
+        </div>
+
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
-          <span>启用 LLM 解析 / 答案生成</span>
+          <span>启用 LLM 答案生成</span>
         </label>
         <label for="llmModel">LLM 模型</label>
         <input id="llmModel" value="qwen3.5-plus">
@@ -915,9 +944,25 @@ def build_redesigned_index_html() -> str:
       font-size: 12px;
       white-space: nowrap;
     }
-    main {
-      width: min(1500px, calc(100vw - 28px));
+    .page-shell {
+      width: min(1800px, calc(100vw - 28px));
       margin: 14px auto 28px;
+      display: grid;
+      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .page-shell.history-collapsed {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .page-shell.history-collapsed .question-sidebar {
+      display: none;
+    }
+    .page-shell:not(.history-collapsed) #openQuestionSidebarBtn {
+      display: none;
+    }
+    main {
+      min-width: 0;
     }
     .query-band {
       background: var(--surface);
@@ -928,21 +973,6 @@ def build_redesigned_index_html() -> str:
       grid-template-columns: 1fr 280px;
       gap: 14px;
       align-items: end;
-    }
-    .question-shell {
-      display: grid;
-      grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
-      gap: 12px;
-      align-items: start;
-    }
-    .question-shell.history-collapsed {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .question-shell.history-collapsed .question-sidebar {
-      display: none;
-    }
-    .question-shell:not(.history-collapsed) #openQuestionSidebarBtn {
-      display: none;
     }
     .question-sidebar, .question-main-toolbar {
       background: var(--surface);
@@ -1502,7 +1532,7 @@ def build_redesigned_index_html() -> str:
       padding: 0;
     }
     @media (max-width: 1180px) {
-      .query-band, .workspace, .answer-layout, .inspector, .build-dashboard, .question-shell { grid-template-columns: 1fr; }
+      .query-band, .workspace, .answer-layout, .inspector, .build-dashboard, .page-shell { grid-template-columns: 1fr; }
       .stage-rail { position: static; }
       .question-sidebar { position: static; }
       .retrieval-board { grid-template-columns: 1fr 1fr; }
@@ -1525,13 +1555,24 @@ def build_redesigned_index_html() -> str:
       <button id="runSearchBtn" class="secondary">检索</button>
       <button id="runAnswerBtn" class="secondary">回答</button>
       <button id="runFullFlowBtn">全流程</button>
+      <button id="openQuestionSidebarHeaderBtn" class="secondary">回答历史</button>
       <button id="openHistoryBtn" class="secondary">历史任务</button>
       <button id="openConfigBtn" class="secondary">配置</button>
       <button id="doctorBtn" class="ghost">环境检查</button>
     </div>
   </header>
 
-  <main>
+  <div id="pageShell" class="page-shell">
+    <aside id="questionSidebar" class="question-sidebar">
+      <div class="question-sidebar-head">
+        <h2>历史回答</h2>
+        <button id="closeQuestionSidebarBtn" class="ghost">收起</button>
+      </div>
+      <div id="questionTabs" class="question-tabs"></div>
+      <button id="newQuestionBtn" class="secondary">新问题</button>
+    </aside>
+
+    <main>
     <div class="view-tabs">
       <button id="buildViewBtn" class="view-tab active">索引构建</button>
       <button id="qaViewBtn" class="view-tab">检索与回答</button>
@@ -1575,41 +1616,31 @@ def build_redesigned_index_html() -> str:
     </section>
 
     <section id="qaView" class="view">
-      <div id="questionShell" class="question-shell">
-        <aside id="questionSidebar" class="question-sidebar">
-          <div class="question-sidebar-head">
-            <h2>历史回答</h2>
-            <button id="closeQuestionSidebarBtn" class="ghost">收起</button>
-          </div>
-          <div id="questionTabs" class="question-tabs"></div>
-          <button id="newQuestionBtn" class="secondary">新问题</button>
-        </aside>
-        <div class="question-main">
-          <div class="question-main-toolbar">
-            <button id="openQuestionSidebarBtn" class="secondary">历史回答</button>
-            <div id="currentQuestionTitle" class="current-question-title">当前问题</div>
-          </div>
-          <section class="query-band">
-            <div>
-              <label for="query">当前问题</label>
-              <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
-            </div>
-            <div class="query-tools">
-              <div>
-                <label for="topK">每路 Top K</label>
-                <input id="topK" type="number" min="1" value="1">
-              </div>
-              <div>
-                <label for="evidenceTopK">答案证据数</label>
-                <input id="evidenceTopK" type="number" min="1" value="4">
-              </div>
-              <div class="query-actions">
-                <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
-                <button id="runQuestionAnswerBtn">回答当前问题</button>
-              </div>
-            </div>
-          </section>
+      <div class="question-main">
+        <div class="question-main-toolbar">
+          <button id="openQuestionSidebarBtn" class="secondary">历史回答</button>
+          <div id="currentQuestionTitle" class="current-question-title">当前问题</div>
         </div>
+        <section class="query-band">
+          <div>
+            <label for="query">当前问题</label>
+            <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
+          </div>
+          <div class="query-tools">
+            <div>
+              <label for="topK">每路 Top K</label>
+              <input id="topK" type="number" min="1" value="1">
+            </div>
+            <div>
+              <label for="evidenceTopK">答案证据数</label>
+              <input id="evidenceTopK" type="number" min="1" value="4">
+            </div>
+            <div class="query-actions">
+              <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
+              <button id="runQuestionAnswerBtn">回答当前问题</button>
+            </div>
+          </div>
+        </section>
       </div>
     </section>
 
@@ -1647,7 +1678,8 @@ def build_redesigned_index_html() -> str:
         </section>
       </div>
     </div>
-  </main>
+    </main>
+  </div>
 
   <div id="taskHistoryModal" class="modal-backdrop">
     <div class="modal history-modal">
@@ -1766,9 +1798,38 @@ def build_redesigned_index_html() -> str:
           <input id="rerankApiKey" type="password" placeholder="可留空，留空时读取 DOCARBOR_RERANK_API_KEY 或兜底 key">
         </div>
 
+        <label class="checkline" for="enableQueryParser">
+          <input id="enableQueryParser" type="checkbox">
+          <span>启用 LLM 问题解析</span>
+        </label>
+        <div>
+          <label for="queryParserProvider">问题解析 Provider</label>
+          <select id="queryParserProvider">
+            <option value="dashscope">DashScope</option>
+            <option value="openai">OpenAI compatible</option>
+            <option value="vllm">vLLM / local</option>
+          </select>
+        </div>
+        <div>
+          <label for="queryParserModel">问题解析模型</label>
+          <input id="queryParserModel" value="qwen3.5-plus">
+        </div>
+        <div class="full">
+          <label for="queryParserBaseUrl">问题解析 Base URL</label>
+          <input id="queryParserBaseUrl" value="__DASHSCOPE_BASE_URL__">
+        </div>
+        <div class="full">
+          <label for="queryParserNoProxyHosts">问题解析 No Proxy Hosts</label>
+          <input id="queryParserNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
+        </div>
+        <div class="full">
+          <label for="queryParserApiKey">问题解析 API Key</label>
+          <input id="queryParserApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
+        </div>
+
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
-          <span>启用 LLM 解析 / 答案生成</span>
+          <span>启用 LLM 答案生成</span>
         </label>
         <div>
           <label for="llmProvider">LLM Provider</label>
@@ -2050,8 +2111,10 @@ def build_redesigned_index_html() -> str:
 
     function setQuestionSidebar(open, options = {}) {
       appState.questionSidebarOpen = Boolean(open);
-      const shell = $("questionShell");
+      const shell = $("pageShell");
       if (shell) shell.classList.toggle("history-collapsed", !appState.questionSidebarOpen);
+      const headerButton = $("openQuestionSidebarHeaderBtn");
+      if (headerButton) headerButton.style.display = appState.questionSidebarOpen ? "none" : "";
       if (options.save !== false) saveConfigToLocalStorage();
     }
 
@@ -2156,6 +2219,18 @@ def build_redesigned_index_html() -> str:
           no_proxy_hosts: parseCsv($("rerankNoProxyHosts").value),
           top_n: $("evidenceTopK").value ? Number($("evidenceTopK").value) : 8
         },
+        query_parser: {
+          enabled: $("enableQueryParser").checked,
+          provider: $("queryParserProvider").value,
+          model: $("queryParserModel").value.trim(),
+          base_url: $("queryParserBaseUrl").value.trim(),
+          api_key: $("queryParserApiKey").value.trim(),
+          no_proxy_hosts: parseCsv($("queryParserNoProxyHosts").value),
+          max_tokens: 700,
+          temperature: 0,
+          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
+          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
+        },
         llm: {
           enabled: $("enableLlm").checked,
           provider: $("llmProvider").value,
@@ -2236,6 +2311,14 @@ def build_redesigned_index_html() -> str:
           no_proxy_hosts: $("rerankNoProxyHosts").value,
           api_key: $("rerankApiKey").value
         },
+        query_parser: {
+          enabled: $("enableQueryParser").checked,
+          provider: $("queryParserProvider").value,
+          model: $("queryParserModel").value,
+          base_url: $("queryParserBaseUrl").value,
+          no_proxy_hosts: $("queryParserNoProxyHosts").value,
+          api_key: $("queryParserApiKey").value
+        },
         llm: {
           enabled: $("enableLlm").checked,
           provider: $("llmProvider").value,
@@ -2287,6 +2370,14 @@ def build_redesigned_index_html() -> str:
       setInputValue("rerankBaseUrl", rerank.base_url);
       setInputValue("rerankNoProxyHosts", rerank.no_proxy_hosts);
       setInputValue("rerankApiKey", rerank.api_key);
+
+      const queryParser = config.query_parser || {};
+      setCheckboxValue("enableQueryParser", queryParser.enabled);
+      setInputValue("queryParserProvider", queryParser.provider);
+      setInputValue("queryParserModel", queryParser.model);
+      setInputValue("queryParserBaseUrl", queryParser.base_url);
+      setInputValue("queryParserNoProxyHosts", queryParser.no_proxy_hosts);
+      setInputValue("queryParserApiKey", queryParser.api_key);
 
       const llm = config.llm || {};
       if (modelApiLog.enabled === undefined && embedding.log_requests_enabled === undefined) {
@@ -2370,7 +2461,9 @@ def build_redesigned_index_html() -> str:
         "apiRequestLoggingEnabled", "apiRequestLogPath",
         "ingestReset", "ingestResume", "query", "topK", "evidenceTopK", "enableEmbedding", "embeddingProvider", "embeddingModel",
         "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
-        "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey", "enableLlm",
+        "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey",
+        "enableQueryParser", "queryParserProvider", "queryParserModel", "queryParserBaseUrl", "queryParserNoProxyHosts", "queryParserApiKey",
+        "enableLlm",
         "llmProvider", "llmModel", "llmBaseUrl", "llmNoProxyHosts", "llmApiKey"
       ];
       for (const id of ids) {
@@ -3433,6 +3526,12 @@ def build_redesigned_index_html() -> str:
       $("rerankNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("llmNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("rerankApiKey").value = "";
+      $("enableQueryParser").checked = false;
+      $("queryParserProvider").value = "dashscope";
+      $("queryParserModel").value = "qwen3.5-plus";
+      $("queryParserBaseUrl").value = dashscopeBaseUrl;
+      $("queryParserNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
+      $("queryParserApiKey").value = "";
       $("llmApiKey").value = "";
       $("apiRequestLoggingEnabled").checked = true;
       $("apiRequestLogPath").value = defaultModelApiRequestLogPath;
@@ -3473,6 +3572,7 @@ def build_redesigned_index_html() -> str:
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
     $("buildViewBtn").addEventListener("click", () => switchView("build"));
     $("qaViewBtn").addEventListener("click", () => switchView("qa"));
+    $("openQuestionSidebarHeaderBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);

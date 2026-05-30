@@ -178,7 +178,7 @@ def generate_diagnostic_answer(
             ),
         },
     ]
-    result = client.complete(messages, service="query_parser", error_prefix="query_parser")
+    result = client.complete(messages, service="llm", error_prefix="llm")
     if not result.text:
         result.text = build_fallback_answer(query=query, evidence_items=evidence_items, part_candidates=part_candidates)
     return result
@@ -214,7 +214,7 @@ def parse_diagnostic_query_constraints(*, query: str, config: LLMConfig) -> Quer
             "content": json.dumps({"query": query}, ensure_ascii=False),
         },
     ]
-    result = client.complete(messages)
+    result = client.complete(messages, service="query_parser", error_prefix="query_parser")
     payload = parse_query_constraints_json(result.text)
     debug = dict(result.debug)
     debug["raw_text_preview"] = result.text[:1000]

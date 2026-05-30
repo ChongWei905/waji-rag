@@ -113,6 +113,15 @@ class LLMConfig:
 
 
 @dataclass(slots=True)
+class QueryParserConfig(LLMConfig):
+    """Configuration for optional LLM query parsing before retrieval."""
+
+    enabled: bool = False
+    api_key_env: str = "DOCARBOR_QUERY_PARSER_API_KEY"
+    max_tokens: int = 700
+
+
+@dataclass(slots=True)
 class AnswerConfig:
     """Configuration for evidence packaging before final answer generation."""
 
@@ -128,6 +137,7 @@ class AppConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     rerank: RerankConfig = field(default_factory=RerankConfig)
+    query_parser: QueryParserConfig = field(default_factory=QueryParserConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     answer: AnswerConfig = field(default_factory=AnswerConfig)
 
@@ -176,12 +186,14 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
     retrieval_payload = object_payload(payload.get("retrieval"))
     embedding_payload = object_payload(payload.get("embedding"))
     rerank_payload = object_payload(payload.get("rerank"))
+    query_parser_payload = object_payload(payload.get("query_parser"))
     llm_payload = object_payload(payload.get("llm"))
     answer_payload = object_payload(payload.get("answer"))
     default_log_enabled = as_bool(payload.get("log_requests_enabled", True))
     default_log_path = str(payload.get("request_log_path") or DEFAULT_MODEL_API_REQUEST_LOG_PATH)
 
     embedding_api_key_env = str(embedding_payload.get("api_key_env") or "DOCARBOR_EMBEDDING_API_KEY")
+    query_parser_api_key_env = str(query_parser_payload.get("api_key_env") or "DOCARBOR_QUERY_PARSER_API_KEY")
     llm_api_key_env = str(llm_payload.get("api_key_env") or "DOCARBOR_LLM_API_KEY")
     rerank_api_key_env = str(rerank_payload.get("api_key_env") or "DOCARBOR_RERANK_API_KEY")
     rerank_key = first_non_empty(
@@ -239,6 +251,46 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
                 rerank_payload.get("no_proxy_hosts", rerank_payload.get("no_proxy")),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+        ),
+        query_parser=QueryParserConfig(
+            enabled=as_bool(query_parser_payload.get("enabled", False)),
+            provider=str(query_parser_payload.get("provider", llm_payload.get("provider", "dashscope"))),
+            model=normalize_model_name(
+                str(query_parser_payload.get("model", llm_payload.get("model", "qwen3.5-plus")))
+            ),
+            base_url=str(
+                query_parser_payload.get("base_url")
+                or llm_payload.get("base_url")
+                or DEFAULT_DASHSCOPE_BASE_URL
+            ),
+            api_key=first_non_empty(
+                str(query_parser_payload.get("api_key") or ""),
+                env_values.get(query_parser_api_key_env),
+                env_values.get("DOCARBOR_LLM_API_KEY"),
+                env_values.get("DASHSCOPE_API_KEY"),
+                os.getenv(query_parser_api_key_env),
+                os.getenv("DOCARBOR_LLM_API_KEY"),
+                os.getenv("DASHSCOPE_API_KEY"),
+            ),
+            api_key_env=query_parser_api_key_env,
+            temperature=float(query_parser_payload.get("temperature", 0.0)),
+            max_tokens=max(1, int(query_parser_payload.get("max_tokens", 700))),
+            timeout_seconds=float(
+                query_parser_payload.get("timeout_seconds", llm_payload.get("timeout_seconds", 180.0))
+            ),
+            disable_thinking=as_bool(query_parser_payload.get("disable_thinking", True)),
+            no_proxy_hosts=parse_string_list(
+                query_parser_payload.get(
+                    "no_proxy_hosts",
+                    query_parser_payload.get(
+                        "no_proxy",
+                        llm_payload.get("no_proxy_hosts", llm_payload.get("no_proxy")),
+                    ),
+                ),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
+            log_requests_enabled=as_bool(query_parser_payload.get("log_requests_enabled", default_log_enabled)),
+            request_log_path=str(query_parser_payload.get("request_log_path") or default_log_path),
         ),
         llm=LLMConfig(
             enabled=as_bool(llm_payload.get("enabled", False)),
@@ -298,6 +350,33 @@ def build_env_config_payload(env_values: dict[str, str]) -> dict[str, Any]:
                 env_values.get("DOCARBOR_RERANK_NO_PROXY_HOSTS", env_values.get("DOCARBOR_MODEL_NO_PROXY_HOSTS")),
                 default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
             ),
+        },
+        "query_parser": {
+            "provider": env_values.get(
+                "DOCARBOR_QUERY_PARSER_API_PROVIDER",
+                env_values.get("DOCARBOR_LLM_API_PROVIDER", "dashscope"),
+            ),
+            "model": env_values.get(
+                "DOCARBOR_QUERY_PARSER_MODEL",
+                env_values.get(
+                    "DOCARBOR_RETRIEVAL_ANSWER_MODEL",
+                    env_values.get("DOCARBOR_BUILD_NATIVE_MODEL", "dashscope/qwen3.5-plus"),
+                ),
+            ),
+            "base_url": env_values.get(
+                "DOCARBOR_QUERY_PARSER_BASE_URL",
+                env_values.get("DOCARBOR_LLM_BASE_URL", DEFAULT_DASHSCOPE_BASE_URL),
+            ),
+            "api_key_env": "DOCARBOR_QUERY_PARSER_API_KEY",
+            "no_proxy_hosts": parse_string_list(
+                env_values.get(
+                    "DOCARBOR_QUERY_PARSER_NO_PROXY_HOSTS",
+                    env_values.get("DOCARBOR_LLM_NO_PROXY_HOSTS", env_values.get("DOCARBOR_MODEL_NO_PROXY_HOSTS")),
+                ),
+                default=list(DEFAULT_EMBEDDING_NO_PROXY_HOSTS),
+            ),
+            "log_requests_enabled": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_ENABLED", "true"),
+            "request_log_path": env_values.get("DOCARBOR_MODEL_REQUEST_LOG_PATH", DEFAULT_MODEL_API_REQUEST_LOG_PATH),
         },
         "llm": {
             "provider": env_values.get("DOCARBOR_LLM_API_PROVIDER", "dashscope"),
