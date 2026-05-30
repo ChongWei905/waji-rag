@@ -47,6 +47,9 @@ class PgIndexHelpersTests(unittest.TestCase):
         self.assertEqual([document.doc_type for document in documents], ["work_order", "part_evidence"])
         self.assertEqual(documents[1].fields["part_name"], "风扇皮带")
         self.assertEqual(documents[1].fields["part_code"], "PB-001")
+        self.assertEqual(documents[1].metadata["part_name"], "风扇皮带")
+        self.assertEqual(documents[1].metadata["part_code"], "PB-001")
+        self.assertEqual(documents[1].metadata["quantity"], "1")
 
     def test_store_embedding_batch_calls_provider_once(self) -> None:
         config = AppConfig(embedding=EmbeddingConfig(enabled=True, provider="vllm", model="demo-embed"))

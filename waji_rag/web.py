@@ -1287,6 +1287,27 @@ def build_redesigned_index_html() -> str:
       background: #fff;
       padding: 10px;
     }
+    .part-evidence-hit {
+      background: #fff;
+    }
+    .part-evidence-fields {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(80px, .45fr) minmax(120px, .65fr);
+      gap: 8px;
+    }
+    .part-field {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--soft);
+      padding: 8px;
+    }
+    .part-field-value {
+      margin-top: 3px;
+      font-size: 13px;
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
     .row-title {
       font-weight: 760;
       margin-bottom: 5px;
@@ -1446,7 +1467,7 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body, .part-evidence-fields { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2766,13 +2787,7 @@ def build_redesigned_index_html() -> str:
         $("parts").innerHTML = '<div class="empty">暂无备件候选</div>';
         return;
       }
-      $("parts").innerHTML = parts.map(part => `
-        <div class="part-row">
-          <div class="row-title">${escapeHtml(part.part_number_name || part.part_name || "未知备件")}</div>
-          <div class="row-meta">编码：${escapeHtml(part.part_code || "未提供")} · 数量：${escapeHtml(part.quantity || "未提供")}</div>
-          <div class="row-meta">来源工单：${escapeHtml(part.work_order_id || "未知")} · ${escapeHtml(part.source_path || "")}</div>
-        </div>
-      `).join("");
+      $("parts").innerHTML = parts.map(part => renderPartEvidenceCard(part)).join("");
     }
 
     function renderRetrievalBoard(retrieval) {
@@ -2796,6 +2811,7 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderHit(hit, index) {
+      if (isPartEvidence(hit)) return renderPartEvidenceCard(hit, index);
       const terms = (hit.matched_terms || []).slice(0, 10)
         .map(term => `<span class="pill">${escapeHtml(term.term || "")} · ${escapeHtml(term.field || "")}</span>`)
         .join("");
@@ -2811,19 +2827,110 @@ def build_redesigned_index_html() -> str:
       `;
     }
 
+    function isPartEvidence(item) {
+      return item && (item.doc_type === "part_evidence" || item.channel === "part_evidence");
+    }
+
+    function renderPartEvidenceCard(item, index = null) {
+      const part = partEvidenceDisplay(item || {});
+      const prefix = index === null ? "" : `#${index + 1} `;
+      return `
+        <div class="part-row part-evidence-hit">
+          ${prefix ? `<div class="row-title">${escapeHtml(prefix)}备件证据</div>` : ""}
+          <div class="part-evidence-fields">
+            <div class="part-field">
+              <div class="row-meta">新件备件名称</div>
+              <div class="part-field-value">${escapeHtml(part.name)}</div>
+            </div>
+            <div class="part-field">
+              <div class="row-meta">新件数量</div>
+              <div class="part-field-value">${escapeHtml(part.quantity)}</div>
+            </div>
+            <div class="part-field">
+              <div class="row-meta">新件物料编码</div>
+              <div class="part-field-value">${escapeHtml(part.code)}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function partEvidenceDisplay(item) {
+      const metadata = item.metadata || {};
+      const text = String(item.body_preview || item.raw_text || "");
+      return {
+        name: firstText(
+          item.part_name,
+          metadata.part_name,
+          item.part_number_name,
+          metadata.part_number_name,
+          extractPartLabel(text, ["新件备件名称", "新件配件名称", "新件物料名称", "新件名称"]),
+          item.title
+        ) || "未提供",
+        quantity: firstText(
+          item.quantity,
+          metadata.quantity,
+          extractPartLabel(text, ["新件数量"])
+        ) || "未提供",
+        code: firstText(
+          item.part_code,
+          metadata.part_code,
+          extractPartLabel(text, ["新件物料编码", "新件备件编码", "新件配件编码", "新件编码"])
+        ) || "未提供"
+      };
+    }
+
+    function firstText(...values) {
+      for (const value of values) {
+        const text = String(value ?? "").trim();
+        if (text) return text;
+      }
+      return "";
+    }
+
+    function extractPartLabel(text, labels) {
+      const source = String(text || "");
+      const stopLabels = [
+        "旧件备件名称", "新件备件名称", "旧件配件名称", "新件配件名称", "旧件物料名称", "新件物料名称",
+        "旧件名称", "新件名称", "新件数量", "旧件数量", "旧件物料编码", "新件物料编码",
+        "旧件备件编码", "新件备件编码", "旧件配件编码", "新件配件编码", "旧件编码", "新件编码"
+      ];
+      for (const label of labels) {
+        for (const separator of [":", "："]) {
+          const token = `${label}${separator}`;
+          const start = source.indexOf(token);
+          if (start < 0) continue;
+          const valueStart = start + token.length;
+          let end = source.length;
+          for (const stopLabel of stopLabels) {
+            for (const stopSeparator of [":", "："]) {
+              const stop = source.indexOf(`${stopLabel}${stopSeparator}`, valueStart);
+              if (stop >= 0 && stop < end) end = stop;
+            }
+          }
+          const value = source.slice(valueStart, end).trim().replace(/^[,，;；\s]+|[,，;；\s]+$/g, "");
+          if (value) return value;
+        }
+      }
+      return "";
+    }
+
     function renderSelectedEvidence(items) {
       $("evidencePanelTitle").textContent = "答案生成依据";
       if (!items.length) {
         $("selectedEvidence").innerHTML = '<div class="empty">暂无选中证据</div>';
         return;
       }
-      $("selectedEvidence").innerHTML = items.map((item, index) => `
-        <div class="evidence-row">
-          <div class="row-title">#${index + 1} ${escapeHtml(item.channel || "")} · ${escapeHtml(item.title || "")}</div>
-          <div class="row-meta">doc_id=${escapeHtml(item.doc_id || "")} · score=${escapeHtml(item.score ?? "")}</div>
-          <div class="hit-preview">${escapeHtml(item.body_preview || "")}</div>
-        </div>
-      `).join("");
+      $("selectedEvidence").innerHTML = items.map((item, index) => {
+        if (isPartEvidence(item)) return renderPartEvidenceCard(item, index);
+        return `
+          <div class="evidence-row">
+            <div class="row-title">#${index + 1} ${escapeHtml(item.channel || "")} · ${escapeHtml(item.title || "")}</div>
+            <div class="row-meta">doc_id=${escapeHtml(item.doc_id || "")} · score=${escapeHtml(item.score ?? "")}</div>
+            <div class="hit-preview">${escapeHtml(item.body_preview || "")}</div>
+          </div>
+        `;
+      }).join("");
     }
 
     function renderEvidenceFilter(filterPayload) {
@@ -2832,6 +2939,7 @@ def build_redesigned_index_html() -> str:
       const rejected = Array.isArray(filterPayload.rejected) ? filterPayload.rejected : [];
       const constraints = filterPayload.constraints || {};
       const renderGateItem = (item, index, decision) => {
+        if (isPartEvidence(item)) return renderPartEvidenceCard(item, index);
         const gate = item.evidence_gate || {};
         const reason = gate.reason || decision;
         const componentHits = (gate.component_hits || []).join(", ");

@@ -1000,6 +1000,7 @@ class PgRetriever:
                     constraints=constraints,
                     debug_events=retrieval_events,
                 )
+                enrich_part_hit_fields(cur, part_hits)
                 channels = {
                     "work_orders": work_order_hits,
                     "manual_typical_faults": typical_hits,
@@ -1936,7 +1937,15 @@ def build_documents_for_work_order(record: WorkOrderRecord) -> list[IndexDocumen
                 title=first_non_empty(part.part_name, part.part_number_name, part.part_code, f"part {index}") or "",
                 text=join_text(part_fields.values()),
                 fields=part_fields,
-                metadata={"work_order_id": work_order_id, "quantity": part.quantity, "part_index": index},
+                metadata={
+                    "work_order_id": work_order_id,
+                    "part_number_name": clean_string(part.part_number_name),
+                    "part_number": clean_string(part.part_number),
+                    "part_name": clean_string(part.part_name),
+                    "part_code": clean_string(part.part_code),
+                    "quantity": clean_string(part.quantity),
+                    "part_index": index,
+                },
                 source_path=record.source_path,
             )
         )
@@ -2445,6 +2454,34 @@ def fetch_part_candidates(cur: Any, work_order_ids: list[str], *, top_k: int) ->
         "source_path",
     )
     return [dict(zip(keys, row, strict=False)) for row in cur.fetchall()]
+
+
+def enrich_part_hit_fields(cur: Any, hits: list[RetrievalHit]) -> None:
+    """Merge structured part fields into retrieved part-evidence hit metadata."""
+
+    part_hits = [hit for hit in hits if hit.doc_type == "part_evidence"]
+    if not part_hits:
+        return
+    document_ids = [hit.document_id for hit in part_hits]
+    cur.execute(
+        """
+        SELECT document_id, field_name, field_text
+        FROM document_fields
+        WHERE document_id = ANY(%s::bigint[])
+          AND field_name = ANY(%s::text[])
+        """,
+        (document_ids, ["part_number_name", "part_number", "part_name", "part_code", "quantity"]),
+    )
+    fields_by_document: dict[int, dict[str, str]] = {}
+    for document_id, field_name, field_text in cur.fetchall():
+        text = clean_string(field_text)
+        if text:
+            fields_by_document.setdefault(int(document_id), {})[str(field_name)] = text
+    for hit in part_hits:
+        fields = fields_by_document.get(hit.document_id, {})
+        for key, value in fields.items():
+            if value and not hit.metadata.get(key):
+                hit.metadata[key] = value
 
 
 def merge_hybrid_hits(
