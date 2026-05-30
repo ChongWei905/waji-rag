@@ -1803,6 +1803,31 @@ def build_redesigned_index_html() -> str:
         </div>
         <div class="batch-eval-controls">
           <div>
+            <label for="batchEvalTopK">手册 / 故障码 Top K</label>
+            <input id="batchEvalTopK" type="number" min="1" value="1">
+          </div>
+          <div>
+            <label for="batchEvalWorkOrderCandidateTopK">工单候选上限</label>
+            <input id="batchEvalWorkOrderCandidateTopK" type="number" min="1" value="50">
+          </div>
+          <div>
+            <label for="batchEvalWorkOrderMinRelativeScore">工单相对阈值</label>
+            <input id="batchEvalWorkOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
+          </div>
+          <div>
+            <label for="batchEvalWorkOrderMaxHits">工单最大返回</label>
+            <input id="batchEvalWorkOrderMaxHits" type="number" min="0" value="10">
+          </div>
+          <div>
+            <label for="batchEvalConcurrency">并发数</label>
+            <select id="batchEvalConcurrency">
+              <option value="1">1</option>
+              <option value="4" selected>4</option>
+              <option value="8">8</option>
+              <option value="16">16</option>
+            </select>
+          </div>
+          <div>
             <label for="batchEvalQuestionColumn">问题列</label>
             <select id="batchEvalQuestionColumn"></select>
           </div>
@@ -1820,7 +1845,7 @@ def build_redesigned_index_html() -> str:
           </div>
         </div>
         <div class="batch-eval-toolbar">
-          <div id="batchEvalStatus" class="row-meta">载入 CSV / XLSX 并配置列后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
+          <div id="batchEvalStatus" class="row-meta">载入 CSV / XLSX 并配置列、检索参数和并发数后点击开始评测。备件真值单元格支持逗号分割；三列都为空表示期望不召回备件。</div>
           <div class="actions">
             <button id="runBatchEvalBtn">开始评测</button>
             <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
@@ -2342,12 +2367,14 @@ def build_redesigned_index_html() -> str:
       saveConfigToLocalStorage();
     }
 
-    function configOverrides() {
+    function configOverrides(options = {}) {
+      const retrievalOverrides = options.retrieval && typeof options.retrieval === "object" ? options.retrieval : {};
       return {
         retrieval: {
           work_order_candidate_top_k: $("workOrderCandidateTopK").value ? Number($("workOrderCandidateTopK").value) : 50,
           work_order_min_relative_score: $("workOrderMinRelativeScore").value ? Number($("workOrderMinRelativeScore").value) : 0.45,
-          work_order_max_hits: $("workOrderMaxHits").value ? Number($("workOrderMaxHits").value) : 10
+          work_order_max_hits: $("workOrderMaxHits").value ? Number($("workOrderMaxHits").value) : 10,
+          ...retrievalOverrides
         },
         embedding: {
           enabled: $("enableEmbedding").checked,
@@ -2402,11 +2429,11 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    function commonPayload() {
+    function commonPayload(options = {}) {
       return {
         database_url: $("databaseUrl").value.trim() || null,
         env_file: $("envFile").value.trim() || null,
-        config_overrides: configOverrides()
+        config_overrides: configOverrides(options)
       };
     }
 
@@ -2550,6 +2577,11 @@ def build_redesigned_index_html() -> str:
         setStatus("请选择问题列", "error");
         return;
       }
+      const settings = batchEvalSettings();
+      if (!settings.ok) {
+        setStatus(settings.error, "error");
+        return;
+      }
       appState.batchEval.running = true;
       appState.batchEval.stopRequested = false;
       appState.batchEval.results = [];
@@ -2562,52 +2594,28 @@ def build_redesigned_index_html() -> str:
         code: optionalColumnIndex("batchEvalPartCodeColumn"),
         quantity: optionalColumnIndex("batchEvalPartQuantityColumn")
       };
-      try {
-        for (let index = 0; index < rows.length; index += 1) {
-          if (appState.batchEval.stopRequested) break;
-          const row = rows[index];
-          const rowNumber = index + 2;
-          const question = String(row[questionIndex] || "").trim();
-          const expectedParts = buildExpectedParts(row, partColumns);
-          if (!question) {
-            appState.batchEval.results.push({
-              rowNumber,
-              question: "",
-              status: "skipped",
-              expectedParts,
-              retrievedParts: [],
-              message: "问题为空"
-            });
-            renderBatchEvalResults(index + 1, rows.length);
-            continue;
-          }
-          $("batchEvalStatus").textContent = `评测中：${index + 1} / ${rows.length}`;
-          try {
-            const response = await postJson("/api/search-db", queryPayload(question));
-            const retrieval = response.result || response;
-            const retrievedParts = listPartCandidates(retrieval);
-            const match = evaluatePartRecall(expectedParts, retrievedParts);
-            appState.batchEval.results.push({
-              rowNumber,
-              question,
-              status: match.correct ? "pass" : "fail",
-              taskId: response.task_id || null,
-              expectedParts,
-              retrievedParts,
-              match
-            });
-          } catch (error) {
-            appState.batchEval.results.push({
-              rowNumber,
-              question,
-              status: "error",
-              expectedParts,
-              retrievedParts: [],
-              message: String(error)
-            });
-          }
-          renderBatchEvalResults(index + 1, rows.length);
+      let nextIndex = 0;
+      let completed = 0;
+      const workerCount = Math.min(settings.concurrency, Math.max(rows.length, 1));
+      const nextWorkIndex = () => {
+        if (appState.batchEval.stopRequested || nextIndex >= rows.length) return null;
+        const current = nextIndex;
+        nextIndex += 1;
+        return current;
+      };
+      const runWorker = async () => {
+        while (true) {
+          const index = nextWorkIndex();
+          if (index === null) return;
+          const item = await runBatchEvalRow(index, rows[index], questionIndex, partColumns, settings);
+          appState.batchEval.results.push(item);
+          completed += 1;
+          $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · 并发 ${workerCount}`;
+          renderBatchEvalResults(completed, rows.length);
         }
+      };
+      try {
+        await Promise.all(Array.from({length: workerCount}, () => runWorker()));
         $("batchEvalStatus").textContent = appState.batchEval.stopRequested ? "评测已停止" : "评测完成";
       } finally {
         appState.batchEval.running = false;
@@ -2615,6 +2623,79 @@ def build_redesigned_index_html() -> str:
         $("runBatchEvalBtn").disabled = false;
         $("stopBatchEvalBtn").disabled = true;
         $("exportBatchEvalBtn").disabled = !appState.batchEval.results.length;
+      }
+    }
+
+    function batchEvalSettings() {
+      const topK = numberInputValue("batchEvalTopK", 1);
+      const workOrderCandidateTopK = numberInputValue("batchEvalWorkOrderCandidateTopK", 50);
+      const workOrderMinRelativeScore = numberInputValue("batchEvalWorkOrderMinRelativeScore", 0.45);
+      const workOrderMaxHits = numberInputValue("batchEvalWorkOrderMaxHits", 10);
+      const concurrency = numberInputValue("batchEvalConcurrency", 4);
+      if (!Number.isFinite(topK) || topK < 1) return {ok: false, error: "手册 / 故障码 Top K 必须大于等于 1"};
+      if (!Number.isFinite(workOrderCandidateTopK) || workOrderCandidateTopK < 1) return {ok: false, error: "工单候选上限必须大于等于 1"};
+      if (!Number.isFinite(workOrderMinRelativeScore) || workOrderMinRelativeScore < 0 || workOrderMinRelativeScore > 1) {
+        return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
+      }
+      if (!Number.isFinite(workOrderMaxHits) || workOrderMaxHits < 0) return {ok: false, error: "工单最大返回必须大于等于 0"};
+      if (!Number.isFinite(concurrency) || concurrency < 1) return {ok: false, error: "并发数必须大于等于 1"};
+      return {
+        ok: true,
+        topK: Math.floor(topK),
+        concurrency: Math.min(Math.floor(concurrency), 16),
+        retrieval: {
+          work_order_candidate_top_k: Math.floor(workOrderCandidateTopK),
+          work_order_min_relative_score: workOrderMinRelativeScore,
+          work_order_max_hits: Math.floor(workOrderMaxHits)
+        }
+      };
+    }
+
+    function numberInputValue(id, fallback) {
+      const value = $(id).value;
+      return value === "" ? fallback : Number(value);
+    }
+
+    async function runBatchEvalRow(index, row, questionIndex, partColumns, settings) {
+      const rowNumber = index + 2;
+      const question = String(row[questionIndex] || "").trim();
+      const expectedParts = buildExpectedParts(row, partColumns);
+      if (!question) {
+        return {
+          rowNumber,
+          question: "",
+          status: "skipped",
+          expectedParts,
+          retrievedParts: [],
+          message: "问题为空"
+        };
+      }
+      try {
+        const response = await postJson(
+          "/api/search-db",
+          queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval})
+        );
+        const retrieval = response.result || response;
+        const retrievedParts = listPartCandidates(retrieval);
+        const match = evaluatePartRecall(expectedParts, retrievedParts);
+        return {
+          rowNumber,
+          question,
+          status: match.correct ? "pass" : "fail",
+          taskId: response.task_id || null,
+          expectedParts,
+          retrievedParts,
+          match
+        };
+      } catch (error) {
+        return {
+          rowNumber,
+          question,
+          status: "error",
+          expectedParts,
+          retrievedParts: [],
+          message: String(error)
+        };
       }
     }
 
@@ -2746,7 +2827,7 @@ def build_redesigned_index_html() -> str:
         $("batchEvalResults").innerHTML = '<div class="empty">暂无评测结果</div>';
         return;
       }
-      $("batchEvalResults").innerHTML = results.map(renderBatchEvalRow).join("");
+      $("batchEvalResults").innerHTML = orderedBatchEvalResults(results).map(renderBatchEvalRow).join("");
     }
 
     function renderBatchEvalRow(item) {
@@ -2773,6 +2854,10 @@ def build_redesigned_index_html() -> str:
           ${reason ? `<div class="row-meta">${escapeHtml(reason)}</div>` : ""}
         </div>
       `;
+    }
+
+    function orderedBatchEvalResults(results = appState.batchEval.results) {
+      return [...(results || [])].sort((left, right) => Number(left.rowNumber || 0) - Number(right.rowNumber || 0));
     }
 
     function batchEvalReason(item) {
@@ -2810,7 +2895,7 @@ def build_redesigned_index_html() -> str:
 
     function exportBatchEvalResults() {
       const rows = [["row", "status", "question", "expected", "retrieved", "message"]];
-      for (const item of appState.batchEval.results || []) {
+      for (const item of orderedBatchEvalResults()) {
         rows.push([
           item.rowNumber,
           item.status,
@@ -2855,6 +2940,13 @@ def build_redesigned_index_html() -> str:
           work_order_candidate_top_k: $("workOrderCandidateTopK").value,
           work_order_min_relative_score: $("workOrderMinRelativeScore").value,
           work_order_max_hits: $("workOrderMaxHits").value
+        },
+        batch_eval: {
+          top_k: $("batchEvalTopK").value,
+          work_order_candidate_top_k: $("batchEvalWorkOrderCandidateTopK").value,
+          work_order_min_relative_score: $("batchEvalWorkOrderMinRelativeScore").value,
+          work_order_max_hits: $("batchEvalWorkOrderMaxHits").value,
+          concurrency: $("batchEvalConcurrency").value
         },
         database_url: $("databaseUrl").value,
         env_file: $("envFile").value,
@@ -2908,6 +3000,7 @@ def build_redesigned_index_html() -> str:
     function applyConfigSnapshot(config, options = {}) {
       if (!config || typeof config !== "object") throw new Error("配置文件格式不正确");
       const ui = config.ui || {};
+      const batchEval = config.batch_eval || {};
       setInputValue("databaseUrl", config.database_url);
       setInputValue("envFile", config.env_file);
       setInputValue("workOrderDir", config.work_order_dir);
@@ -2927,6 +3020,11 @@ def build_redesigned_index_html() -> str:
       setInputValue("workOrderCandidateTopK", ui.work_order_candidate_top_k ?? retrieval.work_order_candidate_top_k);
       setInputValue("workOrderMinRelativeScore", ui.work_order_min_relative_score ?? retrieval.work_order_min_relative_score);
       setInputValue("workOrderMaxHits", ui.work_order_max_hits ?? retrieval.work_order_max_hits);
+      setInputValue("batchEvalTopK", batchEval.top_k ?? ui.batch_eval_top_k);
+      setInputValue("batchEvalWorkOrderCandidateTopK", batchEval.work_order_candidate_top_k ?? ui.batch_eval_work_order_candidate_top_k);
+      setInputValue("batchEvalWorkOrderMinRelativeScore", batchEval.work_order_min_relative_score ?? ui.batch_eval_work_order_min_relative_score);
+      setInputValue("batchEvalWorkOrderMaxHits", batchEval.work_order_max_hits ?? ui.batch_eval_work_order_max_hits);
+      setInputValue("batchEvalConcurrency", batchEval.concurrency ?? ui.batch_eval_concurrency);
       if (ui.question_sidebar_open !== undefined) {
         setQuestionSidebar(Boolean(ui.question_sidebar_open), {save: false});
       }
@@ -3061,6 +3159,8 @@ def build_redesigned_index_html() -> str:
         "apiRequestLoggingEnabled", "apiRequestLogPath",
         "ingestReset", "ingestResume", "query", "topK", "evidenceTopK",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
+        "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
+        "batchEvalWorkOrderMaxHits", "batchEvalConcurrency",
         "enableEmbedding", "embeddingProvider", "embeddingModel",
         "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
         "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey",
@@ -3088,11 +3188,12 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    function queryPayload(query = $("query").value) {
+    function queryPayload(query = $("query").value, options = {}) {
+      const requestedTopK = options.topK !== undefined ? Number(options.topK) : ($("topK").value ? Number($("topK").value) : 5);
       return {
-        ...commonPayload(),
+        ...commonPayload({retrieval: options.retrieval}),
         query: String(query || "").trim(),
-        top_k: $("topK").value ? Number($("topK").value) : 5,
+        top_k: Number.isFinite(requestedTopK) && requestedTopK > 0 ? requestedTopK : 5,
         debug: true
       };
     }
@@ -4116,6 +4217,14 @@ def build_redesigned_index_html() -> str:
       $("query").value = defaultQuery;
       $("topK").value = "1";
       $("evidenceTopK").value = "4";
+      $("workOrderCandidateTopK").value = "50";
+      $("workOrderMinRelativeScore").value = "0.45";
+      $("workOrderMaxHits").value = "10";
+      $("batchEvalTopK").value = "1";
+      $("batchEvalWorkOrderCandidateTopK").value = "50";
+      $("batchEvalWorkOrderMinRelativeScore").value = "0.45";
+      $("batchEvalWorkOrderMaxHits").value = "10";
+      $("batchEvalConcurrency").value = "4";
       $("workOrderLimit").value = "";
       $("manualLimit").value = "";
       $("ingestReset").checked = true;
@@ -4167,7 +4276,7 @@ def build_redesigned_index_html() -> str:
     $("runBatchEvalBtn").addEventListener("click", () => runBatchEval());
     $("stopBatchEvalBtn").addEventListener("click", () => {
       appState.batchEval.stopRequested = true;
-      $("batchEvalStatus").textContent = "正在停止，当前行结束后停止。";
+      $("batchEvalStatus").textContent = "正在停止，当前请求结束后停止。";
     });
     $("exportBatchEvalBtn").addEventListener("click", exportBatchEvalResults);
     $("openHistoryBtn").addEventListener("click", async () => {
