@@ -121,6 +121,12 @@ class PgIndexHelpersTests(unittest.TestCase):
                 "title": "空调有异响",
                 "body_preview": "空调压缩机或鼓风机异常声音。",
             },
+            {
+                "channel": "manual_typical_faults",
+                "doc_id": "manual:belt",
+                "title": "发动机皮带异响",
+                "body_preview": "发动机附件皮带松动会产生尖叫声。",
+            },
         ]
 
         result = filter_evidence_for_answer(
@@ -130,8 +136,9 @@ class PgIndexHelpersTests(unittest.TestCase):
         )
 
         self.assertEqual([item["doc_id"] for item in result["accepted"]], ["manual:fan"])
-        self.assertEqual([item["doc_id"] for item in result["rejected"]], ["manual:aircon"])
-        self.assertEqual(result["rejected"][0]["evidence_gate"]["reason"], "missing_component_anchor")
+        self.assertEqual([item["doc_id"] for item in result["rejected"]], ["manual:aircon", "manual:belt"])
+        self.assertEqual(result["rejected"][0]["evidence_gate"]["reason"], "missing_strict_component_anchor")
+        self.assertEqual(result["rejected"][1]["evidence_gate"]["component_hits"], ["皮带"])
 
     def test_prioritize_hits_by_constraints_prefers_component_anchor(self) -> None:
         constraints = build_query_constraints("风扇皮带异响")

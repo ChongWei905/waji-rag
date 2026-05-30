@@ -295,6 +295,7 @@ class QueryConstraints:
     fault_phrase: str
     component_text: str
     component_terms: list[str]
+    required_component_terms: list[str]
     symptom_terms: list[str]
 
     def to_dict(self) -> dict[str, object]:
@@ -2519,11 +2520,17 @@ def build_query_constraints(query: str, terms: list[str] | None = None) -> Query
     fault_phrase = extract_fault_phrase(query)
     symptom_terms = extract_symptom_terms(fault_phrase or query)
     component_text = strip_symptom_terms(fault_phrase, symptom_terms)
-    component_terms = extract_component_terms(component_text, terms or unique_terms(tokenize_text(query)))
+    required_component_terms = extract_required_component_terms(component_text)
+    component_terms = extract_component_terms(
+        component_text,
+        terms or unique_terms(tokenize_text(query)),
+        required_component_terms=required_component_terms,
+    )
     return QueryConstraints(
         fault_phrase=fault_phrase,
         component_text=component_text,
         component_terms=component_terms,
+        required_component_terms=required_component_terms,
         symptom_terms=symptom_terms,
     )
 
@@ -2561,18 +2568,34 @@ def strip_symptom_terms(text: str, symptom_terms: list[str]) -> str:
     return component_text.strip(" :：，,。；;")
 
 
-def extract_component_terms(component_text: str, fallback_terms: list[str]) -> list[str]:
+def extract_required_component_terms(component_text: str) -> list[str]:
+    """Return component terms that must match together for composite components."""
+
+    normalized_component = normalize_for_gate(component_text)
+    if len(normalized_component) < 2:
+        return []
+    known_terms = sorted(
+        (term for term in COMMON_COMPONENT_TERMS if term in normalized_component),
+        key=lambda term: (normalized_component.find(term), -len(term)),
+    )
+    if known_terms:
+        return unique_terms(known_terms)
+    return unique_terms(tokenize_text(normalized_component))[:2]
+
+
+def extract_component_terms(
+    component_text: str,
+    fallback_terms: list[str],
+    *,
+    required_component_terms: list[str],
+) -> list[str]:
     """Return component anchor terms that should dominate evidence filtering."""
 
     terms: list[str] = []
     normalized_component = normalize_for_gate(component_text)
     if len(normalized_component) >= 2:
         terms.append(normalized_component)
-        known_terms = sorted(
-            (term for term in COMMON_COMPONENT_TERMS if term in normalized_component),
-            key=lambda term: (normalized_component.find(term), -len(term)),
-        )
-        terms.extend(known_terms or tokenize_text(normalized_component))
+        terms.extend(required_component_terms or tokenize_text(normalized_component))
     if not terms:
         terms.extend(fallback_terms)
     return unique_terms(
@@ -2601,7 +2624,7 @@ def prioritize_hits_by_constraints(
 
     def sort_key(hit: RetrievalHit) -> tuple[int, int, float, int]:
         match = match_query_constraints(hit_filter_text(hit), constraints)
-        has_component = bool(match["component_hits"])
+        has_component = bool(match["strict_component_match"])
         has_symptom = bool(match["symptom_hits"])
         return (0 if has_component else 1, 0 if has_symptom else 1, -hit.score, hit.document_id)
 
@@ -2626,7 +2649,7 @@ def filter_evidence_for_answer(
         decorated.append(decorated_item)
 
     component_required = bool(active_constraints.component_terms)
-    component_supported = component_required and any(item["evidence_gate"]["component_hits"] for item in decorated)
+    component_supported = component_required and any(item["evidence_gate"]["strict_component_match"] for item in decorated)
     accepted: list[dict[str, object]] = []
     rejected: list[dict[str, object]] = []
     for item in decorated:
@@ -2641,14 +2664,14 @@ def filter_evidence_for_answer(
             gate["reason"] = "no_component_supported_in_retrieval"
             item["evidence_gate"] = gate
             accepted.append(item)
-        elif gate.get("component_hits"):
+        elif gate.get("strict_component_match"):
             gate["decision"] = "accepted"
-            gate["reason"] = "component_anchor_matched"
+            gate["reason"] = "strict_component_anchor_matched"
             item["evidence_gate"] = gate
             accepted.append(item)
         else:
             gate["decision"] = "rejected"
-            gate["reason"] = "missing_component_anchor"
+            gate["reason"] = "missing_strict_component_anchor"
             item["evidence_gate"] = gate
             rejected.append(item)
 
@@ -2672,11 +2695,21 @@ def match_query_constraints(text: str, constraints: QueryConstraints) -> dict[st
     component_hits = [
         term for term in constraints.component_terms if term and (term in normalized or term in token_set)
     ]
+    required_hits = [
+        term for term in constraints.required_component_terms if term and (term in normalized or term in token_set)
+    ]
     symptom_hits = [
         term for term in constraints.symptom_terms if term and (term in normalized or term in token_set)
     ]
+    full_component_match = bool(constraints.component_text and normalize_for_gate(constraints.component_text) in normalized)
+    required_component_match = bool(
+        constraints.required_component_terms
+        and len(unique_terms(required_hits)) >= len(unique_terms(constraints.required_component_terms))
+    )
     return {
         "component_hits": unique_terms(component_hits),
+        "required_component_hits": unique_terms(required_hits),
+        "strict_component_match": full_component_match or required_component_match,
         "symptom_hits": unique_terms(symptom_hits),
     }
 
