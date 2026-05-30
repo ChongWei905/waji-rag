@@ -1077,8 +1077,12 @@ def build_redesigned_index_html() -> str:
       background: var(--soft);
     }
     .question-tab.overview {
+      position: sticky;
+      top: 0;
+      z-index: 2;
       border-color: var(--line-strong);
       background: #fff;
+      box-shadow: 0 8px 14px rgba(15, 23, 42, .08);
     }
     .question-tab.pass.active, .question-tab.fail.active, .question-tab.error.active, .question-tab.skipped.active {
       box-shadow: inset 0 0 0 1px #0f766e;
@@ -1523,6 +1527,51 @@ def build_redesigned_index_html() -> str:
       gap: 10px;
       flex-wrap: wrap;
     }
+    .batch-comparison-card {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .batch-comparison-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .batch-comparison-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, .7fr);
+      gap: 8px;
+    }
+    .batch-comparison-field {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 9px;
+      display: grid;
+      gap: 6px;
+    }
+    .batch-comparison-field .empty {
+      padding: 10px;
+    }
+    .match-status {
+      border-radius: 8px;
+      padding: 9px;
+      font-weight: 780;
+    }
+    .match-status.pass {
+      color: var(--ok);
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+    }
+    .match-status.fail {
+      color: var(--danger);
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+    }
     .json-box {
       min-height: 360px;
       max-height: 640px;
@@ -1726,7 +1775,7 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
-      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .batch-retry-controls, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
+      .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .batch-retry-controls, .batch-comparison-grid, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -2219,6 +2268,7 @@ def build_redesigned_index_html() -> str:
       activeBatchEvalTask: null,
       activeBatchEvalRowNumber: null,
       activeBatchEvalRetryTaskId: null,
+      activeBatchEvalReplay: null,
       batchRetry: {
         topK: 1,
         workOrderCandidateTopK: 50,
@@ -2791,6 +2841,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalTask = task;
       appState.activeBatchEvalRowNumber = null;
       appState.activeBatchEvalRetryTaskId = null;
+      appState.activeBatchEvalReplay = null;
       appState.batchEval.taskId = task.id;
       appState.batchEval.fileName = result.file_name || task.query || "";
       appState.batchEval.headers = result.headers || [];
@@ -2836,6 +2887,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalTask = null;
       appState.activeBatchEvalRowNumber = null;
       appState.activeBatchEvalRetryTaskId = null;
+      appState.activeBatchEvalReplay = null;
       switchView("batch");
       refreshBatchEvalRuns({quiet: true});
     }
@@ -2877,6 +2929,7 @@ def build_redesigned_index_html() -> str:
     function activateBatchEvalOverview() {
       appState.activeBatchEvalRowNumber = null;
       appState.activeBatchEvalRetryTaskId = null;
+      appState.activeBatchEvalReplay = null;
       renderBatchEvalPage();
       setStatus("已切换到批量评测整体进展", "success");
     }
@@ -2886,6 +2939,7 @@ def build_redesigned_index_html() -> str:
       if (!item) return;
       appState.activeBatchEvalRowNumber = item.rowNumber;
       appState.activeBatchEvalRetryTaskId = null;
+      appState.activeBatchEvalReplay = null;
       $("query").value = item.question || "";
       resetStages("batch", "retrieval");
       renderBatchEvalPage();
@@ -2903,6 +2957,7 @@ def build_redesigned_index_html() -> str:
         const task = data.task;
         if (!task) throw new Error(`task not found: ${item.taskId}`);
         appState.currentTaskId = task.id;
+        setBatchEvalReplayFromRetrieval(item, task.result && task.result.result ? task.result.result : task.result || {}, "历史检索");
         renderSearchResult(task.result || {});
         setStatus(`已重现批量评测第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)}`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
       } catch (error) {
@@ -2961,6 +3016,7 @@ def build_redesigned_index_html() -> str:
         appState.activeBatchEvalTaskId = created.task_id;
         appState.activeBatchEvalRowNumber = null;
         appState.activeBatchEvalRetryTaskId = null;
+        appState.activeBatchEvalReplay = null;
         appState.activeBatchEvalTask = {
           id: created.task_id,
           task_type: "batch_eval",
@@ -3839,10 +3895,10 @@ def build_redesigned_index_html() -> str:
       const retryTask = appState.activeBatchEvalRetryTaskId ? ` · 最近重试 task #${appState.activeBatchEvalRetryTaskId}` : "";
       const disabled = appState.batchRetry.running ? "disabled" : "";
       return `
-        <div>
-          <div class="row-title">单题调参重试</div>
-          <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
-        </div>
+          <div>
+            <div class="row-title">单题调参重试</div>
+            <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
+          </div>
         <div class="batch-retry-controls">
           <div>
             <label for="batchRetryTopK">手册 / 故障码 Top K</label>
@@ -3865,6 +3921,87 @@ def build_redesigned_index_html() -> str:
           <div class="row-meta">${escapeHtml(item.question || "")}</div>
           <button id="retryBatchQuestionBtn" class="secondary" ${disabled}>按当前参数重试检索</button>
         </div>
+        ${renderBatchEvalComparison(item)}
+      `;
+    }
+
+    function setBatchEvalReplayFromRetrieval(item, retrieval, source) {
+      const expectedParts = Array.isArray(item.expectedParts) ? item.expectedParts : [];
+      const retrievedParts = listPartCandidates(retrieval || {});
+      appState.activeBatchEvalReplay = {
+        rowNumber: item.rowNumber,
+        source,
+        expectedParts,
+        retrievedParts,
+        match: evaluatePartRecall(expectedParts, retrievedParts)
+      };
+    }
+
+    function currentBatchEvalComparison(item) {
+      const replay = appState.activeBatchEvalReplay;
+      if (replay && Number(replay.rowNumber) === Number(item.rowNumber)) return replay;
+      const expectedParts = Array.isArray(item.expectedParts) ? item.expectedParts : [];
+      const retrievedParts = Array.isArray(item.retrievedParts) ? item.retrievedParts : [];
+      const match = item.match || evaluatePartRecall(expectedParts, retrievedParts);
+      return {
+        rowNumber: item.rowNumber,
+        source: "原始评测",
+        expectedParts,
+        retrievedParts,
+        match
+      };
+    }
+
+    function renderBatchEvalComparison(item) {
+      const comparison = currentBatchEvalComparison(item);
+      const expected = comparison.expectedParts.length
+        ? comparison.expectedParts.map(part => `<div class="row-meta">${escapeHtml(formatExpectedPartText(part))}</div>`).join("")
+        : '<div class="empty">期望不召回备件</div>';
+      const actual = comparison.retrievedParts.length
+        ? comparison.retrievedParts.map(part => `<div class="row-meta">${formatRetrievedPart(part)}</div>`).join("")
+        : '<div class="empty">未召回备件</div>';
+      return `
+        <div class="batch-comparison-card">
+          <div class="batch-comparison-head">
+            <div>
+              <div class="row-title">预期答案 / 当前召回对比</div>
+              <div class="row-meta">当前召回来源：${escapeHtml(comparison.source || "原始评测")}</div>
+            </div>
+            <span class="pill ${comparison.match.correct ? "ok" : "warn"}">${comparison.match.correct ? "命中" : "未命中"}</span>
+          </div>
+          <div class="batch-comparison-grid">
+            <div class="batch-comparison-field">
+              <div class="row-title">预期备件</div>
+              ${expected}
+            </div>
+            <div class="batch-comparison-field">
+              <div class="row-title">当前召回</div>
+              ${actual}
+            </div>
+            <div class="batch-comparison-field">
+              ${renderBatchEvalMatchSummary(comparison.match)}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderBatchEvalMatchSummary(match) {
+      const missing = Array.isArray(match.missing) ? match.missing : [];
+      const matched = Array.isArray(match.matched) ? match.matched : [];
+      const unexpectedCount = Number(match.unexpected_count || 0);
+      if (match.correct) {
+        return `
+          <div class="match-status pass">当前结果正确</div>
+          <div class="row-meta">命中 ${escapeHtml(matched.length)} 条预期备件。</div>
+        `;
+      }
+      const lines = [];
+      if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
+      if (unexpectedCount) lines.push(`期望不召回备件，但当前召回 ${unexpectedCount} 条`);
+      return `
+        <div class="match-status fail">当前结果未通过</div>
+        <div class="row-meta">${escapeHtml(lines.join("；") || "召回结果与预期不一致")}</div>
       `;
     }
 
@@ -3956,6 +4093,7 @@ def build_redesigned_index_html() -> str:
         setStage("retrieval", "active", payload, "按当前参数重试检索");
         const response = await postJson("/api/search-db", payload);
         appState.activeBatchEvalRetryTaskId = response.task_id || null;
+        setBatchEvalReplayFromRetrieval(item, response.result || response, "本次重试");
         renderSearchResult(response);
         setStatus(`第 ${item.rowNumber} 行重试完成`, "success");
       } catch (error) {
@@ -4778,6 +4916,7 @@ def build_redesigned_index_html() -> str:
         appState.activeBatchEvalTask = null;
         appState.activeBatchEvalRowNumber = null;
         appState.activeBatchEvalRetryTaskId = null;
+        appState.activeBatchEvalReplay = null;
         appState.batchEval.results = [];
         appState.batchEval.taskId = null;
         appState.questionTabs = appState.questionTabs.map(tab => {
