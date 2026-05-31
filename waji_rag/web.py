@@ -1072,6 +1072,10 @@ def build_redesigned_index_html() -> str:
       border-color: #86efac;
       background: #f0fdf4;
     }
+    .question-tab.warn {
+      border-color: #facc15;
+      background: #fefce8;
+    }
     .question-tab.fail, .question-tab.error {
       border-color: #fecaca;
       background: #fff1f2;
@@ -1088,7 +1092,7 @@ def build_redesigned_index_html() -> str:
       background: #fff;
       box-shadow: 0 8px 14px rgba(15, 23, 42, .08);
     }
-    .question-tab.pass.active, .question-tab.fail.active, .question-tab.error.active, .question-tab.skipped.active {
+    .question-tab.pass.active, .question-tab.warn.active, .question-tab.fail.active, .question-tab.error.active, .question-tab.skipped.active {
       box-shadow: inset 0 0 0 1px #0f766e;
     }
     .question-tab-title {
@@ -1580,6 +1584,11 @@ def build_redesigned_index_html() -> str:
       background: #f0fdf4;
       border: 1px solid #bbf7d0;
     }
+    .match-status.warn {
+      color: #a16207;
+      background: #fefce8;
+      border: 1px solid #fde68a;
+    }
     .match-status.fail {
       color: var(--danger);
       background: #fff1f2;
@@ -1750,6 +1759,10 @@ def build_redesigned_index_html() -> str:
     .eval-row.pass {
       border-color: #86efac;
       background: #f0fdf4;
+    }
+    .eval-row.warn {
+      border-color: #facc15;
+      background: #fefce8;
     }
     .eval-row.fail, .eval-row.error {
       border-color: #fecaca;
@@ -1964,6 +1977,10 @@ def build_redesigned_index_html() -> str:
               <div>
                 <label for="batchEvalQuestionColumn">问题列</label>
                 <select id="batchEvalQuestionColumn"></select>
+              </div>
+              <div>
+                <label for="batchEvalWorkOrderIdColumn">预期工单ID列</label>
+                <select id="batchEvalWorkOrderIdColumn"></select>
               </div>
               <div>
                 <label for="batchEvalPartNameColumn">新件备件名称列</label>
@@ -2200,6 +2217,7 @@ def build_redesigned_index_html() -> str:
         useSharedDatabase: false,
         settings: null,
         partColumns: null,
+        workOrderColumn: null,
         questionIndex: null,
         persistPromise: Promise.resolve(),
         persistError: null
@@ -2646,6 +2664,7 @@ def build_redesigned_index_html() -> str:
     function renderBatchEvalColumns() {
       const headers = appState.batchEval.headers || [];
       setColumnOptions("batchEvalQuestionColumn", headers, guessColumnIndex(headers, ["问题", "query", "报修", "故障"]), false);
+      setColumnOptions("batchEvalWorkOrderIdColumn", headers, guessColumnIndex(headers, ["预期工单", "目标工单", "工单ID", "工单id", "工单编号", "work_order_id", "filename", "文件名"]), true);
       setColumnOptions("batchEvalPartNameColumn", headers, guessColumnIndex(headers, ["新件备件名称", "备件名称", "名称", "part_name"]), true);
       setColumnOptions("batchEvalPartCodeColumn", headers, guessColumnIndex(headers, ["新件物料编码", "物料编码", "备件编码", "part_code", "编码"]), true);
       setColumnOptions("batchEvalPartQuantityColumn", headers, guessColumnIndex(headers, ["新件数量", "备件数量", "数量", "quantity"]), true);
@@ -2702,7 +2721,7 @@ def build_redesigned_index_html() -> str:
               <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(batchEvalTaskTitle(task))}</span>
               <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
             </div>
-            <div class="task-subtitle">正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
+            <div class="task-subtitle">正确 ${escapeHtml(counts.pass ?? 0)} · 黄色 ${escapeHtml(counts.warn ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
             <div class="row-meta">分享路径：${escapeHtml(sharePath)}</div>
             <div class="row-meta">${escapeHtml(compactTime(task.updated_at || task.created_at))}</div>
           </button>
@@ -2786,6 +2805,7 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.shareId = result.share_id || task.share_id || null;
       appState.batchEval.settings = result.settings || null;
       appState.batchEval.partColumns = result.part_columns || null;
+      appState.batchEval.workOrderColumn = result.work_order_column ?? null;
       appState.batchEval.questionIndex = result.question_column ?? null;
       syncBatchRetryDefaults(appState.batchEval.settings);
       renderBatchEvalPage();
@@ -2856,7 +2876,7 @@ def build_redesigned_index_html() -> str:
       const overview = `
         <button class="question-tab overview ${overviewActive ? "active" : ""}" data-batch-overview="1">
           <div class="question-tab-title">整体进展</div>
-          <div class="question-tab-meta">${escapeHtml(counts.done)} / ${escapeHtml(counts.total)} · 正确 ${escapeHtml(counts.pass)} · 失败 ${escapeHtml(counts.fail)}</div>
+          <div class="question-tab-meta">${escapeHtml(counts.done)} / ${escapeHtml(counts.total)} · 正确 ${escapeHtml(counts.pass)} · 黄色 ${escapeHtml(counts.warn)} · 失败 ${escapeHtml(counts.fail)}</div>
         </button>
       `;
       container.innerHTML = overview + rows.map(item => `
@@ -2933,6 +2953,7 @@ def build_redesigned_index_html() -> str:
     function batchEvalStatusText(status) {
       return {
         pass: "正确",
+        warn: "工单未命中",
         fail: "失败",
         error: "错误",
         skipped: "跳过"
@@ -2961,8 +2982,10 @@ def build_redesigned_index_html() -> str:
         code: optionalColumnIndex("batchEvalPartCodeColumn"),
         quantity: optionalColumnIndex("batchEvalPartQuantityColumn")
       };
+      const workOrderColumn = optionalColumnIndex("batchEvalWorkOrderIdColumn");
       appState.batchEval.settings = settings;
       appState.batchEval.partColumns = partColumns;
+      appState.batchEval.workOrderColumn = workOrderColumn;
       appState.batchEval.questionIndex = questionIndex;
       appState.batchEval.rowCount = rows.length;
       syncBatchRetryDefaults(settings);
@@ -2975,7 +2998,7 @@ def build_redesigned_index_html() -> str:
       $("stopBatchEvalBtn").disabled = false;
       $("exportBatchEvalBtn").disabled = true;
       try {
-        const created = await createBatchEvalTask(settings, partColumns, questionIndex);
+        const created = await createBatchEvalTask(settings, partColumns, questionIndex, workOrderColumn);
         appState.batchEval.taskId = created.task_id;
         appState.batchEval.shareId = (created.result && created.result.share_id) || created.share_id || null;
         appState.batchEval.useSharedDatabase = false;
@@ -3013,7 +3036,7 @@ def build_redesigned_index_html() -> str:
         while (true) {
           const index = nextWorkIndex();
           if (index === null) return;
-          const item = await runBatchEvalRow(index, rows[index], questionIndex, partColumns, settings);
+          const item = await runBatchEvalRow(index, rows[index], questionIndex, partColumns, workOrderColumn, settings);
           appState.batchEval.results.push(item);
           completed += 1;
           $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · 并发 ${workerCount}`;
@@ -3038,7 +3061,7 @@ def build_redesigned_index_html() -> str:
       }
     }
 
-    async function createBatchEvalTask(settings, partColumns, questionIndex) {
+    async function createBatchEvalTask(settings, partColumns, questionIndex, workOrderColumn) {
       const payload = {
         ...commonPayload({retrieval: settings.retrieval}),
         batch_eval: {
@@ -3047,6 +3070,7 @@ def build_redesigned_index_html() -> str:
           headers: appState.batchEval.headers,
           settings,
           question_column: questionIndex,
+          work_order_column: workOrderColumn,
           part_columns: partColumns
         }
       };
@@ -3082,6 +3106,7 @@ def build_redesigned_index_html() -> str:
         row_count: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         settings: appState.batchEval.settings || null,
         question_column: appState.batchEval.questionIndex,
+        work_order_column: appState.batchEval.workOrderColumn,
         part_columns: appState.batchEval.partColumns || null,
         counts,
         rows,
@@ -3091,14 +3116,25 @@ def build_redesigned_index_html() -> str:
 
     function batchEvalCounts(results = appState.batchEval.results) {
       const rows = results || [];
+      const workOrderRequired = rows.filter(item => item.expectedWorkOrderId).length;
       return {
         total: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         done: rows.length,
         pass: rows.filter(item => item.status === "pass").length,
+        warn: rows.filter(item => item.status === "warn").length,
         fail: rows.filter(item => item.status === "fail").length,
         error: rows.filter(item => item.status === "error").length,
-        skipped: rows.filter(item => item.status === "skipped").length
+        skipped: rows.filter(item => item.status === "skipped").length,
+        work_order_required: workOrderRequired,
+        work_order_pass: rows.filter(item => item.match && item.match.work_order && item.match.work_order.required && item.match.work_order.correct).length,
+        part_pass: rows.filter(item => batchEvalPartCorrect(item)).length
       };
+    }
+
+    function batchEvalPartCorrect(item) {
+      const match = (item && item.match) || {};
+      if (typeof match.part_correct === "boolean") return match.part_correct;
+      return item && (item.status === "pass" || item.status === "warn");
     }
 
     function batchEvalSettings() {
@@ -3131,17 +3167,21 @@ def build_redesigned_index_html() -> str:
       return value === "" ? fallback : Number(value);
     }
 
-    async function runBatchEvalRow(index, row, questionIndex, partColumns, settings) {
+    async function runBatchEvalRow(index, row, questionIndex, partColumns, workOrderColumn, settings) {
       const rowNumber = index + 2;
       const question = String(row[questionIndex] || "").trim();
       const expectedParts = buildExpectedParts(row, partColumns);
+      const expectedWorkOrderId = expectedWorkOrderIdFromRow(row, workOrderColumn);
       if (!question) {
         return {
           rowNumber,
           question: "",
           status: "skipped",
           expectedParts,
+          expectedWorkOrderId,
           retrievedParts: [],
+          retrievedWorkOrderIds: [],
+          retrievedWorkOrders: [],
           message: "问题为空"
         };
       }
@@ -3152,14 +3192,19 @@ def build_redesigned_index_html() -> str:
         );
         const retrieval = response.result || response;
         const retrievedParts = listPartCandidates(retrieval);
-        const match = evaluatePartRecall(expectedParts, retrievedParts);
+        const retrievedWorkOrders = listRetrievedWorkOrders(retrieval);
+        const retrievedWorkOrderIds = uniqueWorkOrderIdsFromHits(retrievedWorkOrders);
+        const match = evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds);
         return {
           rowNumber,
           question,
-          status: match.correct ? "pass" : "fail",
+          status: batchEvalStatusFromMatch(match),
           taskId: response.task_id || null,
           expectedParts,
+          expectedWorkOrderId,
           retrievedParts,
+          retrievedWorkOrderIds,
+          retrievedWorkOrders,
           match
         };
       } catch (error) {
@@ -3168,7 +3213,10 @@ def build_redesigned_index_html() -> str:
           question,
           status: "error",
           expectedParts,
+          expectedWorkOrderId,
           retrievedParts: [],
+          retrievedWorkOrderIds: [],
+          retrievedWorkOrders: [],
           message: String(error)
         };
       }
@@ -3198,6 +3246,11 @@ def build_redesigned_index_html() -> str:
       return expected;
     }
 
+    function expectedWorkOrderIdFromRow(row, columnIndex) {
+      if (columnIndex === null || columnIndex === undefined) return "";
+      return normalizeWorkOrderId(row[columnIndex]);
+    }
+
     function splitExpectedCell(value) {
       return String(value || "").split(/[，,]/).map(item => item.trim()).filter(Boolean);
     }
@@ -3211,6 +3264,104 @@ def build_redesigned_index_html() -> str:
         work_order_id: String(part.work_order_id || ""),
         source_path: String(part.source_path || "")
       }));
+    }
+
+    function listRetrievedWorkOrders(retrieval) {
+      const channelsPayload = retrieval && retrieval.channels && typeof retrieval.channels === "object" ? retrieval.channels : {};
+      const channelHits = Array.isArray(channelsPayload.work_orders) ? channelsPayload.work_orders : [];
+      const topLevelHits = retrieval && Array.isArray(retrieval.work_orders) ? retrieval.work_orders : [];
+      const hits = channelHits.length ? channelHits : topLevelHits;
+      return hits.map((hit, index) => {
+        const ids = uniqueWorkOrderIds(workOrderIdCandidatesFromHit(hit));
+        return {
+          rank: index + 1,
+          id: ids[0] || "",
+          ids,
+          title: String(hit.title || ""),
+          doc_id: String(hit.doc_id || ""),
+          work_order_id: String(hit.work_order_id || ""),
+          source_path: String(hit.source_path || ""),
+          score: hit.score ?? ""
+        };
+      });
+    }
+
+    function workOrderIdCandidatesFromHit(hit) {
+      const metadata = hit && hit.metadata && typeof hit.metadata === "object" ? hit.metadata : {};
+      return [
+        hit && hit.work_order_id,
+        metadata.work_order_id,
+        hit && hit.source_path,
+        metadata.source_path,
+        hit && hit.doc_id
+      ].map(normalizeWorkOrderId).filter(Boolean);
+    }
+
+    function uniqueWorkOrderIdsFromHits(workOrders) {
+      return uniqueWorkOrderIds((workOrders || []).flatMap(item => item.ids || item.id || []));
+    }
+
+    function uniqueWorkOrderIds(values) {
+      const ids = [];
+      const seen = new Set();
+      for (const value of values || []) {
+        const id = normalizeWorkOrderId(value);
+        const key = normalizeEvalText(id);
+        if (!id || seen.has(key)) continue;
+        seen.add(key);
+        ids.push(id);
+      }
+      return ids;
+    }
+
+    function normalizeWorkOrderId(value) {
+      const raw = String(value || "").trim();
+      if (!raw) return "";
+      const withoutQuery = raw.split(/[?#]/)[0];
+      const leaf = (withoutQuery.replace(/\\/g, "/").split("/").filter(Boolean).pop() || withoutQuery).trim();
+      return leaf.replace(/\.[^.]+$/, "").replace(/^wo:/i, "").trim();
+    }
+
+    function evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds) {
+      const partMatch = evaluatePartRecall(expectedParts, retrievedParts);
+      const workOrderMatch = evaluateWorkOrderRecall(expectedWorkOrderId, retrievedWorkOrderIds);
+      const correct = partMatch.correct && workOrderMatch.correct;
+      return {
+        ...partMatch,
+        correct,
+        part_correct: partMatch.correct,
+        work_order: workOrderMatch,
+        yellow_error: partMatch.correct && workOrderMatch.required && !workOrderMatch.correct
+      };
+    }
+
+    function evaluateWorkOrderRecall(expectedWorkOrderId, retrievedWorkOrderIds) {
+      const expected = normalizeWorkOrderId(expectedWorkOrderId);
+      const retrieved = uniqueWorkOrderIds(retrievedWorkOrderIds || []);
+      if (!expected) {
+        return {
+          required: false,
+          correct: true,
+          expected: "",
+          matched: "",
+          retrieved
+        };
+      }
+      const expectedKey = normalizeEvalText(expected);
+      const matched = retrieved.find(id => normalizeEvalText(id) === expectedKey) || "";
+      return {
+        required: true,
+        correct: Boolean(matched),
+        expected,
+        matched,
+        retrieved
+      };
+    }
+
+    function batchEvalStatusFromMatch(match) {
+      if (match.correct) return "pass";
+      if (match.yellow_error) return "warn";
+      return "fail";
     }
 
     function evaluatePartRecall(expectedParts, retrievedParts) {
@@ -3284,7 +3435,9 @@ def build_redesigned_index_html() -> str:
         ["总行数", counts.total],
         ["已评测", counts.done],
         ["正确", counts.pass],
+        ["黄色错误", counts.warn],
         ["失败", counts.fail],
+        ["工单命中", counts.work_order_required ? `${counts.work_order_pass} / ${counts.work_order_required}` : "未配置"],
         ["错误/跳过", `${counts.error} / ${counts.skipped}`],
       ].map(([label, value]) => `
         <div class="stat-card">
@@ -3302,12 +3455,17 @@ def build_redesigned_index_html() -> str:
     function renderBatchEvalRow(item) {
       const statusText = {
         pass: "正确",
+        warn: "工单未命中",
         fail: "失败",
         error: "错误",
         skipped: "跳过"
       }[item.status] || item.status;
       const expected = item.expectedParts && item.expectedParts.length ? item.expectedParts.map(formatExpectedPart).join("<br>") : "期望不召回备件";
       const actual = item.retrievedParts && item.retrievedParts.length ? item.retrievedParts.map(formatRetrievedPart).join("<br>") : "未召回备件";
+      const expectedWorkOrder = item.expectedWorkOrderId ? escapeHtml(item.expectedWorkOrderId) : "未配置预期工单";
+      const actualWorkOrders = item.retrievedWorkOrderIds && item.retrievedWorkOrderIds.length
+        ? item.retrievedWorkOrderIds.map(id => escapeHtml(id)).join("<br>")
+        : "未召回历史工单";
       const reason = batchEvalReason(item);
       return `
         <div class="eval-row ${escapeHtml(item.status)}">
@@ -3319,6 +3477,8 @@ def build_redesigned_index_html() -> str:
           <div class="eval-row-grid">
             <div class="eval-field"><div class="row-meta">真值</div>${expected}</div>
             <div class="eval-field"><div class="row-meta">召回备件证据</div>${actual}</div>
+            <div class="eval-field"><div class="row-meta">预期工单</div>${expectedWorkOrder}</div>
+            <div class="eval-field"><div class="row-meta">历史工单召回</div>${actualWorkOrders}</div>
           </div>
           ${reason ? `<div class="row-meta">${escapeHtml(reason)}</div>` : ""}
         </div>
@@ -3332,13 +3492,18 @@ def build_redesigned_index_html() -> str:
     function batchEvalReason(item) {
       if (item.message) return item.message;
       const match = item.match || {};
-      if (item.status === "fail" && Array.isArray(match.missing) && match.missing.length) {
-        return `未命中：${match.missing.map(formatExpectedPartText).join("；")}`;
+      const lines = [];
+      const workOrder = match.work_order || {};
+      if (Array.isArray(match.missing) && match.missing.length) {
+        lines.push(`未命中备件：${match.missing.map(formatExpectedPartText).join("；")}`);
       }
-      if (item.status === "fail" && match.unexpected_count) {
-        return `期望不召回备件，但召回 ${match.unexpected_count} 条`;
+      if (match.unexpected_count) {
+        lines.push(`期望不召回备件，但召回 ${match.unexpected_count} 条`);
       }
-      return "";
+      if (workOrder.required && !workOrder.correct) {
+        lines.push(`${batchEvalPartCorrect(item) ? "备件命中，但" : ""}未召回预期工单：${workOrder.expected || item.expectedWorkOrderId || ""}`);
+      }
+      return lines.join("；");
     }
 
     function formatExpectedPart(part) {
@@ -3354,28 +3519,55 @@ def build_redesigned_index_html() -> str:
     }
 
     function formatRetrievedPart(part) {
-      return escapeHtml([
+      return escapeHtml(formatRetrievedPartText(part));
+    }
+
+    function formatRetrievedPartText(part) {
+      return [
         part.name ? `证据=${part.name}` : "",
         part.code ? `编码=${part.code}` : "",
         part.quantity ? `数量=${part.quantity}` : "",
         part.work_order_id ? `工单=${part.work_order_id}` : "",
-      ].filter(Boolean).join("，") || "空");
+      ].filter(Boolean).join("，") || "空";
+    }
+
+    function formatRetrievedWorkOrderText(item) {
+      const ids = item && item.ids && item.ids.length ? item.ids.join("/") : item && item.id ? item.id : "";
+      return [
+        item && item.rank ? `#${item.rank}` : "",
+        ids ? `工单=${ids}` : "",
+        item && item.score !== "" && item.score !== undefined ? `score=${item.score}` : "",
+        item && item.title ? `标题=${item.title}` : "",
+        item && item.source_path ? `来源=${item.source_path}` : "",
+      ].filter(Boolean).join("，") || "空";
     }
 
     function exportBatchEvalResults() {
-      const rows = [["row", "status", "question", "expected", "retrieved", "message"]];
+      const rows = [[
+        "row",
+        "status",
+        "question",
+        "expected_work_order_id",
+        "retrieved_work_order_ids",
+        "work_order_match",
+        "expected_parts",
+        "retrieved_parts",
+        "part_match",
+        "message"
+      ]];
       for (const item of orderedBatchEvalResults()) {
+        const match = item.match || {};
+        const workOrder = match.work_order || {};
         rows.push([
           item.rowNumber,
           item.status,
           item.question || "",
+          item.expectedWorkOrderId || "",
+          (item.retrievedWorkOrderIds || []).join(" | "),
+          workOrder.required ? (workOrder.correct ? "pass" : "fail") : "not_configured",
           (item.expectedParts || []).map(formatExpectedPartText).join(" | ") || "期望不召回备件",
-          (item.retrievedParts || []).map(part => [
-            part.name ? `证据=${part.name}` : "",
-            part.code ? `编码=${part.code}` : "",
-            part.quantity ? `数量=${part.quantity}` : "",
-            part.work_order_id ? `工单=${part.work_order_id}` : "",
-          ].filter(Boolean).join("，")).join(" | "),
+          (item.retrievedParts || []).map(formatRetrievedPartText).join(" | "),
+          batchEvalPartCorrect(item) ? "pass" : "fail",
           batchEvalReason(item),
         ]);
       }
@@ -3846,13 +4038,19 @@ def build_redesigned_index_html() -> str:
 
     function setBatchEvalReplayFromRetrieval(item, retrieval, source) {
       const expectedParts = Array.isArray(item.expectedParts) ? item.expectedParts : [];
+      const expectedWorkOrderId = item.expectedWorkOrderId || "";
       const retrievedParts = listPartCandidates(retrieval || {});
+      const retrievedWorkOrders = listRetrievedWorkOrders(retrieval || {});
+      const retrievedWorkOrderIds = uniqueWorkOrderIdsFromHits(retrievedWorkOrders);
       appState.activeBatchEvalReplay = {
         rowNumber: item.rowNumber,
         source,
         expectedParts,
+        expectedWorkOrderId,
         retrievedParts,
-        match: evaluatePartRecall(expectedParts, retrievedParts)
+        retrievedWorkOrderIds,
+        retrievedWorkOrders,
+        match: evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds)
       };
     }
 
@@ -3861,12 +4059,18 @@ def build_redesigned_index_html() -> str:
       if (replay && Number(replay.rowNumber) === Number(item.rowNumber)) return replay;
       const expectedParts = Array.isArray(item.expectedParts) ? item.expectedParts : [];
       const retrievedParts = Array.isArray(item.retrievedParts) ? item.retrievedParts : [];
-      const match = item.match || evaluatePartRecall(expectedParts, retrievedParts);
+      const expectedWorkOrderId = item.expectedWorkOrderId || "";
+      const retrievedWorkOrderIds = Array.isArray(item.retrievedWorkOrderIds) ? item.retrievedWorkOrderIds : [];
+      const retrievedWorkOrders = Array.isArray(item.retrievedWorkOrders) ? item.retrievedWorkOrders : [];
+      const match = item.match || evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds);
       return {
         rowNumber: item.rowNumber,
         source: "原始评测",
         expectedParts,
+        expectedWorkOrderId,
         retrievedParts,
+        retrievedWorkOrderIds,
+        retrievedWorkOrders,
         match
       };
     }
@@ -3879,6 +4083,14 @@ def build_redesigned_index_html() -> str:
       const actual = comparison.retrievedParts.length
         ? comparison.retrievedParts.map(part => `<div class="row-meta">${formatRetrievedPart(part)}</div>`).join("")
         : '<div class="empty">未召回备件</div>';
+      const expectedWorkOrder = comparison.expectedWorkOrderId
+        ? `<div class="row-meta">${escapeHtml(comparison.expectedWorkOrderId)}</div>`
+        : '<div class="empty">未配置预期工单</div>';
+      const actualWorkOrders = comparison.retrievedWorkOrders && comparison.retrievedWorkOrders.length
+        ? comparison.retrievedWorkOrders.map(item => `<div class="row-meta">${escapeHtml(formatRetrievedWorkOrderText(item))}</div>`).join("")
+        : comparison.retrievedWorkOrderIds && comparison.retrievedWorkOrderIds.length
+          ? comparison.retrievedWorkOrderIds.map(id => `<div class="row-meta">${escapeHtml(id)}</div>`).join("")
+          : '<div class="empty">未召回历史工单</div>';
       return `
         <div class="batch-comparison-card">
           <div class="batch-comparison-head">
@@ -3898,6 +4110,14 @@ def build_redesigned_index_html() -> str:
               ${actual}
             </div>
             <div class="batch-comparison-field">
+              <div class="row-title">预期工单</div>
+              ${expectedWorkOrder}
+            </div>
+            <div class="batch-comparison-field">
+              <div class="row-title">历史工单召回</div>
+              ${actualWorkOrders}
+            </div>
+            <div class="batch-comparison-field">
               ${renderBatchEvalMatchSummary(comparison.match)}
             </div>
           </div>
@@ -3909,17 +4129,21 @@ def build_redesigned_index_html() -> str:
       const missing = Array.isArray(match.missing) ? match.missing : [];
       const matched = Array.isArray(match.matched) ? match.matched : [];
       const unexpectedCount = Number(match.unexpected_count || 0);
+      const workOrder = match.work_order || {};
       if (match.correct) {
         return `
           <div class="match-status pass">当前结果正确</div>
-          <div class="row-meta">命中 ${escapeHtml(matched.length)} 条预期备件。</div>
+          <div class="row-meta">命中 ${escapeHtml(matched.length)} 条预期备件${workOrder.required ? `，并召回预期工单 ${escapeHtml(workOrder.matched || workOrder.expected || "")}` : ""}。</div>
         `;
       }
       const lines = [];
       if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
       if (unexpectedCount) lines.push(`期望不召回备件，但当前召回 ${unexpectedCount} 条`);
+      if (workOrder.required && !workOrder.correct) {
+        lines.push(`${match.part_correct ? "备件已匹配，但" : ""}未召回预期工单 ${workOrder.expected || ""}`);
+      }
       return `
-        <div class="match-status fail">当前结果未通过</div>
+        <div class="match-status ${match.yellow_error ? "warn" : "fail"}">${match.yellow_error ? "备件命中，但预期工单未召回" : "当前结果未通过"}</div>
         <div class="row-meta">${escapeHtml(lines.join("；") || "召回结果与预期不一致")}</div>
       `;
     }
@@ -6692,10 +6916,12 @@ def batch_eval_summary(result: dict[str, Any]) -> str:
     done = int(counts.get("done") or len(result.get("rows") or []))
     total = int(counts.get("total") or result.get("row_count") or done)
     passed = int(counts.get("pass") or 0)
+    warned = int(counts.get("warn") or 0)
     failed = int(counts.get("fail") or 0)
     errors = int(counts.get("error") or 0)
     status = str(result.get("status") or "running")
-    return f"{status} · {done}/{total} · 正确 {passed} · 失败 {failed} · 错误 {errors}"
+    warn_text = f" · 黄色 {warned}" if warned else ""
+    return f"{status} · {done}/{total} · 正确 {passed}{warn_text} · 失败 {failed} · 错误 {errors}"
 
 
 def max_iso_datetime(left: object, right: object) -> object:
