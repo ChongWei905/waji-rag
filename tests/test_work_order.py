@@ -71,6 +71,47 @@ class WorkOrderParserTests(unittest.TestCase):
             "客户报错机号，已做变更，数据变更申请单号:SJBG2023031100001。[2023-03-11 09:28:20]",
         )
 
+    def test_work_order_sections_require_canonical_labels(self) -> None:
+        text = """
+工单ID: WO-CANONICAL-001
+故障现象: 风扇皮带异响
+人员落实及解决方法: 检查风扇皮带张紧度，发现皮带磨损，更换后异响消失。
+备件信息:
+1. 新件备件名称: 风扇皮带
+   新件数量: 1
+   新件物料编码: 310900001
+"""
+
+        record = WorkOrderParser().parse(text, source_path=Path("sample.txt"))
+
+        self.assertIsNone(record.reported_issue)
+        self.assertIn("missing_reported_issue", record.parse_warnings)
+        self.assertEqual(record.solution, "检查风扇皮带张紧度，发现皮带磨损，更换后异响消失。")
+        self.assertEqual(len(record.parts), 1)
+        self.assertEqual(record.parts[0].part_name, "风扇皮带")
+
+    def test_canonical_work_order_labels_split_exact_sections(self) -> None:
+        text = """
+工单ID: WO-CANONICAL-002
+用户报修内容: 风扇皮带异响
+人员落实及解决方法: 检查风扇皮带张紧度，发现皮带磨损，更换后异响消失。
+备件信息:
+1. 新件备件名称: 风扇皮带
+   新件数量: 1
+   新件物料编码: 310900001
+备注: 已试机正常
+"""
+
+        record = WorkOrderParser().parse(text, source_path=Path("sample.txt"))
+
+        self.assertEqual(record.reported_issue, "风扇皮带异响")
+        self.assertEqual(record.solution, "检查风扇皮带张紧度，发现皮带磨损，更换后异响消失。")
+        self.assertEqual(record.remarks, "已试机正常")
+        self.assertEqual(len(record.parts), 1)
+        self.assertEqual(record.parts[0].part_name, "风扇皮带")
+        self.assertEqual(record.parts[0].part_code, "310900001")
+        self.assertEqual(record.parts[0].quantity, "1")
+
     def test_inline_multiple_parts_still_group_fields(self) -> None:
         parts = parse_parts(
             "备件名称: 风扇皮带; 备件编码: BELT-009; 数量: 1; "
