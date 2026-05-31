@@ -1240,6 +1240,15 @@ def build_redesigned_index_html() -> str:
     .workspace.hidden {
       display: none;
     }
+    .workspace.batch-row-mode {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .workspace.batch-row-mode .stage-rail {
+      display: none;
+    }
+    .workspace.batch-row-mode .content-grid {
+      grid-column: 1 / -1;
+    }
     .stage-rail, .panel {
       background: var(--surface);
       border: 1px solid var(--line);
@@ -2908,14 +2917,21 @@ def build_redesigned_index_html() -> str:
     }
 
     function syncBatchRetryDefaults(settings) {
-      const retrieval = (settings && settings.retrieval) || {};
+      const defaults = batchRetryDefaults(settings);
       appState.batchRetry = {
         ...appState.batchRetry,
-        topK: Number(settings && settings.topK ? settings.topK : appState.batchRetry.topK || 1),
-        workOrderCandidateTopK: Number(retrieval.work_order_candidate_top_k ?? appState.batchRetry.workOrderCandidateTopK ?? 50),
-        workOrderMinRelativeScore: Number(retrieval.work_order_min_relative_score ?? appState.batchRetry.workOrderMinRelativeScore ?? 0.45),
-        workOrderMaxHits: Number(retrieval.work_order_max_hits ?? appState.batchRetry.workOrderMaxHits ?? 10),
+        ...defaults,
         running: false
+      };
+    }
+
+    function batchRetryDefaults(settings = appState.batchEval.settings) {
+      const retrieval = (settings && settings.retrieval) || {};
+      return {
+        topK: Number(settings && settings.topK ? settings.topK : 1),
+        workOrderCandidateTopK: Number(retrieval.work_order_candidate_top_k ?? 50),
+        workOrderMinRelativeScore: Number(retrieval.work_order_min_relative_score ?? 0.45),
+        workOrderMaxHits: Number(retrieval.work_order_max_hits ?? 10)
       };
     }
 
@@ -2926,6 +2942,7 @@ def build_redesigned_index_html() -> str:
       $("batchDetailPanel").classList.toggle("hidden", !overviewOpen);
       renderShellMode();
       updateSidebarChrome();
+      renderBatchRetryPanel();
       renderBatchEvalRuns();
       renderBatchEvalResults();
       renderBatchEvalQuestionTabs();
@@ -2993,6 +3010,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalRowNumber = item.rowNumber;
       appState.activeBatchEvalRetryTaskId = null;
       appState.activeBatchEvalReplay = null;
+      syncBatchRetryDefaults(appState.batchEval.settings);
       $("query").value = item.question || "";
       resetStages("batch", "retrieval");
       renderBatchEvalPage();
@@ -3001,8 +3019,9 @@ def build_redesigned_index_html() -> str:
         renderParts([]);
         renderSelectedEvidence([]);
         $("answer").textContent = item.message || "该行没有可重现的检索任务。";
-        setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item) || "无检索任务");
-        setStatus(`已打开批量评测第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)}`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
+        setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item) || "无原始召回任务");
+        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)} · 无原始召回任务，可按当前参数重试检索。`;
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
         return;
       }
       try {
@@ -3010,13 +3029,26 @@ def build_redesigned_index_html() -> str:
         const task = data.task;
         if (!task) throw new Error(`task not found: ${item.taskId}`);
         appState.currentTaskId = task.id;
-        setBatchEvalReplayFromRetrieval(item, task.result && task.result.result ? task.result.result : task.result || {}, "历史检索");
-        renderSearchResult(task.result || {});
-        setStatus(`已重现批量评测第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)}`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
+        renderBatchOriginalRetrieval(item, task.result && task.result.result ? task.result.result : task.result || {});
+        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)} · 当前展示批量评测时的原始召回；点击重试按钮才会重新检索。`;
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行原始召回`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
       } catch (error) {
+        renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
+        renderParts([]);
+        renderSelectedEvidence([]);
         setStage("retrieval", "error", {error: String(error), row: item}, "重现检索失败");
         setStatus(String(error), "error");
       }
+    }
+
+    function renderBatchOriginalRetrieval(item, retrieval) {
+      appState.lastResult = retrieval || {};
+      resetStages("batch", "retrieval");
+      setStage("retrieval", "done", appState.lastResult, formatRetrievalSummary(appState.lastResult));
+      renderRetrievalBoard(appState.lastResult);
+      renderParts(appState.lastResult.part_candidates || []);
+      renderSelectedEvidence([]);
+      $("answer").textContent = `当前展示第 ${item.rowNumber} 行原始召回。`;
     }
 
     function batchEvalStatusText(status) {
@@ -3787,8 +3819,14 @@ def build_redesigned_index_html() -> str:
     function renderShellMode() {
       const isBatchHome = appState.activeView === "batch" && !appState.activeBatchEvalTaskId;
       const isBatchOverview = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber === null;
+      const isBatchRow = isBatchEvalRowMode();
       $("pageShell").classList.toggle("batch-home-mode", isBatchHome);
       $("workspace").classList.toggle("hidden", isBatchHome || isBatchOverview);
+      $("workspace").classList.toggle("batch-row-mode", isBatchRow);
+    }
+
+    function isBatchEvalRowMode() {
+      return appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber !== null;
     }
 
     function switchView(view) {
@@ -3914,10 +3952,11 @@ def build_redesigned_index_html() -> str:
 
     function renderVisiblePanels(stageId) {
       const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
-      const showAnswer = diagnosticView && stageId === "answer";
-      const showRetrieval = diagnosticView && stageId === "retrieval";
-      const showEvidence = diagnosticView && ["evidence_filter", "rerank"].includes(stageId);
-      const showInspector = !showAnswer && !showRetrieval && !showEvidence;
+      const batchRow = isBatchEvalRowMode();
+      const showAnswer = diagnosticView && !batchRow && stageId === "answer";
+      const showRetrieval = diagnosticView && (stageId === "retrieval" || batchRow);
+      const showEvidence = diagnosticView && !batchRow && ["evidence_filter", "rerank"].includes(stageId);
+      const showInspector = !batchRow && !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
       $("evidencePanel").classList.toggle("hidden", !showEvidence);
@@ -3947,13 +3986,13 @@ def build_redesigned_index_html() -> str:
     function renderBatchRetryControls() {
       const item = activeBatchEvalRow();
       if (appState.activeView !== "batch" || !item) return "";
-      const values = batchRetryValues();
+      const values = batchRetryStateValues();
       const retryTask = appState.activeBatchEvalRetryTaskId ? ` · 最近重试 task #${appState.activeBatchEvalRetryTaskId}` : "";
       const disabled = appState.batchRetry.running ? "disabled" : "";
       return `
           <div>
             <div class="row-title">单题调参重试</div>
-            <div class="row-meta">只重跑当前问题的检索，用于复现和比较参数效果；不会覆盖本次批量评测的原始对错结论${escapeHtml(retryTask)}。</div>
+            <div class="row-meta">默认显示本次批量评测使用的原始参数；只有点击按钮才会重跑当前问题检索，不会覆盖原始对错结论${escapeHtml(retryTask)}。</div>
           </div>
         <div class="batch-retry-controls">
           <div>
@@ -4062,22 +4101,31 @@ def build_redesigned_index_html() -> str:
     }
 
     function batchRetryValues() {
-      const settings = appState.batchEval.settings || {};
-      const retrieval = settings.retrieval || {};
+      const defaults = batchRetryDefaults();
       return {
-        topK: numericValueFromElement("batchRetryTopK", appState.batchRetry.topK ?? settings.topK ?? 1),
+        topK: numericValueFromElement("batchRetryTopK", appState.batchRetry.topK ?? defaults.topK),
         workOrderCandidateTopK: numericValueFromElement(
           "batchRetryWorkOrderCandidateTopK",
-          appState.batchRetry.workOrderCandidateTopK ?? retrieval.work_order_candidate_top_k ?? 50
+          appState.batchRetry.workOrderCandidateTopK ?? defaults.workOrderCandidateTopK
         ),
         workOrderMinRelativeScore: numericValueFromElement(
           "batchRetryWorkOrderMinRelativeScore",
-          appState.batchRetry.workOrderMinRelativeScore ?? retrieval.work_order_min_relative_score ?? 0.45
+          appState.batchRetry.workOrderMinRelativeScore ?? defaults.workOrderMinRelativeScore
         ),
         workOrderMaxHits: numericValueFromElement(
           "batchRetryWorkOrderMaxHits",
-          appState.batchRetry.workOrderMaxHits ?? retrieval.work_order_max_hits ?? 10
+          appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits
         )
+      };
+    }
+
+    function batchRetryStateValues() {
+      const defaults = batchRetryDefaults();
+      return {
+        topK: appState.batchRetry.topK ?? defaults.topK,
+        workOrderCandidateTopK: appState.batchRetry.workOrderCandidateTopK ?? defaults.workOrderCandidateTopK,
+        workOrderMinRelativeScore: appState.batchRetry.workOrderMinRelativeScore ?? defaults.workOrderMinRelativeScore,
+        workOrderMaxHits: appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits
       };
     }
 
