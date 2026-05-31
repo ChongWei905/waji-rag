@@ -70,7 +70,7 @@ _TASK_SCHEMA_LOCK = threading.Lock()
 _TASK_SCHEMA_DATABASES: set[str] = set()
 _TASK_DB_RETRY_SQLSTATES = {"40P01", "40001", "55P03"}
 _TASK_DB_MAX_ATTEMPTS = 5
-APP_CONFIG_SECTION_KEYS = ("retrieval", "embedding", "rerank", "query_parser", "llm", "answer")
+APP_CONFIG_SECTION_KEYS = ("retrieval", "embedding", "rerank", "llm", "answer")
 
 
 INDEX_HTML = f"""<!doctype html>
@@ -416,35 +416,6 @@ INDEX_HTML = f"""<!doctype html>
         <input id="rerankModel" value="qwen3-rerank">
         <label for="rerankBaseUrl">Rerank Base URL</label>
         <input id="rerankBaseUrl" value="{DEFAULT_DASHSCOPE_RERANK_BASE_URL}">
-        <label class="checkline" for="enableQueryParser">
-          <input id="enableQueryParser" type="checkbox">
-          <span>启用 LLM 问题解析</span>
-        </label>
-        <div>
-          <label for="queryParserProvider">问题解析 Provider</label>
-          <select id="queryParserProvider">
-            <option value="dashscope">DashScope</option>
-            <option value="openai">OpenAI compatible</option>
-            <option value="vllm">vLLM / local</option>
-          </select>
-        </div>
-        <div>
-          <label for="queryParserModel">问题解析模型</label>
-          <input id="queryParserModel" value="qwen3.5-plus">
-        </div>
-        <div class="full">
-          <label for="queryParserBaseUrl">问题解析 Base URL</label>
-          <input id="queryParserBaseUrl" value="__DASHSCOPE_BASE_URL__">
-        </div>
-        <div class="full">
-          <label for="queryParserNoProxyHosts">问题解析 No Proxy Hosts</label>
-          <input id="queryParserNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
-        </div>
-        <div class="full">
-          <label for="queryParserApiKey">问题解析 API Key</label>
-          <input id="queryParserApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
-        </div>
-
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
           <span>启用 LLM 答案生成</span>
@@ -2178,11 +2149,6 @@ def build_redesigned_index_html() -> str:
           <span>启用 rerank</span>
         </label>
 
-        <label class="checkline" for="enableQueryParser">
-          <input id="enableQueryParser" type="checkbox">
-          <span>启用 LLM 问题解析</span>
-        </label>
-
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
           <span>启用 LLM 答案生成</span>
@@ -2228,7 +2194,6 @@ def build_redesigned_index_html() -> str:
     ];
     const qaStageOrder = [
       ["retrieval", "多路召回", "历史工单、手册、故障码、备件证据分路召回"],
-      ["evidence_filter", "证据过滤", "按部件锚点过滤同症状但错部件的证据"],
       ["rerank", "重排", "可选 rerank；失败或关闭则保留原顺序"],
       ["answer", "答案生成", "用选中证据和备件候选生成最终答复"]
     ];
@@ -2533,7 +2498,7 @@ def build_redesigned_index_html() -> str:
       } else {
         renderRetrievalBoard(result);
         renderParts(result.part_candidates || []);
-        $("answer").textContent = "已完成检索。请查看“多路召回”和“证据过滤”。";
+        $("answer").textContent = "已完成检索。请查看“多路召回”和“阶段返回”。";
         renderSelectedEvidence([]);
       }
     }
@@ -2594,9 +2559,6 @@ def build_redesigned_index_html() -> str:
         rerank: {
           enabled: $("enableRerank").checked,
           top_n: $("evidenceTopK").value ? Number($("evidenceTopK").value) : 8
-        },
-        query_parser: {
-          enabled: $("enableQueryParser").checked
         },
         llm: {
           enabled: $("enableLlm").checked
@@ -3776,9 +3738,6 @@ def build_redesigned_index_html() -> str:
         rerank: {
           enabled: $("enableRerank").checked
         },
-        query_parser: {
-          enabled: $("enableQueryParser").checked
-        },
         llm: {
           enabled: $("enableLlm").checked
         }
@@ -3816,9 +3775,6 @@ def build_redesigned_index_html() -> str:
 
       const rerank = config.rerank || {};
       setCheckboxValue("enableRerank", rerank.enabled);
-
-      const queryParser = config.query_parser || {};
-      setCheckboxValue("enableQueryParser", queryParser.enabled);
 
       const llm = config.llm || {};
       setCheckboxValue("enableLlm", llm.enabled);
@@ -3929,7 +3885,7 @@ def build_redesigned_index_html() -> str:
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
         "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
         "batchEvalWorkOrderMaxHits", "batchEvalConcurrency",
-        "enableEmbedding", "enableRerank", "enableQueryParser", "enableLlm"
+        "enableEmbedding", "enableRerank", "enableLlm"
       ];
       for (const id of ids) {
         const element = $(id);
@@ -4128,18 +4084,14 @@ def build_redesigned_index_html() -> str:
       const batchRow = isBatchEvalRowMode();
       const showAnswer = diagnosticView && !batchRow && stageId === "answer";
       const showRetrieval = diagnosticView && (stageId === "retrieval" || batchRow);
-      const showEvidence = diagnosticView && !batchRow && ["evidence_filter", "rerank"].includes(stageId);
+      const showEvidence = diagnosticView && !batchRow && stageId === "rerank";
       const showInspector = !batchRow && !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
       $("evidencePanel").classList.toggle("hidden", !showEvidence);
       $("inspectorPanel").classList.toggle("hidden", !showInspector);
       if (showEvidence) {
-        if (stageId === "evidence_filter") {
-          renderEvidenceFilter((appState.lastResult && appState.lastResult.evidence_filter) || {});
-        } else {
-          renderSelectedEvidence((appState.lastResult && appState.lastResult.selected_evidence) || []);
-        }
+        renderSelectedEvidence((appState.lastResult && appState.lastResult.selected_evidence) || []);
       }
     }
 
@@ -4715,10 +4667,6 @@ def build_redesigned_index_html() -> str:
       renderRetrievalBoard(retrieval);
       renderSelectedEvidence(result.selected_evidence || []);
       if (result.retrieval) setStage("retrieval", "done", result.retrieval, formatRetrievalSummary(result.retrieval));
-      if (result.evidence_filter || retrieval.evidence_filter) {
-        const evidenceFilter = result.evidence_filter || retrieval.evidence_filter;
-        setStage("evidence_filter", evidenceFilter.status || "done", evidenceFilter, evidenceFilterSummary(evidenceFilter));
-      }
       if (result.rerank) setStage("rerank", result.rerank.status || "done", result.rerank, rerankSummary(result.rerank));
       if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer));
     }
@@ -4736,9 +4684,6 @@ def build_redesigned_index_html() -> str:
       appState.lastResult = result;
       resetStages(appState.activeView === "batch" ? "batch" : "qa", "retrieval");
       setStage("retrieval", "done", result, formatRetrievalSummary(result));
-      if (result.evidence_filter) {
-        setStage("evidence_filter", result.evidence_filter.status || "done", result.evidence_filter, evidenceFilterSummary(result.evidence_filter));
-      }
       renderRetrievalBoard(result);
       renderParts(result.part_candidates || []);
       $("answer").textContent = "已完成检索。请查看“多路召回”和“阶段返回”。";
@@ -4909,50 +4854,9 @@ def build_redesigned_index_html() -> str:
       }).join("");
     }
 
-    function renderEvidenceFilter(filterPayload) {
-      $("evidencePanelTitle").textContent = "证据过滤";
-      const accepted = Array.isArray(filterPayload.accepted) ? filterPayload.accepted : [];
-      const rejected = Array.isArray(filterPayload.rejected) ? filterPayload.rejected : [];
-      const constraints = filterPayload.constraints || {};
-      const renderGateItem = (item, index, decision) => {
-        if (isPartEvidence(item)) return renderPartEvidenceCard(item, index);
-        const gate = item.evidence_gate || {};
-        const reason = gate.reason || decision;
-        const componentHits = (gate.component_hits || []).join(", ");
-        const symptomHits = (gate.symptom_hits || []).join(", ");
-        return `
-          <div class="evidence-row">
-            <div class="row-title">#${index + 1} ${escapeHtml(decision)} · ${escapeHtml(item.channel || "")} · ${escapeHtml(item.title || "")}</div>
-            <div class="row-meta">reason=${escapeHtml(reason)} · doc_id=${escapeHtml(item.doc_id || "")}</div>
-            <div class="row-meta">component=${escapeHtml(componentHits || "-")} · symptom=${escapeHtml(symptomHits || "-")}</div>
-            <div class="hit-preview">${escapeHtml(item.body_preview || "")}</div>
-          </div>
-        `;
-      };
-      $("selectedEvidence").innerHTML = `
-        <div class="evidence-row">
-          <div class="row-title">${escapeHtml(filterPayload.summary || "证据过滤结果")}</div>
-          <div class="row-meta">故障短语：${escapeHtml(constraints.fault_phrase || "")}</div>
-          <div class="row-meta">部件锚点：${escapeHtml((constraints.component_terms || []).join(", ") || "-")}</div>
-          <div class="row-meta">异常词：${escapeHtml((constraints.symptom_terms || []).join(", ") || "-")}</div>
-        </div>
-        <h3>Accepted ${accepted.length}</h3>
-        ${accepted.length ? accepted.map((item, index) => renderGateItem(item, index, "accepted")).join("") : '<div class="empty">暂无接受证据</div>'}
-        <h3>Rejected ${rejected.length}</h3>
-        ${rejected.length ? rejected.map((item, index) => renderGateItem(item, index, "rejected")).join("") : '<div class="empty">暂无丢弃证据</div>'}
-      `;
-    }
-
     function formatRetrievalSummary(retrieval) {
       const channelsPayload = retrieval.channels || {};
       return `mode=${retrieval.mode || ""} · ` + channels.map(([name, label]) => `${label}:${(channelsPayload[name] || []).length}`).join(" · ");
-    }
-
-    function evidenceFilterSummary(filterPayload) {
-      if (!filterPayload) return "证据过滤未运行";
-      const accepted = Array.isArray(filterPayload.accepted) ? filterPayload.accepted.length : 0;
-      const rejected = Array.isArray(filterPayload.rejected) ? filterPayload.rejected.length : 0;
-      return `${filterPayload.status || "done"} · accepted=${accepted} · rejected=${rejected}`;
     }
 
     function rerankSummary(rerank) {
@@ -5292,7 +5196,6 @@ def build_redesigned_index_html() -> str:
       $("ingestResume").checked = true;
       $("enableEmbedding").checked = false;
       $("enableRerank").checked = false;
-      $("enableQueryParser").checked = false;
       $("enableLlm").checked = false;
       if (options.save !== false) saveConfigToLocalStorage();
       setStatus("已加载默认页面参数", "success");
@@ -6270,7 +6173,7 @@ def safe_browser_config_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     }
     if safe_retrieval:
         safe["retrieval"] = safe_retrieval
-    for section_name in ("embedding", "rerank", "query_parser", "llm"):
+    for section_name in ("embedding", "rerank", "llm"):
         section = object_payload(overrides.get(section_name)) or {}
         if "enabled" in section:
             safe[section_name] = {"enabled": bool(section["enabled"])}

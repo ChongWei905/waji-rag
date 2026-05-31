@@ -154,15 +154,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for embedding calls.",
     )
     search_db.add_argument("--enable-rerank", action="store_true", help="Reserved for full ask-db; search-db returns retrieval only.")
-    search_db.add_argument("--enable-query-parser", action="store_true", help="Enable LLM query parsing before retrieval.")
-    search_db.add_argument("--query-parser-provider", choices=["dashscope", "openai", "vllm"], help="Query parser provider.")
-    search_db.add_argument("--query-parser-model", help="Query parser model name.")
-    search_db.add_argument("--query-parser-base-url", help="Query parser API base URL.")
-    search_db.add_argument("--query-parser-api-key", help="Query parser API key. Takes precedence over env/config values.")
-    search_db.add_argument(
-        "--query-parser-no-proxy-hosts",
-        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for query parser calls.",
-    )
     search_db.add_argument("--top-k", type=int, default=8, help="Hits per channel. Defaults to 8.")
     search_db.add_argument("--out-json", help="Optional JSON output path.")
     search_db.add_argument("--debug", action="store_true", help="Include query terms and scoring settings.")
@@ -177,7 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
     ask_db.add_argument("--out-json", help="Optional JSON output path.")
     ask_db.add_argument("--enable-embedding", action="store_true", help="Enable hybrid retrieval when embeddings exist.")
     ask_db.add_argument("--enable-rerank", action="store_true", help="Enable configured reranker.")
-    ask_db.add_argument("--enable-query-parser", action="store_true", help="Enable LLM query parsing before retrieval.")
     ask_db.add_argument("--enable-llm", action="store_true", help="Enable configured LLM answer generation.")
     ask_db.add_argument("--embedding-provider", choices=["dashscope", "openai", "vllm", "command"], help="Embedding provider.")
     ask_db.add_argument("--embedding-model", help="Embedding model name.")
@@ -194,14 +184,6 @@ def build_parser() -> argparse.ArgumentParser:
     ask_db.add_argument(
         "--rerank-no-proxy-hosts",
         help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for rerank calls.",
-    )
-    ask_db.add_argument("--query-parser-provider", choices=["dashscope", "openai", "vllm"], help="Query parser provider.")
-    ask_db.add_argument("--query-parser-model", help="Query parser model name.")
-    ask_db.add_argument("--query-parser-base-url", help="Query parser API base URL.")
-    ask_db.add_argument("--query-parser-api-key", help="Query parser API key. Takes precedence over env/config values.")
-    ask_db.add_argument(
-        "--query-parser-no-proxy-hosts",
-        help="Comma-separated hosts, domains, or CIDR ranges that should bypass proxies for query parser calls.",
     )
     ask_db.add_argument("--llm-provider", choices=["dashscope", "openai", "vllm"], help="LLM provider.")
     ask_db.add_argument("--llm-model", help="LLM model name.")
@@ -460,22 +442,6 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict[str, object]:
         rerank["no_proxy_hosts"] = args.rerank_no_proxy_hosts
     if rerank:
         overrides["rerank"] = rerank
-
-    query_parser: dict[str, object] = {}
-    if getattr(args, "enable_query_parser", False):
-        query_parser["enabled"] = True
-    if getattr(args, "query_parser_provider", None):
-        query_parser["provider"] = args.query_parser_provider
-    if getattr(args, "query_parser_model", None):
-        query_parser["model"] = args.query_parser_model
-    if getattr(args, "query_parser_base_url", None):
-        query_parser["base_url"] = args.query_parser_base_url
-    if getattr(args, "query_parser_api_key", None):
-        query_parser["api_key"] = args.query_parser_api_key
-    if getattr(args, "query_parser_no_proxy_hosts", None):
-        query_parser["no_proxy_hosts"] = args.query_parser_no_proxy_hosts
-    if query_parser:
-        overrides["query_parser"] = query_parser
 
     llm: dict[str, object] = {}
     if getattr(args, "enable_llm", False):

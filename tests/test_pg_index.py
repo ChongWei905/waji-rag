@@ -2,25 +2,17 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
-from waji_rag.config import AppConfig, EmbeddingConfig, QueryParserConfig
-from waji_rag.llm import QueryParseResult
+from waji_rag.config import AppConfig, EmbeddingConfig
 from waji_rag.pg_index import (
     APPLICATION_DATA_TABLES,
     PgIngestReport,
     RetrievalHit,
     build_documents_for_work_order,
-    build_query_constraints,
     bulk_insert_rows,
     clear_application_data_with_cursor,
-    filter_evidence_for_answer,
     filter_work_order_hits_by_threshold,
-    filter_part_candidates_by_evidence,
     fetch_part_candidates,
-    prioritize_hits_by_constraints,
-    query_constraints_from_llm_payload,
-    resolve_query_constraints,
     store_embedding_batch,
     unique_terms,
     vector_literal,
@@ -116,122 +108,6 @@ class PgIndexHelpersTests(unittest.TestCase):
 
         self.assertEqual(cursor.executemany_calls, [("INSERT INTO demo_table(value) VALUES (%s)", [("a",), ("b",)])])
 
-    def test_evidence_filter_rejects_same_symptom_wrong_component(self) -> None:
-        constraints = build_query_constraints("用户报修机器风扇皮带异响，请回答可能原因")
-        evidence_items = [
-            {
-                "channel": "manual_typical_faults",
-                "doc_id": "manual:fan",
-                "title": "风扇皮带异响",
-                "body_preview": "风扇皮带松动会出现尖叫声。",
-            },
-            {
-                "channel": "manual_typical_faults",
-                "doc_id": "manual:aircon",
-                "title": "空调有异响",
-                "body_preview": "空调压缩机或鼓风机异常声音。",
-            },
-            {
-                "channel": "manual_typical_faults",
-                "doc_id": "manual:belt",
-                "title": "发动机皮带异响",
-                "body_preview": "发动机附件皮带松动会产生尖叫声。",
-            },
-        ]
-
-        result = filter_evidence_for_answer(
-            query="用户报修机器风扇皮带异响，请回答可能原因",
-            evidence_items=evidence_items,
-            constraints=constraints,
-        )
-
-        self.assertEqual([item["doc_id"] for item in result["accepted"]], ["manual:fan"])
-        self.assertEqual([item["doc_id"] for item in result["rejected"]], ["manual:aircon", "manual:belt"])
-        self.assertEqual(result["rejected"][0]["evidence_gate"]["reason"], "missing_strict_component_anchor")
-        self.assertEqual(result["rejected"][1]["evidence_gate"]["component_hits"], ["皮带"])
-
-    def test_query_constraints_from_llm_payload_keeps_explicit_anchors_only(self) -> None:
-        fallback = build_query_constraints("用户报修机器风扇皮带异响，请回答可能原因")
-
-        constraints = query_constraints_from_llm_payload(
-            "用户报修机器风扇皮带异响，请回答可能原因",
-            ["风扇", "皮带", "异响"],
-            {
-                "fault_phrase": "风扇皮带异响",
-                "component_text": "风扇皮带",
-                "component_terms": ["风扇皮带", "发动机附件轮系", "风扇", "皮带"],
-                "required_component_terms": ["风扇", "皮带"],
-                "symptom_terms": ["异响", "噪声"],
-            },
-            fallback=fallback,
-        )
-
-        self.assertEqual(constraints.fault_phrase, "风扇皮带异响")
-        self.assertEqual(constraints.component_text, "风扇皮带")
-        self.assertEqual(constraints.component_terms, ["风扇皮带", "风扇", "皮带"])
-        self.assertEqual(constraints.required_component_terms, ["风扇", "皮带"])
-        self.assertEqual(constraints.symptom_terms, ["异响"])
-
-    def test_resolve_query_constraints_uses_llm_when_available(self) -> None:
-        config = AppConfig(
-            query_parser=QueryParserConfig(
-                enabled=True,
-                provider="vllm",
-                model="demo-chat",
-                base_url="http://127.0.0.1:9999/v1",
-            )
-        )
-        events: list[dict[str, object]] = []
-
-        with patch("waji_rag.pg_index.parse_diagnostic_query_constraints") as parser:
-            parser.return_value = QueryParseResult(
-                payload={
-                    "fault_phrase": "风扇皮带异响",
-                    "component_text": "风扇皮带",
-                    "component_terms": ["风扇皮带", "风扇", "皮带"],
-                    "required_component_terms": ["风扇", "皮带"],
-                    "symptom_terms": ["异响"],
-                },
-                debug={"usage": {"total_tokens": 12}},
-            )
-
-            constraints = resolve_query_constraints("用户报修机器风扇皮带异响", ["风扇", "皮带", "异响"], config, events)
-
-        self.assertEqual(constraints.component_terms, ["风扇皮带", "风扇", "皮带"])
-        self.assertEqual(events[0]["status"], "ok")
-        self.assertEqual(events[0]["mode"], "llm")
-
-    def test_prioritize_hits_by_constraints_prefers_component_anchor(self) -> None:
-        constraints = build_query_constraints("风扇皮带异响")
-        hits = [
-            RetrievalHit(
-                document_id=1,
-                doc_id="aircon",
-                doc_type="manual_typical_fault",
-                title="空调有异响",
-                score=10.0,
-                body_preview="空调出风口有异常声音。",
-                work_order_id=None,
-                source_path="空调系统/故障现象：空调有异响.html",
-                metadata={},
-            ),
-            RetrievalHit(
-                document_id=2,
-                doc_id="fan",
-                doc_type="manual_typical_fault",
-                title="风扇皮带异响",
-                score=5.0,
-                body_preview="风扇皮带张紧不足会产生异响。",
-                work_order_id=None,
-                source_path="动力系统/故障现象：风扇皮带异响.html",
-                metadata={},
-            ),
-        ]
-
-        prioritized = prioritize_hits_by_constraints(hits, constraints, top_k=1)
-
-        self.assertEqual(prioritized[0].doc_id, "fan")
-
     def test_filter_work_order_hits_uses_relative_threshold_without_forcing_top_k(self) -> None:
         hits = [
             RetrievalHit(
@@ -291,30 +167,6 @@ class PgIndexHelpersTests(unittest.TestCase):
         self.assertEqual([part["part_code"] for part in parts], ["PB-001", "TN-002", "PL-003", "BT-004"])
         self.assertTrue(all(part["doc_type"] == "part_evidence" for part in parts))
         self.assertTrue(all(part["channel"] == "part_evidence" for part in parts))
-
-    def test_filter_part_candidates_requires_accepted_work_order_id(self) -> None:
-        part_candidates = [
-            {"work_order_id": "WO-001", "part_name": "风扇皮带", "part_code": "PB-001"},
-            {"work_order_id": "WO-002", "part_name": "空调压缩机", "part_code": "AC-001"},
-        ]
-
-        filtered = filter_part_candidates_by_evidence(
-            part_candidates,
-            {
-                "accepted": [
-                    {"channel": "manual_typical_faults", "title": "风扇皮带异响"},
-                    {"channel": "work_orders", "work_order_id": "WO-001", "title": "风扇皮带异响"},
-                ]
-            },
-        )
-        no_work_order = filter_part_candidates_by_evidence(
-            part_candidates,
-            {"accepted": [{"channel": "manual_typical_faults", "title": "风扇皮带异响"}]},
-        )
-
-        self.assertEqual([part["part_code"] for part in filtered], ["PB-001"])
-        self.assertEqual(no_work_order, [])
-
 
 class FakeCursor:
     def __init__(self) -> None:

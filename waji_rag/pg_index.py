@@ -33,7 +33,6 @@ from waji_rag.llm import (
     DashScopeRerankClient,
     build_fallback_answer,
     generate_diagnostic_answer,
-    parse_diagnostic_query_constraints,
 )
 from waji_rag.work_order import WorkOrderParser, WorkOrderRecord, iter_txt_files
 
@@ -46,87 +45,6 @@ DEFAULT_BM25_BATCH_TERM_ROWS = 100_000
 DEFAULT_SOURCE_CHECKPOINT_FILES = 50
 MANUAL_SUFFIXES = {".html", ".htm", ".md", ".markdown"}
 FAULT_CODE_IN_QUERY = re.compile(r"\b[A-Za-z]\d{3,}[A-Za-z0-9_-]*\b")
-FAULT_PHRASE_SPLIT_PATTERN = re.compile(r"请|回答|如何|怎么|有哪些|哪些|相应|需要|（|\(")
-QUERY_LABEL_PATTERN = re.compile(r"^(问题|用户问题|用户报修内容|报修内容)\s*[:：]?\s*")
-REPORT_PREFIX_PATTERN = re.compile(r"^(用户|客户|司机)?\s*(报修|保修|反馈|反映)\s*(机器|设备|挖机|挖掘机|该机)?\s*")
-LEADING_MACHINE_PATTERN = re.compile(r"^(机器|设备|挖机|挖掘机|该机|车辆|车)\s*")
-SYMPTOM_TERMS = {
-    "异响",
-    "噪声",
-    "噪音",
-    "响声",
-    "尖叫",
-    "尖叫声",
-    "异常声音",
-    "摩擦声",
-    "慢",
-    "单边慢",
-    "无力",
-    "高温",
-    "漏油",
-    "渗油",
-    "报警",
-    "报错",
-    "开裂",
-    "损坏",
-    "不制冷",
-    "不启动",
-    "不起动",
-    "不工作",
-    "不动作",
-    "无法动作",
-    "无法行走",
-}
-GENERIC_QUERY_TERMS = {
-    "用户",
-    "客户",
-    "司机",
-    "报修",
-    "保修",
-    "反馈",
-    "机器",
-    "设备",
-    "挖机",
-    "挖掘机",
-    "该机",
-    "故障",
-    "原因",
-    "可能",
-    "导致",
-    "如何",
-    "解决",
-    "需要",
-    "更换",
-    "备件",
-    "详细",
-    "信息",
-    "编号",
-    "名称",
-    "编码",
-    "数量",
-}
-COMMON_COMPONENT_TERMS = {
-    "风扇",
-    "皮带",
-    "发动机",
-    "张紧轮",
-    "皮带轮",
-    "空调",
-    "压缩机",
-    "鼓风机",
-    "行走",
-    "马达",
-    "主泵",
-    "液压",
-    "动臂",
-    "斗杆",
-    "铲斗",
-    "油缸",
-    "回转",
-    "电瓶",
-    "发电机",
-    "gps",
-}
 APPLICATION_DATA_TABLES = (
     "rag_tasks",
     "document_embeddings",
@@ -289,22 +207,6 @@ class RetrievalHit:
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable hit dictionary."""
-
-        return asdict(self)
-
-
-@dataclass(slots=True)
-class QueryConstraints:
-    """Deterministic evidence constraints parsed from a diagnostic query."""
-
-    fault_phrase: str
-    component_text: str
-    component_terms: list[str]
-    required_component_terms: list[str]
-    symptom_terms: list[str]
-
-    def to_dict(self) -> dict[str, object]:
-        """Return a JSON-serializable constraints payload."""
 
         return asdict(self)
 
@@ -959,7 +861,6 @@ class PgRetriever:
         effective_mode = self.config.retrieval_mode()
         retrieval_events: list[dict[str, object]] = []
         terms = unique_terms(tokenize_text(query))
-        constraints = resolve_query_constraints(query, terms, self.config, retrieval_events)
         channels: dict[str, list[RetrievalHit]] = {}
         with connect(self.database.database_url) as conn:
             with conn.cursor() as cur:
@@ -971,7 +872,6 @@ class PgRetriever:
                     doc_types=["work_order"],
                     mode=effective_mode,
                     channel_name="work_orders",
-                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 typical_hits = self._search_channel(
@@ -982,7 +882,6 @@ class PgRetriever:
                     doc_types=["manual_typical_fault"],
                     mode=effective_mode,
                     channel_name="manual_typical_faults",
-                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 fault_code_hits = self._search_fault_code_channel(
@@ -991,7 +890,6 @@ class PgRetriever:
                     terms,
                     top_k=top_k,
                     mode=effective_mode,
-                    constraints=constraints,
                     debug_events=retrieval_events,
                 )
                 retrieval_events.append(
@@ -1035,13 +933,6 @@ class PgRetriever:
                 "work_order_hit_count": len(channels.get("work_orders", [])),
             },
         }
-        evidence_filter = filter_evidence_for_answer(
-            query=query,
-            evidence_items=flatten_evidence(payload, limit=max(self.config.answer.evidence_top_k, top_k, 1) * 4),
-            constraints=constraints,
-        )
-        payload["evidence_filter"] = evidence_filter
-        payload["filtered_part_candidates"] = filter_part_candidates_by_evidence(part_candidates, evidence_filter)
         fallback_events = [event for event in retrieval_events if event.get("status") == "fallback"]
         if fallback_events:
             payload["warnings"] = [
@@ -1050,7 +941,6 @@ class PgRetriever:
         if include_debug:
             payload["debug"] = {
                 "query_terms": terms,
-                "query_constraints": constraints.to_dict(),
                 "bm25": {"k1": DEFAULT_BM25_K1, "b": DEFAULT_BM25_B, "field_weights": FIELD_WEIGHTS},
                 "embedding_enabled": self.config.embedding.is_available(),
                 "retrieval_events": retrieval_events,
@@ -1066,7 +956,6 @@ class PgRetriever:
         *,
         top_k: int,
         mode: str,
-        constraints: QueryConstraints,
         debug_events: list[dict[str, object]],
     ) -> list[RetrievalHit]:
         codes = [code.upper() for code in FAULT_CODE_IN_QUERY.findall(query)]
@@ -1082,7 +971,6 @@ class PgRetriever:
                 doc_types=["manual_fault_code"],
                 mode=mode,
                 channel_name="manual_fault_codes",
-                constraints=constraints,
                 debug_events=debug_events,
             )
         return []
@@ -1097,7 +985,6 @@ class PgRetriever:
         doc_types: list[str],
         mode: str,
         channel_name: str,
-        constraints: QueryConstraints,
         debug_events: list[dict[str, object]],
     ) -> list[RetrievalHit]:
         candidate_top_k = max(top_k, self.config.retrieval.bm25_top_k)
@@ -1111,7 +998,6 @@ class PgRetriever:
         if mode != "hybrid" or self.embedding_provider is None:
             return self._finalize_channel_hits(
                 bm25_hits,
-                constraints=constraints,
                 top_k=top_k,
                 candidate_top_k=candidate_top_k,
                 channel_name=channel_name,
@@ -1132,7 +1018,6 @@ class PgRetriever:
             )
             return self._finalize_channel_hits(
                 bm25_hits,
-                constraints=constraints,
                 top_k=top_k,
                 candidate_top_k=candidate_top_k,
                 channel_name=channel_name,
@@ -1159,7 +1044,6 @@ class PgRetriever:
             )
             return self._finalize_channel_hits(
                 bm25_hits,
-                constraints=constraints,
                 top_k=top_k,
                 candidate_top_k=candidate_top_k,
                 channel_name=channel_name,
@@ -1182,7 +1066,6 @@ class PgRetriever:
         )
         return self._finalize_channel_hits(
             merged_hits,
-            constraints=constraints,
             top_k=top_k,
             candidate_top_k=candidate_top_k,
             channel_name=channel_name,
@@ -1193,7 +1076,6 @@ class PgRetriever:
         self,
         hits: list[RetrievalHit],
         *,
-        constraints: QueryConstraints,
         top_k: int,
         candidate_top_k: int,
         channel_name: str,
@@ -1202,21 +1084,20 @@ class PgRetriever:
         """Apply channel-specific final ranking and limits."""
 
         if channel_name != "work_orders":
-            return prioritize_hits_by_constraints(hits, constraints, top_k=top_k)
+            return hits[:top_k]
 
-        prioritized = prioritize_hits_by_constraints(hits, constraints, top_k=len(hits))
         filtered = filter_work_order_hits_by_threshold(
-            prioritized,
+            hits,
             min_relative_score=self.config.retrieval.work_order_min_relative_score,
             max_hits=self.config.retrieval.work_order_max_hits,
         )
-        top_score = prioritized[0].score if prioritized else 0.0
+        top_score = hits[0].score if hits else 0.0
         debug_events.append(
             {
                 "channel": "work_orders",
                 "stage": "threshold_filter",
                 "status": "ok",
-                "candidate_count": len(prioritized),
+                "candidate_count": len(hits),
                 "returned_count": len(filtered),
                 "candidate_top_k": candidate_top_k,
                 "top_score": round(top_score, 6),
@@ -1246,7 +1127,6 @@ class RagPipeline:
         retriever = PgRetriever(self.database, self.config)
         retrieve_started_at = time.time()
         retrieval = retriever.retrieve(query, top_k=top_k, include_debug=include_debug)
-        evidence_filter = object_payload_or_empty(retrieval.get("evidence_filter"))
         trace.append(
             stage_event(
                 "retrieval",
@@ -1260,27 +1140,8 @@ class RagPipeline:
             )
         )
 
-        evidence_items = list_payload(evidence_filter.get("accepted"))
-        if not evidence_items:
-            evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
-        trace.append(
-            stage_event(
-                "evidence_filter",
-                str(evidence_filter.get("status") or "ok"),
-                {
-                    "summary": evidence_filter.get("summary"),
-                    "accepted_count": len(list_payload(evidence_filter.get("accepted"))),
-                    "rejected_count": len(list_payload(evidence_filter.get("rejected"))),
-                    "constraints": evidence_filter.get("constraints") or {},
-                },
-            )
-        )
-        filtered_part_candidates = retrieval.get("filtered_part_candidates")
-        part_candidates = (
-            list_payload(filtered_part_candidates)
-            if isinstance(filtered_part_candidates, list)
-            else list_payload(retrieval.get("part_candidates"))
-        )
+        evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
+        part_candidates = list_payload(retrieval.get("part_candidates"))
         rerank_payload = self._rerank(query, evidence_items, trace)
         selected_evidence = list(rerank_payload.get("evidence") or evidence_items)
         answer_payload = self._answer(query, selected_evidence, part_candidates, trace)
@@ -1288,7 +1149,6 @@ class RagPipeline:
             "query": query,
             "answer": answer_payload,
             "retrieval": retrieval,
-            "evidence_filter": evidence_filter,
             "rerank": {
                 "enabled": self.config.rerank.enabled,
                 "available": self.config.rerank.is_available(),
@@ -2697,272 +2557,6 @@ def collect_work_order_ids(*hit_groups: list[RetrievalHit]) -> list[str]:
     return ids
 
 
-def build_query_constraints(query: str, terms: list[str] | None = None) -> QueryConstraints:
-    """Extract high-precision component and symptom anchors from a diagnostic query."""
-
-    fault_phrase = extract_fault_phrase(query)
-    symptom_terms = extract_symptom_terms(fault_phrase or query)
-    component_text = strip_symptom_terms(fault_phrase, symptom_terms)
-    required_component_terms = extract_required_component_terms(component_text)
-    component_terms = extract_component_terms(
-        component_text,
-        terms or unique_terms(tokenize_text(query)),
-        required_component_terms=required_component_terms,
-    )
-    return QueryConstraints(
-        fault_phrase=fault_phrase,
-        component_text=component_text,
-        component_terms=component_terms,
-        required_component_terms=required_component_terms,
-        symptom_terms=symptom_terms,
-    )
-
-
-def resolve_query_constraints(
-    query: str,
-    terms: list[str],
-    config: AppConfig,
-    retrieval_events: list[dict[str, object]],
-) -> QueryConstraints:
-    """Resolve query constraints through LLM parsing with deterministic fallback."""
-
-    fallback = build_query_constraints(query, terms)
-    parser_config = config.query_parser
-    if not parser_config.enabled:
-        retrieval_events.append(
-            {
-                "channel": "query_parser",
-                "stage": "constraints",
-                "status": "fallback",
-                "mode": "rules",
-                "reason": "query_parser_disabled",
-                "constraints": fallback.to_dict(),
-            }
-        )
-        return fallback
-    if not parser_config.is_available():
-        retrieval_events.append(
-            {
-                "channel": "query_parser",
-                "stage": "constraints",
-                "status": "fallback",
-                "mode": "rules",
-                "reason": "missing_query_parser_config",
-                "constraints": fallback.to_dict(),
-            }
-        )
-        return fallback
-    try:
-        started_at = time.time()
-        result = parse_diagnostic_query_constraints(query=query, config=parser_config)
-        constraints = query_constraints_from_llm_payload(query, terms, result.payload, fallback=fallback)
-        retrieval_events.append(
-            {
-                "channel": "query_parser",
-                "stage": "constraints",
-                "status": "ok",
-                "mode": "llm",
-                "model": parser_config.model,
-                "elapsed_ms": elapsed_ms(started_at),
-                "constraints": constraints.to_dict(),
-                "usage": result.debug.get("usage"),
-            }
-        )
-        return constraints
-    except Exception as exc:  # noqa: BLE001 - query parsing must not block retrieval.
-        retrieval_events.append(
-            {
-                "channel": "query_parser",
-                "stage": "constraints",
-                "status": "fallback",
-                "mode": "rules",
-                "reason": f"{type(exc).__name__}: {exc}",
-                "constraints": fallback.to_dict(),
-            }
-        )
-        return fallback
-
-
-def query_constraints_from_llm_payload(
-    query: str,
-    terms: list[str],
-    payload: dict[str, object],
-    *,
-    fallback: QueryConstraints | None = None,
-) -> QueryConstraints:
-    """Build safe query constraints from an LLM JSON payload."""
-
-    fallback_constraints = fallback or build_query_constraints(query, terms)
-    fault_phrase = clean_string(payload.get("fault_phrase")) or fallback_constraints.fault_phrase
-    component_text = clean_string(
-        payload.get("component_text")
-        or payload.get("component")
-        or payload.get("component_anchor")
-        or payload.get("部件锚点")
-    )
-    raw_component_terms = string_list_payload(
-        payload.get("component_terms")
-        or payload.get("component_anchors")
-        or payload.get("components")
-    )
-    raw_required_terms = string_list_payload(payload.get("required_component_terms"))
-    raw_symptom_terms = string_list_payload(
-        payload.get("symptom_terms")
-        or payload.get("abnormal_terms")
-        or payload.get("异常词")
-    )
-    source_text = normalize_for_gate(join_text([query, fault_phrase, component_text]))
-    component_terms = safe_llm_terms(raw_component_terms, source_text)
-    symptom_terms = safe_llm_terms(raw_symptom_terms, source_text)
-    if not component_text and component_terms:
-        component_text = component_terms[0]
-    if not symptom_terms:
-        symptom_terms = fallback_constraints.symptom_terms
-    required_component_terms = safe_llm_terms(raw_required_terms, source_text)
-    if not required_component_terms:
-        required_component_terms = extract_required_component_terms(component_text)
-    if not component_terms:
-        component_terms = extract_component_terms(
-            component_text or fallback_constraints.component_text,
-            terms,
-            required_component_terms=required_component_terms,
-        )
-    component_terms = unique_terms(
-        term
-        for term in component_terms
-        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
-    )[:12]
-    required_component_terms = unique_terms(
-        term
-        for term in required_component_terms
-        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
-    )[:8]
-    return QueryConstraints(
-        fault_phrase=fault_phrase,
-        component_text=component_text or fallback_constraints.component_text,
-        component_terms=component_terms or fallback_constraints.component_terms,
-        required_component_terms=required_component_terms or fallback_constraints.required_component_terms,
-        symptom_terms=unique_terms(symptom_terms)[:8],
-    )
-
-
-def string_list_payload(value: object) -> list[str]:
-    """Return a clean string list from model JSON payload values."""
-
-    if isinstance(value, str):
-        return [value]
-    if not isinstance(value, list):
-        return []
-    return [clean_string(item) for item in value if clean_string(item)]
-
-
-def safe_llm_terms(terms: list[str], source_text: str) -> list[str]:
-    """Keep only LLM terms explicitly anchored in the original question text."""
-
-    safe_terms: list[str] = []
-    for term in terms:
-        normalized = normalize_for_gate(term)
-        if len(normalized) >= 2 and normalized in source_text:
-            safe_terms.append(normalized)
-    return unique_terms(safe_terms)
-
-
-def extract_fault_phrase(query: str) -> str:
-    """Return the most likely user-reported fault phrase from a full question."""
-
-    normalized = clean_string(query)
-    if not normalized:
-        return ""
-    fragment = FAULT_PHRASE_SPLIT_PATTERN.split(normalized, maxsplit=1)[0]
-    fragment = QUERY_LABEL_PATTERN.sub("", fragment).strip()
-    fragment = REPORT_PREFIX_PATTERN.sub("", fragment).strip()
-    fragment = LEADING_MACHINE_PATTERN.sub("", fragment).strip()
-    fragment = fragment.strip(" :：，,。；;")
-    return fragment or normalized
-
-
-def extract_symptom_terms(text: str) -> list[str]:
-    """Return known symptom words that appear in the query phrase."""
-
-    normalized = normalize_for_gate(text)
-    terms = [term for term in sorted(SYMPTOM_TERMS, key=len, reverse=True) if term in normalized]
-    return unique_terms(terms)
-
-
-def strip_symptom_terms(text: str, symptom_terms: list[str]) -> str:
-    """Remove known symptom terms from a fault phrase to leave likely components."""
-
-    component_text = normalize_for_gate(text)
-    for term in sorted(symptom_terms, key=len, reverse=True):
-        component_text = component_text.replace(term, "")
-    component_text = REPORT_PREFIX_PATTERN.sub("", component_text).strip()
-    component_text = LEADING_MACHINE_PATTERN.sub("", component_text).strip()
-    return component_text.strip(" :：，,。；;")
-
-
-def extract_required_component_terms(component_text: str) -> list[str]:
-    """Return component terms that must match together for composite components."""
-
-    normalized_component = normalize_for_gate(component_text)
-    if len(normalized_component) < 2:
-        return []
-    known_terms = sorted(
-        (term for term in COMMON_COMPONENT_TERMS if term in normalized_component),
-        key=lambda term: (normalized_component.find(term), -len(term)),
-    )
-    if known_terms:
-        return unique_terms(known_terms)
-    return unique_terms(tokenize_text(normalized_component))[:2]
-
-
-def extract_component_terms(
-    component_text: str,
-    fallback_terms: list[str],
-    *,
-    required_component_terms: list[str],
-) -> list[str]:
-    """Return component anchor terms that should dominate evidence filtering."""
-
-    terms: list[str] = []
-    normalized_component = normalize_for_gate(component_text)
-    if len(normalized_component) >= 2:
-        terms.append(normalized_component)
-        terms.extend(required_component_terms or tokenize_text(normalized_component))
-    if not terms:
-        terms.extend(fallback_terms)
-    return unique_terms(
-        term
-        for term in terms
-        if len(term) >= 2 and term not in SYMPTOM_TERMS and term not in GENERIC_QUERY_TERMS
-    )[:12]
-
-
-def normalize_for_gate(value: object) -> str:
-    """Normalize text for deterministic evidence gate substring checks."""
-
-    return re.sub(r"\s+", "", clean_string(value).lower())
-
-
-def prioritize_hits_by_constraints(
-    hits: list[RetrievalHit],
-    constraints: QueryConstraints,
-    *,
-    top_k: int,
-) -> list[RetrievalHit]:
-    """Prefer hits that mention component anchors before applying the final limit."""
-
-    if not constraints.component_terms:
-        return hits[:top_k]
-
-    def sort_key(hit: RetrievalHit) -> tuple[int, int, float, int]:
-        match = match_query_constraints(hit_filter_text(hit), constraints)
-        has_component = bool(match["strict_component_match"])
-        has_symptom = bool(match["symptom_hits"])
-        return (0 if has_component else 1, 0 if has_symptom else 1, -hit.score, hit.document_id)
-
-    return sorted(hits, key=sort_key)[:top_k]
-
-
 def filter_work_order_hits_by_threshold(
     hits: list[RetrievalHit],
     *,
@@ -2979,146 +2573,6 @@ def filter_work_order_hits_by_threshold(
     safe_relative_score = min(max(float(min_relative_score), 0.0), 1.0)
     score_threshold = top_score * safe_relative_score
     return [hit for hit in hits if hit.score >= score_threshold][:max_hits]
-
-
-def filter_evidence_for_answer(
-    *,
-    query: str,
-    evidence_items: list[dict[str, object]],
-    constraints: QueryConstraints | None = None,
-) -> dict[str, object]:
-    """Split retrieved evidence into accepted and rejected items before rerank/answer."""
-
-    active_constraints = constraints or build_query_constraints(query)
-    decorated: list[dict[str, object]] = []
-    for item in evidence_items:
-        text = evidence_item_filter_text(item)
-        match = match_query_constraints(text, active_constraints)
-        decorated_item = dict(item)
-        decorated_item["evidence_gate"] = match
-        decorated.append(decorated_item)
-
-    component_required = bool(active_constraints.component_terms)
-    component_supported = component_required and any(item["evidence_gate"]["strict_component_match"] for item in decorated)
-    accepted: list[dict[str, object]] = []
-    rejected: list[dict[str, object]] = []
-    for item in decorated:
-        gate = dict(item.get("evidence_gate") or {})
-        if not component_required:
-            gate["decision"] = "accepted"
-            gate["reason"] = "no_component_anchor"
-            item["evidence_gate"] = gate
-            accepted.append(item)
-        elif not component_supported:
-            gate["decision"] = "accepted"
-            gate["reason"] = "no_component_supported_in_retrieval"
-            item["evidence_gate"] = gate
-            accepted.append(item)
-        elif gate.get("strict_component_match"):
-            gate["decision"] = "accepted"
-            gate["reason"] = "strict_component_anchor_matched"
-            item["evidence_gate"] = gate
-            accepted.append(item)
-        else:
-            gate["decision"] = "rejected"
-            gate["reason"] = "missing_strict_component_anchor"
-            item["evidence_gate"] = gate
-            rejected.append(item)
-
-    status = "ok" if not rejected else "filtered"
-    return {
-        "status": status,
-        "query": query,
-        "constraints": active_constraints.to_dict(),
-        "component_supported": component_supported,
-        "summary": f"accepted={len(accepted)}, rejected={len(rejected)}",
-        "accepted": accepted,
-        "rejected": rejected,
-    }
-
-
-def match_query_constraints(text: str, constraints: QueryConstraints) -> dict[str, object]:
-    """Return component and symptom anchor matches for one evidence text."""
-
-    normalized = normalize_for_gate(text)
-    token_set = set(tokenize_text(text))
-    component_hits = [
-        term for term in constraints.component_terms if term and (term in normalized or term in token_set)
-    ]
-    required_hits = [
-        term for term in constraints.required_component_terms if term and (term in normalized or term in token_set)
-    ]
-    symptom_hits = [
-        term for term in constraints.symptom_terms if term and (term in normalized or term in token_set)
-    ]
-    full_component_match = bool(constraints.component_text and normalize_for_gate(constraints.component_text) in normalized)
-    required_component_match = bool(
-        constraints.required_component_terms
-        and len(unique_terms(required_hits)) >= len(unique_terms(constraints.required_component_terms))
-    )
-    return {
-        "component_hits": unique_terms(component_hits),
-        "required_component_hits": unique_terms(required_hits),
-        "strict_component_match": full_component_match or required_component_match,
-        "symptom_hits": unique_terms(symptom_hits),
-    }
-
-
-def hit_filter_text(hit: RetrievalHit) -> str:
-    """Build searchable text for filtering one retrieval hit."""
-
-    return join_text(
-        [
-            hit.title,
-            hit.body_preview,
-            hit.source_path,
-            metadata_filter_text(hit.metadata),
-        ]
-    )
-
-
-def evidence_item_filter_text(item: dict[str, object]) -> str:
-    """Build searchable text for filtering one flattened evidence item."""
-
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    return join_text(
-        [
-            item.get("title"),
-            item.get("body_preview"),
-            item.get("source_path"),
-            metadata_filter_text(metadata),
-        ]
-    )
-
-
-def metadata_filter_text(metadata: dict[str, object]) -> str:
-    """Return compact metadata text useful for evidence gating."""
-
-    keys = ("fault_title", "fault_description", "file_name", "system_dir", "manual_section", "part_name", "part_code")
-    return join_text(metadata.get(key) for key in keys)
-
-
-def filter_part_candidates_by_evidence(
-    part_candidates: list[dict[str, object]],
-    evidence_filter: dict[str, object],
-) -> list[dict[str, object]]:
-    """Keep only part candidates tied to accepted work-order evidence."""
-
-    accepted = list_payload(evidence_filter.get("accepted"))
-    accepted_ids = {
-        str(item.get("work_order_id"))
-        for item in accepted
-        if isinstance(item, dict) and item.get("work_order_id")
-    }
-    if not accepted_ids:
-        return []
-    return [part for part in part_candidates if str(part.get("work_order_id")) in accepted_ids]
-
-
-def object_payload_or_empty(value: object) -> dict[str, object]:
-    """Return a dict payload or an empty dict."""
-
-    return value if isinstance(value, dict) else {}
 
 
 def list_payload(value: object) -> list[dict[str, object]]:

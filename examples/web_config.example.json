@@ -20,13 +20,6 @@
     "base_url": "https://dashscope.aliyuncs.com/compatible-api/v1",
     "api_key_env": "DOCARBOR_RERANK_API_KEY"
   },
-  "query_parser": {
-    "enabled": false,
-    "provider": "dashscope",
-    "model": "qwen3.5-plus",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "api_key_env": "DOCARBOR_QUERY_PARSER_API_KEY"
-  },
   "llm": {
     "enabled": false,
     "provider": "dashscope",

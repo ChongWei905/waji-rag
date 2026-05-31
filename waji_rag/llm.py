@@ -7,7 +7,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from waji_rag.config import LLMConfig, RerankConfig
@@ -20,14 +20,6 @@ class ModelCallResult:
     """One model call result with lightweight diagnostics."""
 
     text: str
-    debug: dict[str, object]
-
-
-@dataclass(slots=True)
-class QueryParseResult:
-    """Structured query parse payload returned by the LLM."""
-
-    payload: dict[str, object]
     debug: dict[str, object]
 
 
@@ -182,68 +174,6 @@ def generate_diagnostic_answer(
     if not result.text:
         result.text = build_fallback_answer(query=query, evidence_items=evidence_items, part_candidates=part_candidates)
     return result
-
-
-def parse_diagnostic_query_constraints(*, query: str, config: LLMConfig) -> QueryParseResult:
-    """Parse a diagnostic query into fault phrase, component anchors, and symptom terms."""
-
-    parser_config = replace(config, temperature=0.0, max_tokens=max(300, min(config.max_tokens, 700)))
-    client = OpenAICompatibleChatClient(parser_config)
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是挖掘机售后诊断问题解析器。"
-                "只做原始问题解析，不做术语标准化、不推断系统、不扩展同义词。"
-                "你必须只输出一个 JSON 对象，不要 Markdown，不要解释。"
-                "JSON schema: {"
-                "\"fault_phrase\": string, "
-                "\"component_text\": string, "
-                "\"component_terms\": string[], "
-                "\"required_component_terms\": string[], "
-                "\"symptom_terms\": string[]"
-                "}。"
-                "规则：fault_phrase 是用户实际报修的故障短语；component_text 是明确部件；"
-                "component_terms 是用于匹配证据的部件锚点，只能来自用户原文中的部件词；"
-                "required_component_terms 是复合部件必须同时命中的短词，例如“风扇皮带”对应[\"风扇\",\"皮带\"]；"
-                "symptom_terms 是异常表现词，例如异响、慢、漏油、报警。"
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps({"query": query}, ensure_ascii=False),
-        },
-    ]
-    result = client.complete(messages, service="query_parser", error_prefix="query_parser")
-    payload = parse_query_constraints_json(result.text)
-    debug = dict(result.debug)
-    debug["raw_text_preview"] = result.text[:1000]
-    return QueryParseResult(payload=payload, debug=debug)
-
-
-def parse_query_constraints_json(text: str) -> dict[str, object]:
-    """Parse a JSON object from a chat completion response."""
-
-    raw = strip_json_code_fence(text).strip()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            raise
-        payload = json.loads(raw[start : end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError("query parser output must be a JSON object")
-    return payload
-
-
-def strip_json_code_fence(text: str) -> str:
-    """Remove common Markdown JSON fences from model output."""
-
-    raw = str(text or "").strip()
-    match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", raw, flags=re.IGNORECASE | re.DOTALL)
-    return match.group(1) if match else raw
 
 
 def build_fallback_answer(
