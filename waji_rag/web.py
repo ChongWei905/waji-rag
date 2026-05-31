@@ -19,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
@@ -2822,7 +2822,7 @@ def build_redesigned_index_html() -> str:
 
     async function refreshBatchEvalRuns(options = {}) {
       try {
-        const data = await postJson("/api/batch-evals", taskPayload({limit: 120}));
+        const data = await postJson("/api/batch-evals", sharedTaskPayload({limit: 120}));
         appState.batchEvalRuns = data.batch_evals || [];
         renderBatchEvalRuns();
         return data;
@@ -2891,8 +2891,8 @@ def build_redesigned_index_html() -> str:
 
     async function loadBatchEvalRun(taskId) {
       try {
-        appState.batchEval.useSharedDatabase = false;
-        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        appState.batchEval.useSharedDatabase = true;
+        const data = await postJson("/api/task", sharedTaskPayload({task_id: taskId}));
         applyBatchEvalTask(data.task);
         switchView("batch");
         activateBatchEvalOverview();
@@ -5776,10 +5776,11 @@ class RagDebugHandler(BaseHTTPRequestHandler):
     def _handle_batch_evals(self) -> None:
         payload = self._read_json()
         try:
-            batch_evals = list_batch_eval_tasks(database_from_payload(payload), limit=int(payload.get("limit") or 80))
+            database = shared_config_database() if payload.get("use_shared_database") else database_from_payload(payload)
+            batch_evals = list_batch_eval_tasks(database, limit=int(payload.get("limit") or 80))
             self._send_json({"batch_evals": batch_evals})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
-            self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            self._send_exception_json(exc)
 
     def _handle_batch_eval_share(self) -> None:
         payload = self._read_json()
@@ -6563,13 +6564,23 @@ def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list
     """Return recent batch-evaluation tasks with compact result counts."""
 
     safe_limit = max(1, min(limit, 200))
-    ensure_batch_eval_share_ids(database)
     ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, task_type, status, query, summary, result, error, created_at, updated_at
+                SELECT
+                    id,
+                    task_type,
+                    status,
+                    query,
+                    summary,
+                    result->'counts' AS counts,
+                    result->>'file_name' AS file_name,
+                    result->>'share_id' AS share_id,
+                    error,
+                    created_at,
+                    updated_at
                 FROM rag_tasks
                 WHERE task_type = 'batch_eval'
                 ORDER BY updated_at DESC, id DESC
@@ -6578,24 +6589,26 @@ def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list
                 (safe_limit,),
             )
             rows = cur.fetchall()
+            share_ids_by_task_id = ensure_batch_eval_share_ids_for_rows(cur, rows)
         conn.commit()
     items: list[dict[str, Any]] = []
     for row in rows:
-        result = row[5] if isinstance(row[5], dict) else {}
-        counts = result.get("counts") if isinstance(result.get("counts"), dict) else {}
+        task_id = int(row[0])
+        counts = row[5] if isinstance(row[5], dict) else {}
+        share_id = str(row[7] or share_ids_by_task_id.get(task_id) or "").strip()
         items.append(
             {
-                "id": int(row[0]),
+                "id": task_id,
                 "task_type": row[1],
                 "status": row[2],
                 "query": row[3],
                 "summary": row[4],
                 "counts": counts,
-                "file_name": result.get("file_name"),
-                "share_id": result.get("share_id"),
-                "error": row[6],
-                "created_at": iso_datetime(row[7]),
-                "updated_at": iso_datetime(row[8]),
+                "file_name": row[6],
+                "share_id": share_id,
+                "error": row[8],
+                "created_at": iso_datetime(row[9]),
+                "updated_at": iso_datetime(row[10]),
             }
         )
     return items
@@ -6648,44 +6661,41 @@ def generate_unique_batch_eval_share_id(database: DatabaseOptions) -> str:
     raise RuntimeError("failed to generate unique batch evaluation share_id")
 
 
-def ensure_batch_eval_share_ids(database: DatabaseOptions) -> None:
-    """Backfill share IDs for stored batch-evaluation tasks that do not have one."""
+def ensure_batch_eval_share_ids_for_rows(cur: Any, rows: Sequence[Any]) -> dict[int, str]:
+    """Backfill share IDs only for the already-selected batch-evaluation rows."""
 
-    ensure_task_schema(database)
-    with connect(database.database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT COALESCE(result->>'share_id', '')
-                FROM rag_tasks
-                WHERE task_type = 'batch_eval'
-                  AND COALESCE(result->>'share_id', '') <> ''
-                """
-            )
-            used_share_ids = {str(row[0]) for row in cur.fetchall()}
-            cur.execute(
-                """
-                SELECT id, result
-                FROM rag_tasks
-                WHERE task_type = 'batch_eval'
-                  AND COALESCE(result->>'share_id', '') = ''
-                """
-            )
-            rows = cur.fetchall()
-            for row in rows:
-                result = row[1] if isinstance(row[1], dict) else {}
-                result = dict(result)
-                share_id = new_batch_eval_share_id()
-                for _attempt in range(10):
-                    if share_id not in used_share_ids:
-                        break
-                    share_id = new_batch_eval_share_id()
-                else:
-                    raise RuntimeError("failed to generate unique batch evaluation share_id")
-                used_share_ids.add(share_id)
-                result["share_id"] = share_id
-                cur.execute("UPDATE rag_tasks SET result = %s WHERE id = %s", (json_param(redact_secrets(result)), row[0]))
-        conn.commit()
+    missing_task_ids = [int(row[0]) for row in rows if not str(row[7] or "").strip()]
+    if not missing_task_ids:
+        return {}
+    cur.execute(
+        """
+        SELECT COALESCE(result->>'share_id', '')
+        FROM rag_tasks
+        WHERE task_type = 'batch_eval'
+          AND COALESCE(result->>'share_id', '') <> ''
+        """
+    )
+    used_share_ids = {str(row[0]) for row in cur.fetchall()}
+    share_ids_by_task_id: dict[int, str] = {}
+    for task_id in missing_task_ids:
+        share_id = new_batch_eval_share_id()
+        for _attempt in range(10):
+            if share_id not in used_share_ids:
+                break
+            share_id = new_batch_eval_share_id()
+        else:
+            raise RuntimeError("failed to generate unique batch evaluation share_id")
+        used_share_ids.add(share_id)
+        share_ids_by_task_id[task_id] = share_id
+        cur.execute(
+            """
+            UPDATE rag_tasks
+            SET result = result || jsonb_build_object('share_id', %s)
+            WHERE id = %s
+            """,
+            (share_id, task_id),
+        )
+    return share_ids_by_task_id
 
 
 def get_batch_eval_task_by_share_id(database: DatabaseOptions, share_id: str) -> dict[str, Any] | None:
@@ -6694,7 +6704,7 @@ def get_batch_eval_task_by_share_id(database: DatabaseOptions, share_id: str) ->
     share_id = normalize_batch_eval_share_id(share_id)
     if not share_id:
         return None
-    ensure_batch_eval_share_ids(database)
+    ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
