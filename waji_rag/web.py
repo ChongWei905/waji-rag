@@ -2298,6 +2298,7 @@ def build_redesigned_index_html() -> str:
         rowCount: 0,
         taskId: null,
         shareId: null,
+        useSharedDatabase: false,
         settings: null,
         partColumns: null,
         questionIndex: null,
@@ -2666,6 +2667,13 @@ def build_redesigned_index_html() -> str:
       };
     }
 
+    function sharedTaskPayload(extra = {}) {
+      return {
+        use_shared_database: true,
+        ...extra
+      };
+    }
+
     function parseCsv(value) {
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
     }
@@ -2728,6 +2736,7 @@ def build_redesigned_index_html() -> str:
         appState.batchEval.rowCount = parsed.rows.length;
         appState.batchEval.taskId = null;
         appState.batchEval.shareId = null;
+        appState.batchEval.useSharedDatabase = false;
         renderBatchEvalColumns();
         renderBatchEvalResults();
         $("batchEvalFileMeta").textContent = `${file.name} · ${parsed.rows.length} 行数据 · ${parsed.headers.length} 列`;
@@ -2868,6 +2877,7 @@ def build_redesigned_index_html() -> str:
 
     async function loadBatchEvalRun(taskId) {
       try {
+        appState.batchEval.useSharedDatabase = false;
         const data = await postJson("/api/task", taskPayload({task_id: taskId}));
         applyBatchEvalTask(data.task);
         switchView("batch");
@@ -2882,8 +2892,9 @@ def build_redesigned_index_html() -> str:
     async function loadBatchEvalShareRoute(shareId = routeBatchEvalShareId) {
       if (!shareId) return false;
       try {
-        const data = await postJson("/api/batch-eval-share", taskPayload({share_id: shareId}));
+        const data = await postJson("/api/batch-eval-share", {share_id: shareId});
         applyBatchEvalTask(data.task);
+        appState.batchEval.useSharedDatabase = true;
         switchView("batch");
         activateBatchEvalOverview();
         setStatus(`已通过分享链接载入批量评测 /${shareId}`, "success");
@@ -2957,6 +2968,7 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalRowNumber = null;
       appState.activeBatchEvalRetryTaskId = null;
       appState.activeBatchEvalReplay = null;
+      appState.batchEval.useSharedDatabase = false;
       switchView("batch");
       if (options.updateRoute !== false) resetWorkbenchBrowserRoute();
       refreshBatchEvalRuns({quiet: true});
@@ -3025,7 +3037,10 @@ def build_redesigned_index_html() -> str:
         return;
       }
       try {
-        const data = await postJson("/api/task", taskPayload({task_id: item.taskId}));
+        const payload = appState.batchEval.useSharedDatabase
+          ? sharedTaskPayload({task_id: item.taskId})
+          : taskPayload({task_id: item.taskId});
+        const data = await postJson("/api/task", payload);
         const task = data.task;
         if (!task) throw new Error(`task not found: ${item.taskId}`);
         appState.currentTaskId = task.id;
@@ -3099,6 +3114,7 @@ def build_redesigned_index_html() -> str:
         const created = await createBatchEvalTask(settings, partColumns, questionIndex);
         appState.batchEval.taskId = created.task_id;
         appState.batchEval.shareId = (created.result && created.result.share_id) || created.share_id || null;
+        appState.batchEval.useSharedDatabase = false;
         appState.activeBatchEvalTaskId = created.task_id;
         appState.activeBatchEvalRowNumber = null;
         appState.activeBatchEvalRetryTaskId = null;
@@ -5655,7 +5671,8 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             if task_id <= 0:
                 self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
-            task = get_task(database_from_payload(payload), task_id)
+            database = shared_config_database() if payload.get("use_shared_database") else database_from_payload(payload)
+            task = get_task(database, task_id)
             if task is None:
                 self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -5757,7 +5774,7 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             if not share_id:
                 self._send_json({"error": "share_id is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
-            task = get_batch_eval_task_by_share_id(database_from_payload(payload), share_id)
+            task = get_batch_eval_task_by_share_id(shared_config_database(), share_id)
             if task is None:
                 self._send_json({"error": "batch evaluation not found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -5989,6 +6006,19 @@ def shared_config_path() -> Path:
 def database_from_payload(payload: dict[str, Any]) -> DatabaseOptions:
     """Build database options from a web request payload."""
 
+    database_url = str(payload.get("database_url") or "").strip() or None
+    return DatabaseOptions.from_env(database_url)
+
+
+def shared_config_database() -> DatabaseOptions:
+    """Build database options from server-side shared config or environment."""
+
+    config_path = shared_config_path()
+    if not config_path.exists():
+        return DatabaseOptions.from_env(None)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("shared config file must contain a JSON object")
     database_url = str(payload.get("database_url") or "").strip() or None
     return DatabaseOptions.from_env(database_url)
 

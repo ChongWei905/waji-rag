@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from waji_rag.web import (
     batch_eval_share_path,
@@ -10,6 +14,7 @@ from waji_rag.web import (
     is_retryable_task_db_error,
     normalize_batch_eval_share_id,
     retry_ingest_payload,
+    shared_config_database,
 )
 
 
@@ -126,6 +131,21 @@ class WebRetryTests(unittest.TestCase):
         self.assertFalse(batch_eval_share_path("/api/task"))
         self.assertFalse(batch_eval_share_path("/favicon.ico"))
         self.assertFalse(batch_eval_share_path("/a/b/c"))
+
+    def test_shared_config_database_uses_server_config_file(self) -> None:
+        database_url = "postgresql://waji:waji@192.168.1.10:55432/waji_rag"
+        previous_path = os.environ.get("WAJI_WEB_CONFIG_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "shared-config.json"
+            config_path.write_text(json.dumps({"database_url": database_url}), encoding="utf-8")
+            os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
+            try:
+                self.assertEqual(shared_config_database().database_url, database_url)
+            finally:
+                if previous_path is None:
+                    os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+                else:
+                    os.environ["WAJI_WEB_CONFIG_PATH"] = previous_path
 
 
 if __name__ == "__main__":
