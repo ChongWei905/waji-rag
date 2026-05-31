@@ -1535,6 +1535,9 @@ def create_task_schema(cur: Any) -> None:
         CREATE INDEX IF NOT EXISTS rag_tasks_created_at_idx ON rag_tasks(created_at DESC);
         CREATE INDEX IF NOT EXISTS rag_tasks_status_idx ON rag_tasks(status);
         CREATE INDEX IF NOT EXISTS rag_tasks_task_type_idx ON rag_tasks(task_type);
+        CREATE INDEX IF NOT EXISTS rag_tasks_batch_eval_share_id_idx
+            ON rag_tasks((result->>'share_id'))
+            WHERE task_type = 'batch_eval';
         """
     )
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 import unittest
 
 from waji_rag.web import (
+    batch_eval_share_path,
     batch_eval_summary,
     build_failed_items_from_task,
     build_question_tabs_from_tasks,
     is_retryable_task_db_error,
+    normalize_batch_eval_share_id,
     retry_ingest_payload,
 )
 
@@ -117,6 +119,13 @@ class WebRetryTests(unittest.TestCase):
             sqlstate = "40P01"
 
         self.assertTrue(is_retryable_task_db_error(FakeDeadlock("deadlock detected")))
+
+    def test_batch_eval_share_path_accepts_only_single_safe_segments(self) -> None:
+        self.assertEqual(normalize_batch_eval_share_id("/abc123_def"), "abc123_def")
+        self.assertTrue(batch_eval_share_path("/abc123-def"))
+        self.assertFalse(batch_eval_share_path("/api/task"))
+        self.assertFalse(batch_eval_share_path("/favicon.ico"))
+        self.assertFalse(batch_eval_share_path("/a/b/c"))
 
 
 if __name__ == "__main__":

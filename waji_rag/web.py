@@ -12,6 +12,7 @@ import posixpath
 import threading
 import time
 import traceback
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -63,6 +64,7 @@ DEFAULT_QUERY = (
     "相应故障需要更换备件的详细信息（备件的编号及名称，备件编码，备件数量）"
 )
 DEFAULT_SHARED_CONFIG_PATH = PROJECT_ROOT / ".git" / "info" / "waji-rag-shared-config.json"
+BATCH_EVAL_SHARE_ID_LENGTH = 12
 _TASK_SCHEMA_LOCK = threading.Lock()
 _TASK_SCHEMA_DATABASES: set[str] = set()
 _TASK_DB_RETRY_SQLSTATES = {"40P01", "40001", "55P03"}
@@ -2230,6 +2232,7 @@ def build_redesigned_index_html() -> str:
     const localEmbeddingBaseUrl = "http://127.0.0.1:8888/v1";
     const defaultModelApiRequestLogPath = __MODEL_API_REQUEST_LOG_PATH_JSON__;
     const savedConfigKey = "waji-rag-workbench-config-v1";
+    const routeBatchEvalShareId = routeBatchEvalShareIdFromPath(window.location.pathname);
     const channels = [
       ["work_orders", "历史工单", "doc_type=work_order；字段权重优先 reported_issue，再看 solution/raw_text。"],
       ["manual_typical_faults", "典型故障手册", "doc_type=manual_typical_fault；优先 fault_title/file_name，再看正文 chunk。"],
@@ -2285,6 +2288,7 @@ def build_redesigned_index_html() -> str:
         fileName: "",
         rowCount: 0,
         taskId: null,
+        shareId: null,
         settings: null,
         partColumns: null,
         questionIndex: null,
@@ -2657,6 +2661,12 @@ def build_redesigned_index_html() -> str:
       return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
     }
 
+    function routeBatchEvalShareIdFromPath(pathname) {
+      const raw = String(pathname || "").replace(/^\/+|\/+$/g, "");
+      if (!raw || raw.includes("/") || raw.toLowerCase().startsWith("api")) return "";
+      return /^[A-Za-z0-9_-]{6,64}$/.test(raw) ? raw : "";
+    }
+
     function parseCsvFileText(text) {
       const rows = [];
       let row = [];
@@ -2708,6 +2718,7 @@ def build_redesigned_index_html() -> str:
         appState.batchEval.fileName = file.name;
         appState.batchEval.rowCount = parsed.rows.length;
         appState.batchEval.taskId = null;
+        appState.batchEval.shareId = null;
         renderBatchEvalColumns();
         renderBatchEvalResults();
         $("batchEvalFileMeta").textContent = `${file.name} · ${parsed.rows.length} 行数据 · ${parsed.headers.length} 列`;
@@ -2801,6 +2812,8 @@ def build_redesigned_index_html() -> str:
       container.innerHTML = appState.batchEvalRuns.map(task => {
         const counts = task.counts || {};
         const active = Number(task.id) === Number(appState.activeBatchEvalTaskId);
+        const shareId = batchEvalShareId(task);
+        const sharePath = shareId ? `/${shareId}` : "生成中";
         return `
           <button class="batch-eval-run-card ${escapeHtml(task.status || "")} ${active ? "active" : ""}" data-task-id="${escapeHtml(task.id)}">
             <div class="task-line">
@@ -2808,6 +2821,7 @@ def build_redesigned_index_html() -> str:
               <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
             </div>
             <div class="task-subtitle">正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
+            <div class="row-meta">分享路径：${escapeHtml(sharePath)}</div>
             <div class="row-meta">${escapeHtml(compactTime(task.updated_at || task.created_at))}</div>
           </button>
         `;
@@ -2822,15 +2836,52 @@ def build_redesigned_index_html() -> str:
       return result.file_name || task.file_name || task.query || "批量评测";
     }
 
+    function batchEvalShareId(task) {
+      const result = task && task.result ? task.result : {};
+      return String((result && result.share_id) || (task && task.share_id) || "").trim();
+    }
+
+    function updateBatchEvalBrowserRoute(task, options = {}) {
+      const shareId = batchEvalShareId(task);
+      if (!shareId || options.push === false) return;
+      const targetPath = `/${shareId}`;
+      if (window.location.pathname !== targetPath) {
+        const method = options.replace ? "replaceState" : "pushState";
+        window.history[method]({batchEvalShareId: shareId}, "", targetPath);
+      }
+    }
+
+    function resetWorkbenchBrowserRoute(options = {}) {
+      if (window.location.pathname === "/") return;
+      const method = options.replace ? "replaceState" : "pushState";
+      window.history[method]({}, "", "/");
+    }
+
     async function loadBatchEvalRun(taskId) {
       try {
         const data = await postJson("/api/task", taskPayload({task_id: taskId}));
         applyBatchEvalTask(data.task);
         switchView("batch");
         activateBatchEvalOverview();
+        updateBatchEvalBrowserRoute(data.task);
         setStatus(`已载入批量评测 #${taskId}`, "success");
       } catch (error) {
         setStatus(String(error), "error");
+      }
+    }
+
+    async function loadBatchEvalShareRoute(shareId = routeBatchEvalShareId) {
+      if (!shareId) return false;
+      try {
+        const data = await postJson("/api/batch-eval-share", taskPayload({share_id: shareId}));
+        applyBatchEvalTask(data.task);
+        switchView("batch");
+        activateBatchEvalOverview();
+        setStatus(`已通过分享链接载入批量评测 /${shareId}`, "success");
+        return true;
+      } catch (error) {
+        setStatus(`分享链接加载失败：${error}`, "error");
+        return false;
       }
     }
 
@@ -2848,6 +2899,7 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.rows = [];
       appState.batchEval.rowCount = Number(result.row_count || result.total || (result.rows || []).length || 0);
       appState.batchEval.results = Array.isArray(result.rows) ? result.rows : [];
+      appState.batchEval.shareId = result.share_id || task.share_id || null;
       appState.batchEval.settings = result.settings || null;
       appState.batchEval.partColumns = result.part_columns || null;
       appState.batchEval.questionIndex = result.question_column ?? null;
@@ -2882,13 +2934,14 @@ def build_redesigned_index_html() -> str:
       $("exportBatchEvalBtn").disabled = !appState.batchEval.results.length;
     }
 
-    function openBatchEvalHome() {
+    function openBatchEvalHome(options = {}) {
       appState.activeBatchEvalTaskId = null;
       appState.activeBatchEvalTask = null;
       appState.activeBatchEvalRowNumber = null;
       appState.activeBatchEvalRetryTaskId = null;
       appState.activeBatchEvalReplay = null;
       switchView("batch");
+      if (options.updateRoute !== false) resetWorkbenchBrowserRoute();
       refreshBatchEvalRuns({quiet: true});
     }
 
@@ -3013,6 +3066,7 @@ def build_redesigned_index_html() -> str:
       try {
         const created = await createBatchEvalTask(settings, partColumns, questionIndex);
         appState.batchEval.taskId = created.task_id;
+        appState.batchEval.shareId = (created.result && created.result.share_id) || created.share_id || null;
         appState.activeBatchEvalTaskId = created.task_id;
         appState.activeBatchEvalRowNumber = null;
         appState.activeBatchEvalRetryTaskId = null;
@@ -3026,6 +3080,7 @@ def build_redesigned_index_html() -> str:
         };
         switchView("batch");
         renderBatchEvalPage();
+        updateBatchEvalBrowserRoute(appState.activeBatchEvalTask);
       } catch (error) {
         appState.batchEval.running = false;
         $("runBatchEvalBtn").disabled = false;
@@ -3110,6 +3165,7 @@ def build_redesigned_index_html() -> str:
         task_id: appState.batchEval.taskId,
         status,
         file_name: appState.batchEval.fileName || "未命名表格",
+        share_id: appState.batchEval.shareId || null,
         headers: appState.batchEval.headers || [],
         row_count: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         settings: appState.batchEval.settings || null,
@@ -5068,14 +5124,28 @@ def build_redesigned_index_html() -> str:
     $("embeddingProvider").addEventListener("change", () => applyEmbeddingProviderDefaults(true));
     $("exportConfigBtn").addEventListener("click", exportConfig);
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
-    $("buildViewBtn").addEventListener("click", () => switchView("build"));
-    $("qaViewBtn").addEventListener("click", () => switchView("qa"));
+    $("buildViewBtn").addEventListener("click", () => {
+      resetWorkbenchBrowserRoute();
+      switchView("build");
+    });
+    $("qaViewBtn").addEventListener("click", () => {
+      resetWorkbenchBrowserRoute();
+      switchView("qa");
+    });
     $("batchViewBtn").addEventListener("click", openBatchEvalHome);
     $("openQuestionSidebarHeaderBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
     $("query").addEventListener("input", syncActiveQuestionInput);
+    window.addEventListener("popstate", () => {
+      const shareId = routeBatchEvalShareIdFromPath(window.location.pathname);
+      if (shareId) {
+        loadBatchEvalShareRoute(shareId);
+      } else if (appState.activeView === "batch") {
+        openBatchEvalHome({updateRoute: false});
+      }
+    });
     $("previewConfigBtn").addEventListener("click", () => runPreviewConfig($("previewConfigBtn")));
     $("refreshTasksBtn").addEventListener("click", async () => {
       await refreshTasks();
@@ -5121,7 +5191,8 @@ def build_redesigned_index_html() -> str:
       updateCurrentQuestionTitle();
       setQuestionSidebar(appState.questionSidebarOpen, {save: false});
       renderBuildProgress({});
-      if (!restoredSharedConfig && !restoredLocalConfig) switchView("build");
+      const routeLoaded = await loadBatchEvalShareRoute();
+      if (!routeLoaded && !restoredSharedConfig && !restoredLocalConfig) switchView("build");
       refreshTasks({quiet: true});
       refreshQuestionTabsFromServer({quiet: true});
       refreshBatchEvalRuns({quiet: true});
@@ -5167,6 +5238,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
 
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            self._send_text(INDEX_HTML, content_type="text/html; charset=utf-8")
+            return
+        if batch_eval_share_path(parsed.path):
             self._send_text(INDEX_HTML, content_type="text/html; charset=utf-8")
             return
         if parsed.path == "/api/doctor":
@@ -5231,6 +5305,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/batch-evals":
             self._handle_batch_evals()
+            return
+        if parsed.path == "/api/batch-eval-share":
+            self._handle_batch_eval_share()
             return
         self.send_error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -5564,11 +5641,13 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             file_name = str(batch_eval.get("file_name") or "未命名表格")
             row_count = int(batch_eval.get("row_count") or 0)
             query = f"{file_name} · {row_count} 行"
+            share_id = generate_unique_batch_eval_share_id(database)
             task_id = create_task(database, "batch_eval", query, task_request_payload(payload))
             result = {
                 "task_id": task_id,
                 "status": "running",
                 "file_name": file_name,
+                "share_id": share_id,
                 "headers": batch_eval.get("headers") if isinstance(batch_eval.get("headers"), list) else [],
                 "row_count": row_count,
                 "settings": batch_eval.get("settings") if isinstance(batch_eval.get("settings"), dict) else {},
@@ -5586,20 +5665,25 @@ class RagDebugHandler(BaseHTTPRequestHandler):
     def _handle_update_batch_eval(self) -> None:
         payload = self._read_json()
         try:
+            database = database_from_payload(payload)
             task_id = int(payload.get("task_id") or 0)
             if task_id <= 0:
                 self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
+            existing_task = get_task(database, task_id)
+            existing_result = existing_task.get("result") if existing_task and isinstance(existing_task.get("result"), dict) else {}
             result = object_payload(payload.get("result")) or {}
             status = str(payload.get("status") or result.get("status") or "running")
             if status not in {"running", "completed", "completed_with_errors", "stopped", "failed"}:
                 status = "running"
             result["status"] = status
             result["task_id"] = task_id
+            if not result.get("share_id"):
+                result["share_id"] = existing_result.get("share_id") or generate_unique_batch_eval_share_id(database)
             summary = batch_eval_summary(result)
             error_message = str(result.get("error") or "") if status == "failed" else None
             update_task_result(
-                database_from_payload(payload),
+                database,
                 task_id,
                 status,
                 result,
@@ -5617,6 +5701,21 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_json({"batch_evals": batch_evals})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _handle_batch_eval_share(self) -> None:
+        payload = self._read_json()
+        try:
+            share_id = normalize_batch_eval_share_id(payload.get("share_id"))
+            if not share_id:
+                self._send_json({"error": "share_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            task = get_batch_eval_task_by_share_id(database_from_payload(payload), share_id)
+            if task is None:
+                self._send_json({"error": "batch evaluation not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._send_json({"task": task})
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("content-length", "0") or "0")
@@ -6372,6 +6471,7 @@ def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list
     """Return recent batch-evaluation tasks with compact result counts."""
 
     safe_limit = max(1, min(limit, 200))
+    ensure_batch_eval_share_ids(database)
     ensure_task_schema(database)
     with connect(database.database_url) as conn:
         with conn.cursor() as cur:
@@ -6400,12 +6500,125 @@ def list_batch_eval_tasks(database: DatabaseOptions, *, limit: int = 80) -> list
                 "summary": row[4],
                 "counts": counts,
                 "file_name": result.get("file_name"),
+                "share_id": result.get("share_id"),
                 "error": row[6],
                 "created_at": iso_datetime(row[7]),
                 "updated_at": iso_datetime(row[8]),
             }
         )
     return items
+
+
+def batch_eval_share_path(path: str) -> bool:
+    """Return whether a GET path should serve the SPA for a shared batch eval."""
+
+    return bool(normalize_batch_eval_share_id(str(path or "").strip("/")))
+
+
+def normalize_batch_eval_share_id(value: object) -> str:
+    """Return a validated batch-evaluation share ID or an empty string."""
+
+    share_id = str(value or "").strip().strip("/")
+    if not share_id or share_id.lower().startswith("api") or "/" in share_id or "." in share_id:
+        return ""
+    if len(share_id) < 6 or len(share_id) > 64:
+        return ""
+    if not all(ch.isalnum() or ch in {"_", "-"} for ch in share_id):
+        return ""
+    return share_id
+
+
+def new_batch_eval_share_id() -> str:
+    """Generate a compact random share ID for batch evaluation routes."""
+
+    return uuid.uuid4().hex[:BATCH_EVAL_SHARE_ID_LENGTH]
+
+
+def generate_unique_batch_eval_share_id(database: DatabaseOptions) -> str:
+    """Generate a share ID that is not currently used by a batch-evaluation task."""
+
+    ensure_task_schema(database)
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            for _attempt in range(10):
+                share_id = new_batch_eval_share_id()
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM rag_tasks
+                    WHERE task_type = 'batch_eval' AND result->>'share_id' = %s
+                    LIMIT 1
+                    """,
+                    (share_id,),
+                )
+                if cur.fetchone() is None:
+                    return share_id
+    raise RuntimeError("failed to generate unique batch evaluation share_id")
+
+
+def ensure_batch_eval_share_ids(database: DatabaseOptions) -> None:
+    """Backfill share IDs for stored batch-evaluation tasks that do not have one."""
+
+    ensure_task_schema(database)
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COALESCE(result->>'share_id', '')
+                FROM rag_tasks
+                WHERE task_type = 'batch_eval'
+                  AND COALESCE(result->>'share_id', '') <> ''
+                """
+            )
+            used_share_ids = {str(row[0]) for row in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT id, result
+                FROM rag_tasks
+                WHERE task_type = 'batch_eval'
+                  AND COALESCE(result->>'share_id', '') = ''
+                """
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                result = row[1] if isinstance(row[1], dict) else {}
+                result = dict(result)
+                share_id = new_batch_eval_share_id()
+                for _attempt in range(10):
+                    if share_id not in used_share_ids:
+                        break
+                    share_id = new_batch_eval_share_id()
+                else:
+                    raise RuntimeError("failed to generate unique batch evaluation share_id")
+                used_share_ids.add(share_id)
+                result["share_id"] = share_id
+                cur.execute("UPDATE rag_tasks SET result = %s WHERE id = %s", (json_param(redact_secrets(result)), row[0]))
+        conn.commit()
+
+
+def get_batch_eval_task_by_share_id(database: DatabaseOptions, share_id: str) -> dict[str, Any] | None:
+    """Return a batch-evaluation task by its public share ID."""
+
+    share_id = normalize_batch_eval_share_id(share_id)
+    if not share_id:
+        return None
+    ensure_batch_eval_share_ids(database)
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM rag_tasks
+                WHERE task_type = 'batch_eval' AND result->>'share_id' = %s
+                LIMIT 1
+                """,
+                (share_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if row is None:
+        return None
+    return get_task(database, int(row[0]))
 
 
 def list_question_tabs(database: DatabaseOptions, *, limit: int = 120) -> list[dict[str, Any]]:
