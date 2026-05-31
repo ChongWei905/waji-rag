@@ -2822,7 +2822,7 @@ def build_redesigned_index_html() -> str:
 
     async function refreshBatchEvalRuns(options = {}) {
       try {
-        const data = await postJson("/api/batch-evals", sharedTaskPayload({limit: 120}));
+        const data = await postJson("/api/batch-evals", taskPayload({limit: 120}));
         appState.batchEvalRuns = data.batch_evals || [];
         renderBatchEvalRuns();
         return data;
@@ -2891,8 +2891,8 @@ def build_redesigned_index_html() -> str:
 
     async function loadBatchEvalRun(taskId) {
       try {
-        appState.batchEval.useSharedDatabase = true;
-        const data = await postJson("/api/task", sharedTaskPayload({task_id: taskId}));
+        appState.batchEval.useSharedDatabase = false;
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
         applyBatchEvalTask(data.task);
         switchView("batch");
         activateBatchEvalOverview();
