@@ -1617,7 +1617,9 @@ def build_redesigned_index_html() -> str:
     .modal {
       width: min(860px, 100%);
       max-height: min(760px, calc(100vh - 36px));
-      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       border-radius: 8px;
       border: 1px solid var(--line);
       background: #fff;
@@ -1637,7 +1639,15 @@ def build_redesigned_index_html() -> str:
       justify-content: space-between;
       gap: 12px;
     }
+    .modal-head {
+      flex: 0 0 auto;
+      background: #fff;
+      position: relative;
+      z-index: 1;
+    }
     .modal-foot {
+      flex: 0 0 auto;
+      background: #fff;
       border-top: 1px solid var(--line);
       border-bottom: 0;
       justify-content: flex-end;
@@ -1647,6 +1657,10 @@ def build_redesigned_index_html() -> str:
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px 14px;
+    }
+    .modal-body, .history-body, .batch-eval-body {
+      min-height: 0;
+      overflow: auto;
     }
     .modal-body .full {
       grid-column: 1 / -1;
