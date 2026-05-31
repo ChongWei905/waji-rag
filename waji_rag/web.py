@@ -1573,7 +1573,11 @@ def build_redesigned_index_html() -> str:
     .batch-comparison-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(220px, .7fr);
+      grid-template-areas:
+        "expected-parts retrieved-parts summary"
+        "expected-work-orders retrieved-work-orders summary";
       gap: 8px;
+      align-items: stretch;
     }
     .batch-comparison-field {
       min-width: 0;
@@ -1583,6 +1587,29 @@ def build_redesigned_index_html() -> str:
       padding: 9px;
       display: grid;
       gap: 6px;
+    }
+    .batch-comparison-expected-parts {
+      grid-area: expected-parts;
+    }
+    .batch-comparison-retrieved-parts {
+      grid-area: retrieved-parts;
+    }
+    .batch-comparison-expected-work-orders {
+      grid-area: expected-work-orders;
+    }
+    .batch-comparison-retrieved-work-orders {
+      grid-area: retrieved-work-orders;
+    }
+    .batch-comparison-summary {
+      grid-area: summary;
+      align-content: start;
+      background: #fbfdff;
+    }
+    .metric-conclusion {
+      display: grid;
+      gap: 5px;
+      padding-top: 8px;
+      border-top: 1px solid var(--line);
     }
     .batch-comparison-field .empty {
       padding: 10px;
@@ -1829,6 +1856,14 @@ def build_redesigned_index_html() -> str:
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
       .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .batch-retry-controls, .batch-comparison-grid, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
+      .batch-comparison-grid {
+        grid-template-areas:
+          "expected-parts"
+          "retrieved-parts"
+          "expected-work-orders"
+          "retrieved-work-orders"
+          "summary";
+      }
     }
   </style>
 </head>
@@ -4199,8 +4234,6 @@ def build_redesigned_index_html() -> str:
 
     function renderBatchEvalComparison(item) {
       const comparison = currentBatchEvalComparison(item);
-      const metric = selectedBatchEvalMetric();
-      const metricPassed = batchEvalMetricCorrect({match: comparison.match}, metric);
       const expected = comparison.expectedParts.length
         ? comparison.expectedParts.map(part => `<div class="row-meta">${escapeHtml(formatExpectedPartText(part))}</div>`).join("")
         : '<div class="empty">期望不召回备件</div>';
@@ -4222,31 +4255,39 @@ def build_redesigned_index_html() -> str:
               <div class="row-title">预期答案 / 当前召回对比</div>
               <div class="row-meta">当前召回来源：${escapeHtml(comparison.source || "原始评测")}</div>
             </div>
-            <span class="pill ${metricPassed ? "ok" : "warn"}">${escapeHtml(batchEvalMetricLabel(metric))}：${metricPassed ? "正确" : "失败"}</span>
           </div>
           <div class="batch-comparison-grid">
-            <div class="batch-comparison-field">
+            <div class="batch-comparison-field batch-comparison-expected-parts">
               <div class="row-title">预期备件</div>
               ${expected}
             </div>
-            <div class="batch-comparison-field">
-              <div class="row-title">当前召回</div>
+            <div class="batch-comparison-field batch-comparison-retrieved-parts">
+              <div class="row-title">当前召回备件</div>
               ${actual}
             </div>
-            <div class="batch-comparison-field">
+            <div class="batch-comparison-field batch-comparison-expected-work-orders">
               <div class="row-title">预期工单</div>
               ${expectedWorkOrder}
             </div>
-            <div class="batch-comparison-field">
-              <div class="row-title">历史工单召回</div>
+            <div class="batch-comparison-field batch-comparison-retrieved-work-orders">
+              <div class="row-title">当前召回工单</div>
               ${actualWorkOrders}
             </div>
-            <div class="batch-comparison-field">
-              ${renderBatchEvalMatchSummary(comparison.match, metric)}
+            <div class="batch-comparison-field batch-comparison-summary">
+              <div class="row-title">指标结论</div>
+              ${renderBatchEvalMetricConclusions(comparison.match)}
             </div>
           </div>
         </div>
       `;
+    }
+
+    function renderBatchEvalMetricConclusions(match) {
+      return batchEvalMetricOptions.map(([metric]) => `
+        <div class="metric-conclusion">
+          ${renderBatchEvalMatchSummary(match, metric)}
+        </div>
+      `).join("");
     }
 
     function renderBatchEvalMatchSummary(match, metric = selectedBatchEvalMetric()) {
@@ -4255,7 +4296,11 @@ def build_redesigned_index_html() -> str:
       const workOrder = match.work_order || {};
       const lines = [];
       if (metric === "work_order_recall") {
-        lines.push(workOrder.correct ? `已召回预期工单 ${workOrder.matched || workOrder.expected || ""}` : `未召回预期工单 ${workOrder.expected || ""}`);
+        if (!workOrder.required) {
+          lines.push("未配置预期工单，默认通过");
+        } else {
+          lines.push(workOrder.correct ? `已召回预期工单 ${workOrder.matched || workOrder.expected || ""}` : `未召回预期工单 ${workOrder.expected || ""}`);
+        }
       } else {
         const partMatch = metric === "part_exact" ? (match.part_exact || match) : (match.part_recall || match);
         const missing = Array.isArray(partMatch.missing) ? partMatch.missing : [];
@@ -4264,6 +4309,9 @@ def build_redesigned_index_html() -> str:
         if (matched.length) lines.push(`命中：${matched.map(item => formatExpectedPartText(item.expected)).join("；")}`);
         if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
         if (metric === "part_exact" && unexpected.length) lines.push(`额外召回：${unexpected.map(formatRetrievedPartText).join("；")}`);
+        if (!matched.length && !missing.length && (metric === "part_recall" || !unexpected.length)) {
+          lines.push(metric === "part_recall" ? "未配置预期备件，默认通过" : "预期与召回备件均为空");
+        }
       }
       return `
         <div class="match-status ${metricPassed ? "pass" : "fail"}">${escapeHtml(label)}：${metricPassed ? "正确" : "失败"}</div>
