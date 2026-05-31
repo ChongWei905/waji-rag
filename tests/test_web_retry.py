@@ -11,11 +11,15 @@ from waji_rag.web import (
     batch_eval_summary,
     build_failed_items_from_task,
     build_question_tabs_from_tasks,
+    config_overrides_from_payload,
+    database_from_payload,
+    ingest_options_from_payload,
     is_retryable_task_db_error,
     normalize_batch_eval_share_id,
     retry_ingest_payload,
     shared_config_database,
 )
+from waji_rag.pg_index import DatabaseOptions
 
 
 class WebRetryTests(unittest.TestCase):
@@ -141,6 +145,87 @@ class WebRetryTests(unittest.TestCase):
             os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
             try:
                 self.assertEqual(shared_config_database().database_url, database_url)
+            finally:
+                if previous_path is None:
+                    os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+                else:
+                    os.environ["WAJI_WEB_CONFIG_PATH"] = previous_path
+
+    def test_web_database_ignores_browser_database_url(self) -> None:
+        database_url = "postgresql://waji:waji@192.168.1.10:55432/waji_rag"
+        previous_path = os.environ.get("WAJI_WEB_CONFIG_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "shared-config.json"
+            config_path.write_text(json.dumps({"database_url": database_url}), encoding="utf-8")
+            os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
+            try:
+                database = database_from_payload({"database_url": "postgresql://bad:bad@127.0.0.1:1/bad"})
+                self.assertEqual(database.database_url, database_url)
+            finally:
+                if previous_path is None:
+                    os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+                else:
+                    os.environ["WAJI_WEB_CONFIG_PATH"] = previous_path
+
+    def test_browser_config_overrides_cannot_replace_connection_settings(self) -> None:
+        previous_path = os.environ.get("WAJI_WEB_CONFIG_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "shared-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "embedding": {
+                            "enabled": True,
+                            "provider": "vllm",
+                            "base_url": "http://10.0.0.8:8888/v1",
+                            "api_key": "server-secret",
+                            "no_proxy_hosts": ["10.0.0.8"],
+                        },
+                        "llm": {"enabled": True, "base_url": "http://10.0.0.9:8000/v1"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
+            try:
+                overrides = config_overrides_from_payload(
+                    {
+                        "config_overrides": {
+                            "embedding": {
+                                "enabled": False,
+                                "base_url": "http://browser.example/v1",
+                                "api_key": "browser-secret",
+                                "no_proxy_hosts": ["browser.example"],
+                            },
+                            "llm": {"enabled": False, "base_url": "http://browser-llm.example/v1"},
+                        }
+                    }
+                )
+                self.assertFalse(overrides["embedding"]["enabled"])
+                self.assertEqual(overrides["embedding"]["base_url"], "http://10.0.0.8:8888/v1")
+                self.assertEqual(overrides["embedding"]["api_key"], "server-secret")
+                self.assertEqual(overrides["embedding"]["no_proxy_hosts"], ["10.0.0.8"])
+                self.assertFalse(overrides["llm"]["enabled"])
+                self.assertEqual(overrides["llm"]["base_url"], "http://10.0.0.9:8000/v1")
+            finally:
+                if previous_path is None:
+                    os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+                else:
+                    os.environ["WAJI_WEB_CONFIG_PATH"] = previous_path
+
+    def test_ingest_uses_server_data_directories(self) -> None:
+        previous_path = os.environ.get("WAJI_WEB_CONFIG_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "shared-config.json"
+            config_path.write_text(
+                json.dumps({"work_order_dir": "D:/orders-server", "manual_dir": "D:/manuals-server"}),
+                encoding="utf-8",
+            )
+            os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
+            try:
+                options = ingest_options_from_payload({}, DatabaseOptions(database_url="postgresql://example"))
+                self.assertEqual(str(options.work_order_dir), "D:/orders-server")
+                self.assertEqual(str(options.manual_dir), "D:/manuals-server")
             finally:
                 if previous_path is None:
                     os.environ.pop("WAJI_WEB_CONFIG_PATH", None)

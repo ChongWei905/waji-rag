@@ -1,0 +1,37 @@
+{
+  "database_url": "postgresql://waji:waji@127.0.0.1:55432/waji_rag",
+  "env_file": "D:/ACodesTree/waji-rag/.env",
+  "work_order_dir": "D:/AFiles/work_orders",
+  "manual_dir": "D:/AFiles/manuals",
+  "embedding": {
+    "enabled": false,
+    "provider": "vllm",
+    "model": "",
+    "base_url": "http://127.0.0.1:8888/v1",
+    "api_key": "",
+    "dimensions": null,
+    "batch_size": 32,
+    "no_proxy_hosts": ["localhost", "127.0.0.1", "127.0.0.0/8", "::1"]
+  },
+  "rerank": {
+    "enabled": false,
+    "provider": "dashscope",
+    "model": "qwen3-rerank",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-api/v1",
+    "api_key_env": "DOCARBOR_RERANK_API_KEY"
+  },
+  "query_parser": {
+    "enabled": false,
+    "provider": "dashscope",
+    "model": "qwen3.5-plus",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key_env": "DOCARBOR_QUERY_PARSER_API_KEY"
+  },
+  "llm": {
+    "enabled": false,
+    "provider": "dashscope",
+    "model": "qwen3.5-plus",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key_env": "DOCARBOR_LLM_API_KEY"
+  }
+}

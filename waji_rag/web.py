@@ -69,6 +69,7 @@ _TASK_SCHEMA_LOCK = threading.Lock()
 _TASK_SCHEMA_DATABASES: set[str] = set()
 _TASK_DB_RETRY_SQLSTATES = {"40P01", "40001", "55P03"}
 _TASK_DB_MAX_ATTEMPTS = 5
+APP_CONFIG_SECTION_KEYS = ("retrieval", "embedding", "rerank", "query_parser", "llm", "answer")
 
 
 INDEX_HTML = f"""<!doctype html>
@@ -2068,21 +2069,9 @@ def build_redesigned_index_html() -> str:
         <button id="closeConfigBtn" class="ghost">关闭</button>
       </div>
       <div class="modal-body">
-        <div class="full">
-          <label for="databaseUrl">Database URL</label>
-          <input id="databaseUrl" value="postgresql://waji:waji@127.0.0.1:55432/waji_rag">
-        </div>
-        <div class="full">
-          <label for="envFile">Env 文件</label>
-          <input id="envFile" placeholder="__DOCARBOR_ENV_PATH__">
-        </div>
-        <div>
-          <label for="workOrderDir">工单 TXT 目录</label>
-          <input id="workOrderDir" value="__DEMO_WORK_ORDER_DIR_TEXT__">
-        </div>
-        <div>
-          <label for="manualDir">手册 HTML/MD 目录</label>
-          <input id="manualDir" value="__DEMO_MANUAL_DIR_TEXT__">
+        <div class="full part-box">
+          <div class="row-title">连接与数据源由服务端配置文件控制</div>
+          <div id="serverConfigSummary" class="row-meta">页面不会保存或提交数据库、模型 API、代理、密钥、数据目录等连接项。</div>
         </div>
         <div>
           <label for="workOrderLimit">工单上限</label>
@@ -2109,137 +2098,32 @@ def build_redesigned_index_html() -> str:
           <input id="enableEmbedding" type="checkbox">
           <span>启用 embedding / hybrid</span>
         </label>
-        <div>
-          <label for="embeddingProvider">Embedding Provider</label>
-          <select id="embeddingProvider">
-            <option value="vllm">vLLM / local</option>
-            <option value="openai">OpenAI compatible</option>
-            <option value="dashscope">DashScope</option>
-          </select>
-        </div>
-        <div>
-          <label for="embeddingModel">Embedding 模型</label>
-          <input id="embeddingModel" placeholder="vLLM 可留空；云模型填写模型名">
-        </div>
-        <div>
-          <label for="embeddingDimensions">向量维度</label>
-          <input id="embeddingDimensions" type="number" min="0" placeholder="留空则不发送 dimensions">
-        </div>
-        <div>
-          <label for="embeddingBatchSize">批量大小</label>
-          <input id="embeddingBatchSize" type="number" min="1" value="10">
-        </div>
-        <div class="full">
-          <label for="embeddingBaseUrl">Embedding Base URL</label>
-          <input id="embeddingBaseUrl" value="http://127.0.0.1:8888/v1">
-        </div>
-        <div class="full">
-          <label for="embeddingNoProxyHosts">Embedding No Proxy Hosts</label>
-          <input id="embeddingNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
-        </div>
-        <div class="full">
-          <label for="embeddingApiKey">Embedding API Key</label>
-          <input id="embeddingApiKey" type="password" placeholder="本地 vLLM 可留空；云服务填写 key">
-        </div>
 
         <label class="checkline" for="enableRerank">
           <input id="enableRerank" type="checkbox">
           <span>启用 rerank</span>
         </label>
-        <div>
-          <label for="rerankModel">Rerank 模型</label>
-          <input id="rerankModel" value="qwen3-rerank">
-        </div>
-        <div class="full">
-          <label for="rerankBaseUrl">Rerank Base URL</label>
-          <input id="rerankBaseUrl" value="__DASHSCOPE_RERANK_BASE_URL__">
-        </div>
-        <div class="full">
-          <label for="rerankNoProxyHosts">Rerank No Proxy Hosts</label>
-          <input id="rerankNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
-        </div>
-        <div class="full">
-          <label for="rerankApiKey">Rerank API Key</label>
-          <input id="rerankApiKey" type="password" placeholder="可留空，留空时读取 DOCARBOR_RERANK_API_KEY 或兜底 key">
-        </div>
 
         <label class="checkline" for="enableQueryParser">
           <input id="enableQueryParser" type="checkbox">
           <span>启用 LLM 问题解析</span>
         </label>
-        <div>
-          <label for="queryParserProvider">问题解析 Provider</label>
-          <select id="queryParserProvider">
-            <option value="dashscope">DashScope</option>
-            <option value="openai">OpenAI compatible</option>
-            <option value="vllm">vLLM / local</option>
-          </select>
-        </div>
-        <div>
-          <label for="queryParserModel">问题解析模型</label>
-          <input id="queryParserModel" value="qwen3.5-plus">
-        </div>
-        <div class="full">
-          <label for="queryParserBaseUrl">问题解析 Base URL</label>
-          <input id="queryParserBaseUrl" value="__DASHSCOPE_BASE_URL__">
-        </div>
-        <div class="full">
-          <label for="queryParserNoProxyHosts">问题解析 No Proxy Hosts</label>
-          <input id="queryParserNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
-        </div>
-        <div class="full">
-          <label for="queryParserApiKey">问题解析 API Key</label>
-          <input id="queryParserApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
-        </div>
 
         <label class="checkline" for="enableLlm">
           <input id="enableLlm" type="checkbox">
           <span>启用 LLM 答案生成</span>
         </label>
-        <div>
-          <label for="llmProvider">LLM Provider</label>
-          <select id="llmProvider">
-            <option value="dashscope">DashScope</option>
-            <option value="openai">OpenAI compatible</option>
-            <option value="vllm">vLLM / local</option>
-          </select>
-        </div>
-        <div>
-          <label for="llmModel">LLM 模型</label>
-          <input id="llmModel" value="qwen3.5-plus">
-        </div>
         <div class="full">
-          <label for="llmBaseUrl">LLM Base URL</label>
-          <input id="llmBaseUrl" value="__DASHSCOPE_BASE_URL__">
-        </div>
-        <div class="full">
-          <label for="llmNoProxyHosts">LLM No Proxy Hosts</label>
-          <input id="llmNoProxyHosts" value="localhost,127.0.0.1,127.0.0.0/8,::1" placeholder="逗号分隔，支持 IP、CIDR、*.domain">
-        </div>
-        <div class="full">
-          <label for="llmApiKey">LLM API Key</label>
-          <input id="llmApiKey" type="password" placeholder="可留空，留空时读取 Env 或配置文件">
-        </div>
-        <label class="checkline full" for="apiRequestLoggingEnabled">
-          <input id="apiRequestLoggingEnabled" type="checkbox" checked>
-          <span>记录 Embedding / LLM 请求日志</span>
-        </label>
-        <div class="full">
-          <label for="apiRequestLogPath">请求日志文件</label>
-          <input id="apiRequestLogPath" value="__MODEL_API_REQUEST_LOG_PATH__">
-        </div>
-        <div class="full">
-          <label for="configImportFile">配置文件导入</label>
+          <label for="configImportFile">页面偏好导入</label>
           <input id="configImportFile" type="file" accept="application/json,.json">
         </div>
       </div>
       <div class="modal-foot">
-        <button id="loadDemoBtn" class="secondary">加载 Demo 配置</button>
-        <button id="docArborEnvBtn" class="secondary">填入 DocArbor Env</button>
-        <button id="exportConfigBtn" class="secondary">导出配置</button>
-        <button id="importConfigBtn" class="secondary">导入配置</button>
-        <button id="previewConfigBtn" class="secondary">预览配置</button>
-        <button id="saveConfigBtn">保存配置</button>
+        <button id="loadDemoBtn" class="secondary">加载默认页面参数</button>
+        <button id="exportConfigBtn" class="secondary">导出页面偏好</button>
+        <button id="importConfigBtn" class="secondary">导入页面偏好</button>
+        <button id="previewConfigBtn" class="secondary">预览服务端配置</button>
+        <button id="saveConfigBtn">保存页面偏好</button>
       </div>
     </div>
   </div>
@@ -2614,49 +2498,17 @@ def build_redesigned_index_html() -> str:
           ...retrievalOverrides
         },
         embedding: {
-          enabled: $("enableEmbedding").checked,
-          provider: $("embeddingProvider").value,
-          model: $("embeddingModel").value.trim(),
-          base_url: $("embeddingBaseUrl").value.trim(),
-          api_key: $("embeddingApiKey").value.trim(),
-          dimensions: $("embeddingDimensions").value ? Number($("embeddingDimensions").value) : null,
-          batch_size: $("embeddingBatchSize").value ? Number($("embeddingBatchSize").value) : 10,
-          no_proxy_hosts: parseCsv($("embeddingNoProxyHosts").value),
-          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
-          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
+          enabled: $("enableEmbedding").checked
         },
         rerank: {
           enabled: $("enableRerank").checked,
-          provider: "dashscope",
-          model: $("rerankModel").value.trim(),
-          base_url: $("rerankBaseUrl").value.trim(),
-          api_key: $("rerankApiKey").value.trim(),
-          no_proxy_hosts: parseCsv($("rerankNoProxyHosts").value),
           top_n: $("evidenceTopK").value ? Number($("evidenceTopK").value) : 8
         },
         query_parser: {
-          enabled: $("enableQueryParser").checked,
-          provider: $("queryParserProvider").value,
-          model: $("queryParserModel").value.trim(),
-          base_url: $("queryParserBaseUrl").value.trim(),
-          api_key: $("queryParserApiKey").value.trim(),
-          no_proxy_hosts: parseCsv($("queryParserNoProxyHosts").value),
-          max_tokens: 700,
-          temperature: 0,
-          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
-          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
+          enabled: $("enableQueryParser").checked
         },
         llm: {
-          enabled: $("enableLlm").checked,
-          provider: $("llmProvider").value,
-          model: $("llmModel").value.trim(),
-          base_url: $("llmBaseUrl").value.trim(),
-          api_key: $("llmApiKey").value.trim(),
-          no_proxy_hosts: parseCsv($("llmNoProxyHosts").value),
-          max_tokens: 1400,
-          temperature: 0,
-          log_requests_enabled: $("apiRequestLoggingEnabled").checked,
-          request_log_path: $("apiRequestLogPath").value.trim() || defaultModelApiRequestLogPath
+          enabled: $("enableLlm").checked
         },
         answer: {
           enabled: true,
@@ -2668,15 +2520,12 @@ def build_redesigned_index_html() -> str:
 
     function commonPayload(options = {}) {
       return {
-        database_url: $("databaseUrl").value.trim() || null,
-        env_file: $("envFile").value.trim() || null,
         config_overrides: configOverrides(options)
       };
     }
 
     function taskPayload(extra = {}) {
       return {
-        database_url: $("databaseUrl").value.trim() || null,
         ...extra
       };
     }
@@ -3567,51 +3416,22 @@ def build_redesigned_index_html() -> str:
           work_order_max_hits: $("batchEvalWorkOrderMaxHits").value,
           concurrency: $("batchEvalConcurrency").value
         },
-        database_url: $("databaseUrl").value,
-        env_file: $("envFile").value,
-        work_order_dir: $("workOrderDir").value,
-        manual_dir: $("manualDir").value,
         work_order_limit: $("workOrderLimit").value,
         manual_limit: $("manualLimit").value,
         max_manual_chars: $("maxManualChars").value,
         ingest_reset: $("ingestReset").checked,
         ingest_resume: $("ingestResume").checked,
-        model_api_log: {
-          enabled: $("apiRequestLoggingEnabled").checked,
-          path: $("apiRequestLogPath").value
-        },
         embedding: {
-          enabled: $("enableEmbedding").checked,
-          provider: $("embeddingProvider").value,
-          model: $("embeddingModel").value,
-          dimensions: $("embeddingDimensions").value,
-          batch_size: $("embeddingBatchSize").value,
-          base_url: $("embeddingBaseUrl").value,
-          no_proxy_hosts: $("embeddingNoProxyHosts").value,
-          api_key: $("embeddingApiKey").value
+          enabled: $("enableEmbedding").checked
         },
         rerank: {
-          enabled: $("enableRerank").checked,
-          model: $("rerankModel").value,
-          base_url: $("rerankBaseUrl").value,
-          no_proxy_hosts: $("rerankNoProxyHosts").value,
-          api_key: $("rerankApiKey").value
+          enabled: $("enableRerank").checked
         },
         query_parser: {
-          enabled: $("enableQueryParser").checked,
-          provider: $("queryParserProvider").value,
-          model: $("queryParserModel").value,
-          base_url: $("queryParserBaseUrl").value,
-          no_proxy_hosts: $("queryParserNoProxyHosts").value,
-          api_key: $("queryParserApiKey").value
+          enabled: $("enableQueryParser").checked
         },
         llm: {
-          enabled: $("enableLlm").checked,
-          provider: $("llmProvider").value,
-          model: $("llmModel").value,
-          base_url: $("llmBaseUrl").value,
-          no_proxy_hosts: $("llmNoProxyHosts").value,
-          api_key: $("llmApiKey").value
+          enabled: $("enableLlm").checked
         }
       };
     }
@@ -3620,18 +3440,11 @@ def build_redesigned_index_html() -> str:
       if (!config || typeof config !== "object") throw new Error("配置文件格式不正确");
       const ui = config.ui || {};
       const batchEval = config.batch_eval || {};
-      setInputValue("databaseUrl", config.database_url);
-      setInputValue("envFile", config.env_file);
-      setInputValue("workOrderDir", config.work_order_dir);
-      setInputValue("manualDir", config.manual_dir);
       setInputValue("workOrderLimit", config.work_order_limit);
       setInputValue("manualLimit", config.manual_limit);
       setInputValue("maxManualChars", config.max_manual_chars);
       setCheckboxValue("ingestReset", config.ingest_reset);
       setCheckboxValue("ingestResume", config.ingest_resume);
-      const modelApiLog = config.model_api_log || {};
-      setCheckboxValue("apiRequestLoggingEnabled", modelApiLog.enabled);
-      setInputValue("apiRequestLogPath", modelApiLog.path);
       setInputValue("query", ui.query);
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
@@ -3649,45 +3462,16 @@ def build_redesigned_index_html() -> str:
       }
 
       const embedding = config.embedding || {};
-      if (modelApiLog.enabled === undefined) setCheckboxValue("apiRequestLoggingEnabled", embedding.log_requests_enabled);
-      if (modelApiLog.path === undefined) setInputValue("apiRequestLogPath", embedding.request_log_path);
       setCheckboxValue("enableEmbedding", embedding.enabled);
-      setInputValue("embeddingProvider", embedding.provider);
-      setInputValue("embeddingModel", embedding.model);
-      setInputValue("embeddingDimensions", embedding.dimensions);
-      setInputValue("embeddingBatchSize", embedding.batch_size);
-      setInputValue("embeddingBaseUrl", embedding.base_url);
-      setInputValue("embeddingNoProxyHosts", embedding.no_proxy_hosts);
-      setInputValue("embeddingApiKey", embedding.api_key);
 
       const rerank = config.rerank || {};
       setCheckboxValue("enableRerank", rerank.enabled);
-      setInputValue("rerankModel", rerank.model);
-      setInputValue("rerankBaseUrl", rerank.base_url);
-      setInputValue("rerankNoProxyHosts", rerank.no_proxy_hosts);
-      setInputValue("rerankApiKey", rerank.api_key);
 
       const queryParser = config.query_parser || {};
       setCheckboxValue("enableQueryParser", queryParser.enabled);
-      setInputValue("queryParserProvider", queryParser.provider);
-      setInputValue("queryParserModel", queryParser.model);
-      setInputValue("queryParserBaseUrl", queryParser.base_url);
-      setInputValue("queryParserNoProxyHosts", queryParser.no_proxy_hosts);
-      setInputValue("queryParserApiKey", queryParser.api_key);
 
       const llm = config.llm || {};
-      if (modelApiLog.enabled === undefined && embedding.log_requests_enabled === undefined) {
-        setCheckboxValue("apiRequestLoggingEnabled", llm.log_requests_enabled);
-      }
-      if (modelApiLog.path === undefined && embedding.request_log_path === undefined) {
-        setInputValue("apiRequestLogPath", llm.request_log_path);
-      }
       setCheckboxValue("enableLlm", llm.enabled);
-      setInputValue("llmProvider", llm.provider);
-      setInputValue("llmModel", llm.model);
-      setInputValue("llmBaseUrl", llm.base_url);
-      setInputValue("llmNoProxyHosts", llm.no_proxy_hosts);
-      setInputValue("llmApiKey", llm.api_key);
 
       if (ui.active_view) switchView(["qa", "batch"].includes(ui.active_view) ? ui.active_view : "build");
       if (!options.silent) setStatus("配置已导入", "success");
@@ -3695,12 +3479,16 @@ def build_redesigned_index_html() -> str:
 
     function setInputValue(id, value) {
       if (value === undefined || value === null) return;
-      $(id).value = String(value);
+      const element = $(id);
+      if (!element) return;
+      element.value = String(value);
     }
 
     function setCheckboxValue(id, value) {
       if (value === undefined || value === null) return;
-      $(id).checked = Boolean(value);
+      const element = $(id);
+      if (!element) return;
+      element.checked = Boolean(value);
     }
 
     function saveConfigToLocalStorage() {
@@ -3737,7 +3525,7 @@ def build_redesigned_index_html() -> str:
       link.remove();
       URL.revokeObjectURL(url);
       saveConfigToLocalStorage();
-      setStatus("配置已导出", "success");
+      setStatus("页面偏好已导出", "success");
     }
 
     async function importConfig() {
@@ -3749,43 +3537,49 @@ def build_redesigned_index_html() -> str:
       const text = await file.text();
       applyConfigSnapshot(JSON.parse(text));
       saveConfigToLocalStorage();
+      setStatus("页面偏好已导入", "success");
     }
 
     async function restoreSharedConfigFromServer() {
       try {
         const data = await getJson("/api/shared-config");
+        renderServerConfigSummary(data || {});
         if (!data || !data.config) return false;
         applyConfigSnapshot(data.config, {silent: true});
-        saveConfigToLocalStorage();
-        setStatus("已加载共享配置", "success");
+        setStatus("已读取服务端配置", "success");
         return true;
       } catch (error) {
-        setStatus(`共享配置加载失败：${error}`, "error");
+        setStatus(`服务端配置读取失败：${error}`, "error");
         return false;
       }
     }
 
-    async function saveSharedConfigToServer() {
-      const snapshot = currentConfigSnapshot();
-      const result = await postJson("/api/shared-config", {config: snapshot});
-      setStatus(`共享配置已保存：${result.path || ""}`, "success");
-      return result;
+    function renderServerConfigSummary(data) {
+      const target = $("serverConfigSummary");
+      if (!target) return;
+      const config = data && data.config ? data.config : {};
+      const path = data && data.path ? data.path : "未配置";
+      const database = data && data.database ? data.database : (config.database_url ? "<已配置>" : "使用环境变量或默认值");
+      const workOrderDir = config.work_order_dir || "未配置";
+      const manualDir = config.manual_dir || "未配置";
+      const envFile = config.env_file || "未配置";
+      target.innerHTML = `
+        配置文件：${escapeHtml(path)}<br>
+        数据库：${escapeHtml(database)}<br>
+        Env：${escapeHtml(envFile)}<br>
+        工单目录：${escapeHtml(workOrderDir)}<br>
+        手册目录：${escapeHtml(manualDir)}
+      `;
     }
 
     function bindAutoSave() {
       const ids = [
-        "databaseUrl", "envFile", "workOrderDir", "manualDir", "workOrderLimit", "manualLimit", "maxManualChars",
-        "apiRequestLoggingEnabled", "apiRequestLogPath",
+        "workOrderLimit", "manualLimit", "maxManualChars",
         "ingestReset", "ingestResume", "query", "topK", "evidenceTopK",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
         "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
         "batchEvalWorkOrderMaxHits", "batchEvalConcurrency",
-        "enableEmbedding", "embeddingProvider", "embeddingModel",
-        "embeddingDimensions", "embeddingBatchSize", "embeddingBaseUrl", "embeddingNoProxyHosts", "embeddingApiKey",
-        "enableRerank", "rerankModel", "rerankBaseUrl", "rerankNoProxyHosts", "rerankApiKey",
-        "enableQueryParser", "queryParserProvider", "queryParserModel", "queryParserBaseUrl", "queryParserNoProxyHosts", "queryParserApiKey",
-        "enableLlm",
-        "llmProvider", "llmModel", "llmBaseUrl", "llmNoProxyHosts", "llmApiKey"
+        "enableEmbedding", "enableRerank", "enableQueryParser", "enableLlm"
       ];
       for (const id of ids) {
         const element = $(id);
@@ -3798,9 +3592,8 @@ def build_redesigned_index_html() -> str:
     function ingestPayload() {
       return {
         ...commonPayload(),
-        work_order_dir: $("workOrderDir").value.trim() || null,
-        manual_dir: $("manualDir").value.trim() || null,
         reset: $("ingestReset").checked,
+        resume: $("ingestResume").checked,
         work_order_limit: $("workOrderLimit").value ? Number($("workOrderLimit").value) : null,
         manual_limit: $("manualLimit").value ? Number($("manualLimit").value) : null,
         max_manual_chars: $("maxManualChars").value ? Number($("maxManualChars").value) : 1800
@@ -4249,8 +4042,8 @@ def build_redesigned_index_html() -> str:
       $("buildProgressText").textContent = progress.message || payload.summary || "等待构建任务。";
       $("buildCurrentFile").textContent = progress.current_file ? `当前文件：${progress.current_file}` : "";
       $("buildSources").innerHTML = `
-        工单目录：${escapeHtml(report.work_order_dir || $("workOrderDir").value || "未配置")}<br>
-        手册目录：${escapeHtml(report.manual_dir || $("manualDir").value || "未配置")}<br>
+        工单目录：${escapeHtml(report.work_order_dir || "由服务端配置文件提供")}<br>
+        手册目录：${escapeHtml(report.manual_dir || "由服务端配置文件提供")}<br>
         文件进度：${escapeHtml(progress.processed_files ?? "-")} / ${escapeHtml(progress.total_files ?? "-")}
       `;
       renderBuildStats(counts, progress, timings);
@@ -4794,7 +4587,6 @@ def build_redesigned_index_html() -> str:
         setStatus("初始化 PostgreSQL");
         setStage("init", "active", null, "创建或检查表结构");
         const initResult = await postJson("/api/init-db", {
-          database_url: $("databaseUrl").value.trim() || null,
           reset: false
         });
         setStage("init", "done", initResult, "数据库初始化完成");
@@ -4924,7 +4716,6 @@ def build_redesigned_index_html() -> str:
         setStatus("初始化 PostgreSQL");
         setStage("init", "active", null, "创建或检查表结构");
         const initResult = await postJson("/api/init-db", {
-          database_url: $("databaseUrl").value.trim() || null,
           reset: false
         });
         setStage("init", "done", initResult, "数据库初始化完成");
@@ -5087,32 +4878,7 @@ def build_redesigned_index_html() -> str:
       }
     }
 
-    function applyEmbeddingProviderDefaults(force = false) {
-      const provider = $("embeddingProvider").value;
-      const baseInput = $("embeddingBaseUrl");
-      const modelInput = $("embeddingModel");
-      const dimensionInput = $("embeddingDimensions");
-      const shouldReplaceBase = force || !baseInput.value || [dashscopeBaseUrl, openaiBaseUrl, localEmbeddingBaseUrl].includes(baseInput.value.trim());
-      if (provider === "vllm") {
-        if (shouldReplaceBase) baseInput.value = localEmbeddingBaseUrl;
-        if (force) {
-          modelInput.value = "";
-          dimensionInput.value = "";
-          $("embeddingApiKey").value = "";
-        }
-      } else if (provider === "openai") {
-        if (shouldReplaceBase) baseInput.value = openaiBaseUrl;
-        if (force) dimensionInput.value = "";
-      } else if (provider === "dashscope") {
-        if (shouldReplaceBase) baseInput.value = dashscopeBaseUrl;
-        if (force && !modelInput.value.trim()) modelInput.value = "text-embedding-v4";
-        if (force && !dimensionInput.value.trim()) dimensionInput.value = "1024";
-      }
-    }
-
     function applyDemoDefaults(options = {}) {
-      $("workOrderDir").value = demoWorkOrderDir;
-      $("manualDir").value = demoManualDir;
       $("query").value = defaultQuery;
       $("topK").value = "1";
       $("evidenceTopK").value = "4";
@@ -5128,31 +4894,12 @@ def build_redesigned_index_html() -> str:
       $("manualLimit").value = "";
       $("ingestReset").checked = true;
       $("ingestResume").checked = true;
-      $("envFile").value = "";
       $("enableEmbedding").checked = false;
-      $("embeddingProvider").value = "vllm";
-      $("embeddingModel").value = "";
-      $("embeddingDimensions").value = "";
-      $("embeddingBaseUrl").value = localEmbeddingBaseUrl;
-      $("embeddingNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
       $("enableRerank").checked = false;
-      $("enableLlm").checked = false;
-      $("llmProvider").value = "dashscope";
-      $("embeddingApiKey").value = "";
-      $("rerankNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
-      $("llmNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
-      $("rerankApiKey").value = "";
       $("enableQueryParser").checked = false;
-      $("queryParserProvider").value = "dashscope";
-      $("queryParserModel").value = "qwen3.5-plus";
-      $("queryParserBaseUrl").value = dashscopeBaseUrl;
-      $("queryParserNoProxyHosts").value = "localhost,127.0.0.1,127.0.0.0/8,::1";
-      $("queryParserApiKey").value = "";
-      $("llmApiKey").value = "";
-      $("apiRequestLoggingEnabled").checked = true;
-      $("apiRequestLogPath").value = defaultModelApiRequestLogPath;
+      $("enableLlm").checked = false;
       if (options.save !== false) saveConfigToLocalStorage();
-      setStatus("已加载 Demo 配置", "success");
+      setStatus("已加载默认页面参数", "success");
     }
 
     function formatSeconds(value) {
@@ -5189,17 +4936,12 @@ def build_redesigned_index_html() -> str:
     $("saveConfigBtn").addEventListener("click", async () => {
       try {
         saveConfigToLocalStorage();
-        await saveSharedConfigToServer();
+        setStatus("页面偏好已保存；连接项仍以服务端配置文件为准", "success");
       } catch (error) {
-        setStatus(`配置保存失败：${error}`, "error");
+        setStatus(`页面偏好保存失败：${error}`, "error");
       }
     });
     $("loadDemoBtn").addEventListener("click", applyDemoDefaults);
-    $("docArborEnvBtn").addEventListener("click", () => {
-      $("envFile").value = docArborEnvPath;
-      setStatus("已填入 DocArbor Env 路径", "success");
-    });
-    $("embeddingProvider").addEventListener("change", () => applyEmbeddingProviderDefaults(true));
     $("exportConfigBtn").addEventListener("click", exportConfig);
     $("importConfigBtn").addEventListener("click", () => importConfig().catch(error => setStatus(String(error), "error")));
     $("buildViewBtn").addEventListener("click", () => {
@@ -5259,7 +5001,7 @@ def build_redesigned_index_html() -> str:
       applyDemoDefaults({save: false});
       bindAutoSave();
       const restoredSharedConfig = await restoreSharedConfigFromServer();
-      const restoredLocalConfig = restoredSharedConfig ? false : restoreConfigFromLocalStorage();
+      const restoredLocalConfig = restoreConfigFromLocalStorage();
       if (!appState.questionTabs.length) {
         const tab = makeQuestionTab($("query").value || defaultQuery);
         appState.questionTabs.push(tab);
@@ -5270,7 +5012,7 @@ def build_redesigned_index_html() -> str:
       setQuestionSidebar(appState.questionSidebarOpen, {save: false});
       renderBuildProgress({});
       const routeLoaded = await loadBatchEvalShareRoute();
-      if (!routeLoaded && !restoredSharedConfig && !restoredLocalConfig) switchView("build");
+      if (!routeLoaded && !restoredLocalConfig && !restoredSharedConfig) switchView("build");
       refreshTasks({quiet: true});
       refreshQuestionTabsFromServer({quiet: true});
       refreshBatchEvalRuns({quiet: true});
@@ -5398,11 +5140,19 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         payload = self._read_json()
         try:
             config = load_config(
-                optional_path(payload.get("config")),
-                overrides=object_payload(payload.get("config_overrides")),
-                env_path=optional_path(payload.get("env_file")),
+                config_path_from_payload(payload),
+                overrides=config_overrides_from_payload(payload),
+                env_path=env_path_from_payload(payload),
             )
-            self._send_json({"config": config.to_dict(), "database": redact_database_url(database_from_payload(payload).database_url)})
+            server_payload = redact_secrets(shared_config_payload())
+            self._send_json(
+                {
+                    "config": config.to_dict(),
+                    "server_config": server_payload,
+                    "server_config_path": str(shared_config_path()),
+                    "database": redact_database_url(database_from_payload(payload).database_url),
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_exception_json(exc)
 
@@ -5410,29 +5160,27 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         try:
             config_path = shared_config_path()
             if not config_path.exists():
-                self._send_json({"config": None, "path": str(config_path)})
+                self._send_json({"config": None, "path": str(config_path), "database": redact_database_url(database_from_payload({}).database_url)})
                 return
-            payload = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("shared config file must contain a JSON object")
-            self._send_json({"config": payload, "path": str(config_path)})
+            payload = shared_config_payload()
+            self._send_json(
+                {
+                    "config": redact_secrets(payload),
+                    "path": str(config_path),
+                    "database": redact_database_url(database_from_payload({}).database_url),
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_exception_json(exc)
 
     def _handle_save_shared_config(self) -> None:
-        payload = self._read_json()
-        try:
-            config = payload.get("config")
-            if not isinstance(config, dict):
-                raise ValueError("config is required")
-            config_path = shared_config_path()
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._send_json({"status": "saved", "path": str(config_path)})
-        except ValueError as exc:
-            self._send_exception_json(exc, status=HTTPStatus.BAD_REQUEST)
-        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
-            self._send_exception_json(exc)
+        self._read_json()
+        self._send_json(
+            {
+                "error": "server config is file-managed; edit WAJI_WEB_CONFIG_PATH or .git/info/waji-rag-shared-config.json on the server"
+            },
+            status=HTTPStatus.METHOD_NOT_ALLOWED,
+        )
 
     def _handle_init_db(self) -> None:
         payload = self._read_json()
@@ -5613,9 +5361,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 PgSearchOptions(
                     database=database,
                     query=query,
-                    config_path=optional_path(payload.get("config")),
-                    config_overrides=object_payload(payload.get("config_overrides")),
-                    env_path=optional_path(payload.get("env_file")),
+                    config_path=config_path_from_payload(payload),
+                    config_overrides=config_overrides_from_payload(payload),
+                    env_path=env_path_from_payload(payload),
                     top_k=int(payload.get("top_k") or 5),
                     include_debug=bool(payload.get("debug")),
                 )
@@ -5644,9 +5392,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 PgPipelineOptions(
                     database=database,
                     query=query,
-                    config_path=optional_path(payload.get("config")),
-                    config_overrides=object_payload(payload.get("config_overrides")),
-                    env_path=optional_path(payload.get("env_file")),
+                    config_path=config_path_from_payload(payload),
+                    config_overrides=config_overrides_from_payload(payload),
+                    env_path=env_path_from_payload(payload),
                     top_k=int(payload.get("top_k") or 5),
                     include_debug=bool(payload.get("debug")),
                 )
@@ -6018,24 +5766,125 @@ def shared_config_path() -> Path:
     return PROJECT_ROOT / ".waji-rag-shared-config.json"
 
 
-def database_from_payload(payload: dict[str, Any]) -> DatabaseOptions:
-    """Build database options from a web request payload."""
+def shared_config_payload() -> dict[str, Any]:
+    """Load the server-side web configuration file as a plain dictionary."""
 
-    database_url = str(payload.get("database_url") or "").strip() or None
-    return DatabaseOptions.from_env(database_url)
+    config_path = shared_config_path()
+    if not config_path.exists():
+        return {}
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("shared config file must contain a JSON object")
+    return payload
+
+
+def database_from_payload(payload: dict[str, Any]) -> DatabaseOptions:
+    """Build database options from the server-side web configuration."""
+
+    _ = payload
+    return shared_config_database()
 
 
 def shared_config_database() -> DatabaseOptions:
     """Build database options from server-side shared config or environment."""
 
-    config_path = shared_config_path()
-    if not config_path.exists():
-        return DatabaseOptions.from_env(None)
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("shared config file must contain a JSON object")
+    payload = shared_config_payload()
     database_url = str(payload.get("database_url") or "").strip() or None
     return DatabaseOptions.from_env(database_url)
+
+
+def config_path_from_payload(payload: dict[str, Any]) -> Path | None:
+    """Return the server-managed application config path, ignoring browser input."""
+
+    _ = payload
+    server_payload = shared_config_payload()
+    return optional_path(server_payload.get("config_path") or server_payload.get("config"))
+
+
+def env_path_from_payload(payload: dict[str, Any]) -> Path | None:
+    """Return the server-managed env file path, ignoring browser input."""
+
+    _ = payload
+    return optional_path(shared_config_payload().get("env_file"))
+
+
+def server_data_path(name: str) -> Path | None:
+    """Return a server-managed data path such as work_order_dir or manual_dir."""
+
+    return optional_path(shared_config_payload().get(name))
+
+
+def data_path_from_payload(payload: dict[str, Any], name: str) -> Path | None:
+    """Return an explicit payload data path or the server-managed default."""
+
+    if name in payload:
+        return optional_path(payload.get(name))
+    return server_data_path(name)
+
+
+def config_overrides_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge server model settings with safe browser-controlled runtime switches."""
+
+    server_overrides = server_app_config_overrides(shared_config_payload())
+    browser_overrides = safe_browser_config_overrides(object_payload(payload.get("config_overrides")) or {})
+    return deep_merge_dict(server_overrides, browser_overrides)
+
+
+def server_app_config_overrides(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract model/retrieval config sections from the server-side file."""
+
+    merged: dict[str, Any] = {}
+    for key in ("app_config", "config_overrides"):
+        section = payload.get(key)
+        if isinstance(section, dict):
+            merged = deep_merge_dict(merged, {item_key: item_value for item_key, item_value in section.items() if item_key in APP_CONFIG_SECTION_KEYS})
+    for key in APP_CONFIG_SECTION_KEYS:
+        section = payload.get(key)
+        if isinstance(section, dict):
+            merged = deep_merge_dict(merged, {key: section})
+    return merged
+
+
+def safe_browser_config_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    """Keep only non-connection runtime switches from browser-provided overrides."""
+
+    safe: dict[str, Any] = {}
+    retrieval = object_payload(overrides.get("retrieval")) or {}
+    safe_retrieval = {
+        key: retrieval[key]
+        for key in ("work_order_candidate_top_k", "work_order_min_relative_score", "work_order_max_hits")
+        if key in retrieval
+    }
+    if safe_retrieval:
+        safe["retrieval"] = safe_retrieval
+    for section_name in ("embedding", "rerank", "query_parser", "llm"):
+        section = object_payload(overrides.get(section_name)) or {}
+        if "enabled" in section:
+            safe[section_name] = {"enabled": bool(section["enabled"])}
+        if section_name == "rerank" and "top_n" in section:
+            safe.setdefault(section_name, {})["top_n"] = section["top_n"]
+    answer = object_payload(overrides.get("answer")) or {}
+    safe_answer = {
+        key: answer[key]
+        for key in ("evidence_top_k", "include_debug")
+        if key in answer
+    }
+    if safe_answer:
+        safe["answer"] = safe_answer
+    return safe
+
+
+def deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge plain dictionaries without mutating the inputs."""
+
+    merged = dict(base)
+    for key, value in overlay.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = deep_merge_dict(existing, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def optional_path(value: object) -> Path | None:
@@ -6096,13 +5945,13 @@ def ingest_options_from_payload(
 
     return PgIngestOptions(
         database=database,
-        work_order_dir=optional_path(payload.get("work_order_dir")),
-        manual_dir=optional_path(payload.get("manual_dir")),
+        work_order_dir=data_path_from_payload(payload, "work_order_dir"),
+        manual_dir=data_path_from_payload(payload, "manual_dir"),
         work_order_paths=path_list_payload(payload.get("work_order_paths")),
         manual_paths=path_list_payload(payload.get("manual_paths")),
-        config_path=optional_path(payload.get("config")),
-        config_overrides=object_payload(payload.get("config_overrides")),
-        env_path=optional_path(payload.get("env_file")),
+        config_path=config_path_from_payload(payload),
+        config_overrides=config_overrides_from_payload(payload),
+        env_path=env_path_from_payload(payload),
         reset=bool(payload.get("reset")),
         work_order_limit=optional_int(payload.get("work_order_limit")),
         manual_limit=optional_int(payload.get("manual_limit")),
@@ -6124,9 +5973,9 @@ def embedding_options_from_payload(
 
     return PgEmbeddingOptions(
         database=database,
-        config_path=optional_path(payload.get("config")),
-        config_overrides=object_payload(payload.get("config_overrides")),
-        env_path=optional_path(payload.get("env_file")),
+        config_path=config_path_from_payload(payload),
+        config_overrides=config_overrides_from_payload(payload),
+        env_path=env_path_from_payload(payload),
         limit=optional_int(payload.get("embedding_limit")),
         progress_callback=progress_callback,
         pause_callback=pause_callback,

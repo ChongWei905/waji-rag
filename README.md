@@ -102,13 +102,26 @@ docker compose up -d postgres
 python -m waji_rag.cli serve --host 127.0.0.1 --port 8765
 ```
 
+For shared access, keep connection-sensitive settings in a server-side JSON file instead of the browser. Copy `examples/web_config.example.json`, edit the database URL, data directories, model endpoints, keys or key env names, and start the server with:
+
+```bash
+WAJI_WEB_CONFIG_PATH=/absolute/path/to/web_config.json python -m waji_rag.cli serve --host 0.0.0.0 --port 8765
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:WAJI_WEB_CONFIG_PATH="D:\ACodesTree\waji-rag\web_config.json"
+python -m waji_rag.cli serve --host 0.0.0.0 --port 8765
+```
+
 Open:
 
 ```text
 http://127.0.0.1:8765
 ```
 
-The page separates `索引构建` from `检索与回答`. The build page starts large ingest jobs in the background, polls task progress, and shows source directories, file progress, current file, document counts, term rows, embeddings, and failures. The QA page focuses on retrieval and answer generation. Selecting a stage in the left rail changes the main content to the corresponding stage details instead of showing every panel at once.
+The page separates `索引构建` from `检索与回答`. The build page starts large ingest jobs in the background, polls task progress, and shows source directories, file progress, current file, document counts, term rows, embeddings, and failures. The QA page focuses on retrieval and answer generation. Selecting a stage in the left rail changes the main content to the corresponding stage details instead of showing every panel at once. Browser-side settings are limited to runtime switches and retrieval parameters; database, env file, model API, proxy, key, and data-directory settings are read only from the server-side config file or environment.
 
 The web UI also persists build/search/answer runs in PostgreSQL as task records. After ingesting a document batch once, you can repeatedly run new retrieval or answer tasks from the same database, then reload any previous task from the left-side task list to inspect its status, request, result, retrieval channels, selected evidence, and generated answer.
 
