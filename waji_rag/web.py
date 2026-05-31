@@ -1052,6 +1052,19 @@ def build_redesigned_index_html() -> str:
       overflow-y: auto;
       padding-right: 2px;
     }
+    .batch-metric-selector {
+      display: grid;
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+    .batch-metric-selector label {
+      font-size: 12px;
+      color: var(--muted);
+      margin: 0;
+    }
+    .batch-metric-selector select {
+      min-height: 34px;
+    }
     .question-tab {
       width: 100%;
       min-height: 44px;
@@ -1844,6 +1857,14 @@ def build_redesigned_index_html() -> str:
         <h2 id="questionSidebarTitle">历史回答</h2>
         <button id="closeQuestionSidebarBtn" class="ghost">收起</button>
       </div>
+      <div id="batchMetricSelector" class="batch-metric-selector hidden">
+        <label for="batchMetricSelect">评测指标</label>
+        <select id="batchMetricSelect">
+          <option value="part_recall">备件召回率</option>
+          <option value="part_exact">备件正确率</option>
+          <option value="work_order_recall">工单召回率</option>
+        </select>
+      </div>
       <div id="questionTabs" class="question-tabs"></div>
       <button id="newQuestionBtn" class="secondary">新问题</button>
     </aside>
@@ -2176,6 +2197,11 @@ def build_redesigned_index_html() -> str:
       ["rerank", "重排", "可选 rerank；失败或关闭则保留原顺序"],
       ["answer", "答案生成", "用选中证据和备件候选生成最终答复"]
     ];
+    const batchEvalMetricOptions = [
+      ["part_recall", "备件召回率"],
+      ["part_exact", "备件正确率"],
+      ["work_order_recall", "工单召回率"]
+    ];
     let appState = {
       stages: {},
       selectedStage: "config",
@@ -2218,6 +2244,7 @@ def build_redesigned_index_html() -> str:
         settings: null,
         partColumns: null,
         workOrderColumn: null,
+        selectedMetric: "part_recall",
         questionIndex: null,
         persistPromise: Promise.resolve(),
         persistError: null
@@ -2427,6 +2454,16 @@ def build_redesigned_index_html() -> str:
       $("openQuestionSidebarHeaderBtn").textContent = isBatch ? "评测问题" : "回答历史";
       $("openQuestionSidebarBtn").textContent = isBatch ? "评测问题" : "历史回答";
       $("newQuestionBtn").classList.toggle("hidden", isBatch);
+      const metricSelector = $("batchMetricSelector");
+      if (metricSelector) metricSelector.classList.toggle("hidden", !isBatch);
+      renderBatchMetricSelector();
+    }
+
+    function renderBatchMetricSelector() {
+      const select = $("batchMetricSelect");
+      if (!select) return;
+      const metric = selectedBatchEvalMetric();
+      if (select.value !== metric) select.value = metric;
     }
 
     function questionTabMeta(tab) {
@@ -2712,6 +2749,7 @@ def build_redesigned_index_html() -> str:
       }
       container.innerHTML = appState.batchEvalRuns.map(task => {
         const counts = task.counts || {};
+        const metricLabel = batchEvalMetricLabel(counts.selected_metric || "part_recall");
         const active = Number(task.id) === Number(appState.activeBatchEvalTaskId);
         const shareId = batchEvalShareId(task);
         const sharePath = shareId ? `/${shareId}` : "生成中";
@@ -2721,7 +2759,7 @@ def build_redesigned_index_html() -> str:
               <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(batchEvalTaskTitle(task))}</span>
               <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
             </div>
-            <div class="task-subtitle">正确 ${escapeHtml(counts.pass ?? 0)} · 黄色 ${escapeHtml(counts.warn ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
+            <div class="task-subtitle">${escapeHtml(metricLabel)} · 正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
             <div class="row-meta">分享路径：${escapeHtml(sharePath)}</div>
             <div class="row-meta">${escapeHtml(compactTime(task.updated_at || task.created_at))}</div>
           </button>
@@ -2806,6 +2844,7 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.settings = result.settings || null;
       appState.batchEval.partColumns = result.part_columns || null;
       appState.batchEval.workOrderColumn = result.work_order_column ?? null;
+      appState.batchEval.selectedMetric = result.selected_metric || appState.batchEval.selectedMetric || "part_recall";
       appState.batchEval.questionIndex = result.question_column ?? null;
       syncBatchRetryDefaults(appState.batchEval.settings);
       renderBatchEvalPage();
@@ -2862,7 +2901,10 @@ def build_redesigned_index_html() -> str:
       const container = $("questionTabs");
       if (!container) return;
       if (appState.activeView !== "batch") return;
+      renderBatchMetricSelector();
       const rows = orderedBatchEvalResults();
+      const metric = selectedBatchEvalMetric();
+      const metricLabel = batchEvalMetricLabel(metric);
       if (!appState.activeBatchEvalTaskId) {
         container.innerHTML = '<div class="empty">选择或发起一个批量评测后，这里会显示该批次的问题。</div>';
         return;
@@ -2872,19 +2914,22 @@ def build_redesigned_index_html() -> str:
         return;
       }
       const overviewActive = appState.activeBatchEvalRowNumber === null;
-      const counts = batchEvalCounts(rows);
+      const counts = batchEvalCounts(rows, metric);
       const overview = `
         <button class="question-tab overview ${overviewActive ? "active" : ""}" data-batch-overview="1">
           <div class="question-tab-title">整体进展</div>
-          <div class="question-tab-meta">${escapeHtml(counts.done)} / ${escapeHtml(counts.total)} · 正确 ${escapeHtml(counts.pass)} · 黄色 ${escapeHtml(counts.warn)} · 失败 ${escapeHtml(counts.fail)}</div>
+          <div class="question-tab-meta">${escapeHtml(metricLabel)} · ${escapeHtml(counts.done)} / ${escapeHtml(counts.total)} · 正确 ${escapeHtml(counts.pass)} · 失败 ${escapeHtml(counts.fail)}</div>
         </button>
       `;
-      container.innerHTML = overview + rows.map(item => `
-        <button class="question-tab ${escapeHtml(item.status || "")} ${Number(item.rowNumber) === Number(appState.activeBatchEvalRowNumber) ? "active" : ""}" data-row-number="${escapeHtml(item.rowNumber)}">
-          <div class="question-tab-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(batchEvalStatusText(item.status))} · ${escapeHtml(questionTitle(item.question || ""))}</div>
-          <div class="question-tab-meta">${escapeHtml(item.taskId ? `检索 #${item.taskId}` : batchEvalReason(item) || "无检索任务")}</div>
+      container.innerHTML = overview + rows.map(item => {
+        const status = batchEvalMetricStatus(item, metric);
+        return `
+        <button class="question-tab ${escapeHtml(status)} ${Number(item.rowNumber) === Number(appState.activeBatchEvalRowNumber) ? "active" : ""}" data-row-number="${escapeHtml(item.rowNumber)}">
+          <div class="question-tab-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(batchEvalStatusText(status))} · ${escapeHtml(questionTitle(item.question || ""))}</div>
+          <div class="question-tab-meta">${escapeHtml(item.taskId ? `检索 #${item.taskId}` : batchEvalReason(item, metric) || "无检索任务")}</div>
         </button>
-      `).join("");
+      `;
+      }).join("");
       const overviewButton = container.querySelector("[data-batch-overview]");
       if (overviewButton) overviewButton.addEventListener("click", activateBatchEvalOverview);
       for (const button of container.querySelectorAll("[data-row-number]")) {
@@ -2910,14 +2955,17 @@ def build_redesigned_index_html() -> str:
       $("query").value = item.question || "";
       resetStages("batch", "retrieval");
       renderBatchEvalPage();
+      const metric = selectedBatchEvalMetric();
+      const metricStatus = batchEvalMetricStatus(item, metric);
+      const metricStatusKind = metricStatus === "pass" ? "success" : metricStatus === "fail" || metricStatus === "error" ? "error" : "";
       if (!item.taskId) {
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
         renderSelectedEvidence([]);
         $("answer").textContent = item.message || "该行没有可重现的检索任务。";
-        setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item) || "无原始召回任务");
-        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)} · 无原始召回任务，可按当前参数重试检索。`;
-        setStatus(`已打开批量评测第 ${item.rowNumber} 行`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
+        setStage("retrieval", item.status === "skipped" ? "skipped" : "error", item, batchEvalReason(item, metric) || "无原始召回任务");
+        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalMetricLabel(metric)} ${batchEvalStatusText(metricStatus)} · 无原始召回任务，可按当前参数重试检索。`;
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行`, metricStatusKind);
         return;
       }
       try {
@@ -2929,8 +2977,8 @@ def build_redesigned_index_html() -> str:
         if (!task) throw new Error(`task not found: ${item.taskId}`);
         appState.currentTaskId = task.id;
         renderBatchOriginalRetrieval(item, task.result && task.result.result ? task.result.result : task.result || {});
-        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalStatusText(item.status)} · 当前展示批量评测时的原始召回；点击重试按钮才会重新检索。`;
-        setStatus(`已打开批量评测第 ${item.rowNumber} 行原始召回`, item.status === "pass" ? "success" : item.status === "fail" || item.status === "error" ? "error" : "");
+        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalMetricLabel(metric)} ${batchEvalStatusText(metricStatus)} · 当前展示批量评测时的原始召回；点击重试按钮才会重新检索。`;
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行原始召回`, metricStatusKind);
       } catch (error) {
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
@@ -3069,6 +3117,7 @@ def build_redesigned_index_html() -> str:
           row_count: appState.batchEval.rows.length,
           headers: appState.batchEval.headers,
           settings,
+          selected_metric: selectedBatchEvalMetric(),
           question_column: questionIndex,
           work_order_column: workOrderColumn,
           part_columns: partColumns
@@ -3105,6 +3154,7 @@ def build_redesigned_index_html() -> str:
         headers: appState.batchEval.headers || [],
         row_count: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         settings: appState.batchEval.settings || null,
+        selected_metric: selectedBatchEvalMetric(),
         question_column: appState.batchEval.questionIndex,
         work_order_column: appState.batchEval.workOrderColumn,
         part_columns: appState.batchEval.partColumns || null,
@@ -3114,27 +3164,66 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    function batchEvalCounts(results = appState.batchEval.results) {
+    function batchEvalCounts(results = appState.batchEval.results, metric = selectedBatchEvalMetric()) {
       const rows = results || [];
       const workOrderRequired = rows.filter(item => item.expectedWorkOrderId).length;
+      const statuses = rows.map(item => batchEvalMetricStatus(item, metric));
       return {
         total: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         done: rows.length,
-        pass: rows.filter(item => item.status === "pass").length,
-        warn: rows.filter(item => item.status === "warn").length,
-        fail: rows.filter(item => item.status === "fail").length,
-        error: rows.filter(item => item.status === "error").length,
-        skipped: rows.filter(item => item.status === "skipped").length,
+        pass: statuses.filter(status => status === "pass").length,
+        warn: 0,
+        fail: statuses.filter(status => status === "fail").length,
+        error: statuses.filter(status => status === "error").length,
+        skipped: statuses.filter(status => status === "skipped").length,
         work_order_required: workOrderRequired,
         work_order_pass: rows.filter(item => item.match && item.match.work_order && item.match.work_order.required && item.match.work_order.correct).length,
-        part_pass: rows.filter(item => batchEvalPartCorrect(item)).length
+        part_recall_pass: rows.filter(item => batchEvalMetricCorrect(item, "part_recall")).length,
+        part_exact_pass: rows.filter(item => batchEvalMetricCorrect(item, "part_exact")).length,
+        selected_metric: metric,
+        metric_counts: batchEvalAllMetricCounts(rows)
       };
     }
 
     function batchEvalPartCorrect(item) {
-      const match = (item && item.match) || {};
-      if (typeof match.part_correct === "boolean") return match.part_correct;
-      return item && (item.status === "pass" || item.status === "warn");
+      return batchEvalMetricCorrect(item, "part_exact");
+    }
+
+    function selectedBatchEvalMetric() {
+      const metric = appState.batchEval && appState.batchEval.selectedMetric ? appState.batchEval.selectedMetric : "part_recall";
+      return batchEvalMetricOptions.some(([value]) => value === metric) ? metric : "part_recall";
+    }
+
+    function batchEvalMetricLabel(metric = selectedBatchEvalMetric()) {
+      const found = batchEvalMetricOptions.find(([value]) => value === metric);
+      return found ? found[1] : "备件召回率";
+    }
+
+    function batchEvalMetricStatus(item, metric = selectedBatchEvalMetric()) {
+      if (!item) return "fail";
+      if (item.status === "error" || item.status === "skipped") return item.status;
+      return batchEvalMetricCorrect(item, metric) ? "pass" : "fail";
+    }
+
+    function batchEvalMetricCorrect(item, metric = selectedBatchEvalMetric()) {
+      const match = item && item.match ? item.match : {};
+      if (metric === "part_exact") return Boolean(match.part_exact_correct ?? match.part_correct ?? false);
+      if (metric === "work_order_recall") return Boolean(match.work_order ? match.work_order.correct : false);
+      return Boolean(match.part_recall_correct ?? (Array.isArray(match.missing) && match.missing.length === 0));
+    }
+
+    function batchEvalAllMetricCounts(rows) {
+      const payload = {};
+      for (const [metric] of batchEvalMetricOptions) {
+        const statuses = (rows || []).map(item => batchEvalMetricStatus(item, metric));
+        payload[metric] = {
+          pass: statuses.filter(status => status === "pass").length,
+          fail: statuses.filter(status => status === "fail").length,
+          error: statuses.filter(status => status === "error").length,
+          skipped: statuses.filter(status => status === "skipped").length
+        };
+      }
+      return payload;
     }
 
     function batchEvalSettings() {
@@ -3323,15 +3412,33 @@ def build_redesigned_index_html() -> str:
     }
 
     function evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds) {
-      const partMatch = evaluatePartRecall(expectedParts, retrievedParts);
+      const recallMatch = evaluatePartSetMatch(expectedParts, retrievedParts, expectedPartMatches);
+      const exactMatch = evaluatePartSetMatch(expectedParts, retrievedParts, expectedPartExactMatches);
       const workOrderMatch = evaluateWorkOrderRecall(expectedWorkOrderId, retrievedWorkOrderIds);
-      const correct = partMatch.correct && workOrderMatch.correct;
+      const partRecallCorrect = recallMatch.missing.length === 0;
+      const partExactCorrect = exactMatch.missing.length === 0 && exactMatch.unexpected.length === 0;
+      const correct = partExactCorrect && workOrderMatch.correct;
       return {
-        ...partMatch,
+        ...exactMatch,
         correct,
-        part_correct: partMatch.correct,
+        part_correct: partExactCorrect,
+        part_recall_correct: partRecallCorrect,
+        part_exact_correct: partExactCorrect,
+        part_recall: {
+          ...recallMatch,
+          correct: partRecallCorrect
+        },
+        part_exact: {
+          ...exactMatch,
+          correct: partExactCorrect
+        },
         work_order: workOrderMatch,
-        yellow_error: partMatch.correct && workOrderMatch.required && !workOrderMatch.correct
+        metric_results: {
+          part_recall: partRecallCorrect,
+          part_exact: partExactCorrect,
+          work_order_recall: workOrderMatch.correct
+        },
+        yellow_error: partExactCorrect && workOrderMatch.required && !workOrderMatch.correct
       };
     }
 
@@ -3364,21 +3471,13 @@ def build_redesigned_index_html() -> str:
       return "fail";
     }
 
-    function evaluatePartRecall(expectedParts, retrievedParts) {
-      if (!expectedParts.length) {
-        return {
-          correct: retrievedParts.length === 0,
-          matched: [],
-          missing: [],
-          unexpected_count: retrievedParts.length
-        };
-      }
+    function evaluatePartSetMatch(expectedParts, retrievedParts, matches) {
       const matched = [];
       const missing = [];
       const usedCandidateIndexes = new Set();
       for (const expected of expectedParts) {
         const matchedIndex = retrievedParts.findIndex((candidate, index) => (
-          !usedCandidateIndexes.has(index) && expectedPartMatches(expected, candidate)
+          !usedCandidateIndexes.has(index) && matches(expected, candidate)
         ));
         if (matchedIndex >= 0) {
           usedCandidateIndexes.add(matchedIndex);
@@ -3387,11 +3486,13 @@ def build_redesigned_index_html() -> str:
           missing.push(expected);
         }
       }
+      const unexpected = retrievedParts.filter((_, index) => !usedCandidateIndexes.has(index));
       return {
-        correct: missing.length === 0,
+        correct: missing.length === 0 && unexpected.length === 0,
         matched,
         missing,
-        unexpected_count: 0
+        unexpected,
+        unexpected_count: unexpected.length
       };
     }
 
@@ -3401,11 +3502,22 @@ def build_redesigned_index_html() -> str:
         && partQuantityMatches(expected.quantity, actual.quantity);
     }
 
+    function expectedPartExactMatches(expected, actual) {
+      return partNameExactMatches(expected.name, actual.name)
+        && partCodeMatches(expected.code, actual.code)
+        && partQuantityMatches(expected.quantity, actual.quantity);
+    }
+
     function partNameMatches(expected, actual) {
       if (!String(expected || "").trim()) return true;
       const left = normalizeEvalText(expected);
       const right = normalizeEvalText(actual);
       return Boolean(left && right && (right.includes(left) || left.includes(right)));
+    }
+
+    function partNameExactMatches(expected, actual) {
+      if (!String(expected || "").trim()) return true;
+      return normalizeEvalText(expected) === normalizeEvalText(actual);
     }
 
     function partCodeMatches(expected, actual) {
@@ -3427,17 +3539,18 @@ def build_redesigned_index_html() -> str:
 
     function renderBatchEvalResults(done = appState.batchEval.results.length, total = appState.batchEval.rows.length) {
       const results = appState.batchEval.results || [];
-      const counts = batchEvalCounts(results);
+      const metric = selectedBatchEvalMetric();
+      const counts = batchEvalCounts(results, metric);
+      const metricLabel = batchEvalMetricLabel(metric);
       const safeTotal = total || counts.total || results.length;
       const percent = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
       $("batchEvalProgressBar").style.width = `${Math.min(Math.max(percent, 0), 100)}%`;
       $("batchEvalSummary").innerHTML = [
+        ["当前指标", metricLabel],
         ["总行数", counts.total],
         ["已评测", counts.done],
         ["正确", counts.pass],
-        ["黄色错误", counts.warn],
         ["失败", counts.fail],
-        ["工单命中", counts.work_order_required ? `${counts.work_order_pass} / ${counts.work_order_required}` : "未配置"],
         ["错误/跳过", `${counts.error} / ${counts.skipped}`],
       ].map(([label, value]) => `
         <div class="stat-card">
@@ -3453,25 +3566,21 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderBatchEvalRow(item) {
-      const statusText = {
-        pass: "正确",
-        warn: "工单未命中",
-        fail: "失败",
-        error: "错误",
-        skipped: "跳过"
-      }[item.status] || item.status;
+      const metric = selectedBatchEvalMetric();
+      const status = batchEvalMetricStatus(item, metric);
+      const statusText = batchEvalStatusText(status);
       const expected = item.expectedParts && item.expectedParts.length ? item.expectedParts.map(formatExpectedPart).join("<br>") : "期望不召回备件";
       const actual = item.retrievedParts && item.retrievedParts.length ? item.retrievedParts.map(formatRetrievedPart).join("<br>") : "未召回备件";
       const expectedWorkOrder = item.expectedWorkOrderId ? escapeHtml(item.expectedWorkOrderId) : "未配置预期工单";
       const actualWorkOrders = item.retrievedWorkOrderIds && item.retrievedWorkOrderIds.length
         ? item.retrievedWorkOrderIds.map(id => escapeHtml(id)).join("<br>")
         : "未召回历史工单";
-      const reason = batchEvalReason(item);
+      const reason = batchEvalReason(item, metric);
       return `
-        <div class="eval-row ${escapeHtml(item.status)}">
+        <div class="eval-row ${escapeHtml(status)}">
           <div class="eval-row-head">
             <div class="row-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(statusText)}</div>
-            <div class="row-meta">${item.taskId ? `task #${escapeHtml(item.taskId)}` : ""}</div>
+            <div class="row-meta">${escapeHtml(batchEvalMetricLabel(metric))}${item.taskId ? ` · task #${escapeHtml(item.taskId)}` : ""}</div>
           </div>
           <div class="row-meta">${escapeHtml(item.question || "")}</div>
           <div class="eval-row-grid">
@@ -3489,20 +3598,27 @@ def build_redesigned_index_html() -> str:
       return [...(results || [])].sort((left, right) => Number(left.rowNumber || 0) - Number(right.rowNumber || 0));
     }
 
-    function batchEvalReason(item) {
+    function batchEvalReason(item, metric = selectedBatchEvalMetric()) {
       if (item.message) return item.message;
       const match = item.match || {};
       const lines = [];
       const workOrder = match.work_order || {};
-      if (Array.isArray(match.missing) && match.missing.length) {
-        lines.push(`未命中备件：${match.missing.map(formatExpectedPartText).join("；")}`);
+      if (metric === "work_order_recall") {
+        if (workOrder.required && !workOrder.correct) {
+          lines.push(`未召回预期工单：${workOrder.expected || item.expectedWorkOrderId || ""}`);
+        }
+        return lines.join("；");
       }
-      if (match.unexpected_count) {
-        lines.push(`期望不召回备件，但召回 ${match.unexpected_count} 条`);
+      const partMatch = metric === "part_exact" ? (match.part_exact || match) : (match.part_recall || match);
+      if (Array.isArray(partMatch.missing) && partMatch.missing.length) {
+        lines.push(`未命中备件：${partMatch.missing.map(formatExpectedPartText).join("；")}`);
       }
-      if (workOrder.required && !workOrder.correct) {
-        lines.push(`${batchEvalPartCorrect(item) ? "备件命中，但" : ""}未召回预期工单：${workOrder.expected || item.expectedWorkOrderId || ""}`);
+      if (metric === "part_exact" && partMatch.unexpected_count) {
+        const unexpected = Array.isArray(partMatch.unexpected) ? partMatch.unexpected : [];
+        if (unexpected.length) lines.push(`额外召回备件：${unexpected.map(formatRetrievedPartText).join("；")}`);
       }
+      if (!lines.length && metric === "part_recall") return "预期备件均已召回";
+      if (!lines.length && metric === "part_exact") return "预期备件与召回备件一致";
       return lines.join("；");
     }
 
@@ -3543,32 +3659,36 @@ def build_redesigned_index_html() -> str:
     }
 
     function exportBatchEvalResults() {
+      const metric = selectedBatchEvalMetric();
       const rows = [[
         "row",
-        "status",
+        "selected_metric",
+        "selected_metric_status",
         "question",
         "expected_work_order_id",
         "retrieved_work_order_ids",
-        "work_order_match",
+        "part_recall_match",
+        "part_exact_match",
+        "work_order_recall_match",
         "expected_parts",
         "retrieved_parts",
-        "part_match",
         "message"
       ]];
       for (const item of orderedBatchEvalResults()) {
         const match = item.match || {};
-        const workOrder = match.work_order || {};
         rows.push([
           item.rowNumber,
-          item.status,
+          metric,
+          batchEvalMetricStatus(item, metric),
           item.question || "",
           item.expectedWorkOrderId || "",
           (item.retrievedWorkOrderIds || []).join(" | "),
-          workOrder.required ? (workOrder.correct ? "pass" : "fail") : "not_configured",
+          batchEvalMetricCorrect(item, "part_recall") ? "pass" : "fail",
+          batchEvalMetricCorrect(item, "part_exact") ? "pass" : "fail",
+          batchEvalMetricCorrect(item, "work_order_recall") ? "pass" : "fail",
           (item.expectedParts || []).map(formatExpectedPartText).join(" | ") || "期望不召回备件",
           (item.retrievedParts || []).map(formatRetrievedPartText).join(" | "),
-          batchEvalPartCorrect(item) ? "pass" : "fail",
-          batchEvalReason(item),
+          batchEvalReason(item, metric),
         ]);
       }
       const csv = rows.map(row => row.map(csvCell).join(",")).join("\n");
@@ -3607,7 +3727,8 @@ def build_redesigned_index_html() -> str:
           work_order_candidate_top_k: $("batchEvalWorkOrderCandidateTopK").value,
           work_order_min_relative_score: $("batchEvalWorkOrderMinRelativeScore").value,
           work_order_max_hits: $("batchEvalWorkOrderMaxHits").value,
-          concurrency: $("batchEvalConcurrency").value
+          concurrency: $("batchEvalConcurrency").value,
+          selected_metric: selectedBatchEvalMetric()
         },
         work_order_limit: $("workOrderLimit").value,
         manual_limit: $("manualLimit").value,
@@ -3650,6 +3771,7 @@ def build_redesigned_index_html() -> str:
       setInputValue("batchEvalWorkOrderMinRelativeScore", batchEval.work_order_min_relative_score ?? ui.batch_eval_work_order_min_relative_score);
       setInputValue("batchEvalWorkOrderMaxHits", batchEval.work_order_max_hits ?? ui.batch_eval_work_order_max_hits);
       setInputValue("batchEvalConcurrency", batchEval.concurrency ?? ui.batch_eval_concurrency);
+      if (batchEval.selected_metric) appState.batchEval.selectedMetric = batchEval.selected_metric;
       if (ui.question_sidebar_open !== undefined) {
         setQuestionSidebar(Boolean(ui.question_sidebar_open), {save: false});
       }
@@ -4077,6 +4199,8 @@ def build_redesigned_index_html() -> str:
 
     function renderBatchEvalComparison(item) {
       const comparison = currentBatchEvalComparison(item);
+      const metric = selectedBatchEvalMetric();
+      const metricPassed = batchEvalMetricCorrect({match: comparison.match}, metric);
       const expected = comparison.expectedParts.length
         ? comparison.expectedParts.map(part => `<div class="row-meta">${escapeHtml(formatExpectedPartText(part))}</div>`).join("")
         : '<div class="empty">期望不召回备件</div>';
@@ -4098,7 +4222,7 @@ def build_redesigned_index_html() -> str:
               <div class="row-title">预期答案 / 当前召回对比</div>
               <div class="row-meta">当前召回来源：${escapeHtml(comparison.source || "原始评测")}</div>
             </div>
-            <span class="pill ${comparison.match.correct ? "ok" : "warn"}">${comparison.match.correct ? "命中" : "未命中"}</span>
+            <span class="pill ${metricPassed ? "ok" : "warn"}">${escapeHtml(batchEvalMetricLabel(metric))}：${metricPassed ? "正确" : "失败"}</span>
           </div>
           <div class="batch-comparison-grid">
             <div class="batch-comparison-field">
@@ -4118,33 +4242,32 @@ def build_redesigned_index_html() -> str:
               ${actualWorkOrders}
             </div>
             <div class="batch-comparison-field">
-              ${renderBatchEvalMatchSummary(comparison.match)}
+              ${renderBatchEvalMatchSummary(comparison.match, metric)}
             </div>
           </div>
         </div>
       `;
     }
 
-    function renderBatchEvalMatchSummary(match) {
-      const missing = Array.isArray(match.missing) ? match.missing : [];
-      const matched = Array.isArray(match.matched) ? match.matched : [];
-      const unexpectedCount = Number(match.unexpected_count || 0);
+    function renderBatchEvalMatchSummary(match, metric = selectedBatchEvalMetric()) {
+      const metricPassed = batchEvalMetricCorrect({match}, metric);
+      const label = batchEvalMetricLabel(metric);
       const workOrder = match.work_order || {};
-      if (match.correct) {
-        return `
-          <div class="match-status pass">当前结果正确</div>
-          <div class="row-meta">命中 ${escapeHtml(matched.length)} 条预期备件${workOrder.required ? `，并召回预期工单 ${escapeHtml(workOrder.matched || workOrder.expected || "")}` : ""}。</div>
-        `;
-      }
       const lines = [];
-      if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
-      if (unexpectedCount) lines.push(`期望不召回备件，但当前召回 ${unexpectedCount} 条`);
-      if (workOrder.required && !workOrder.correct) {
-        lines.push(`${match.part_correct ? "备件已匹配，但" : ""}未召回预期工单 ${workOrder.expected || ""}`);
+      if (metric === "work_order_recall") {
+        lines.push(workOrder.correct ? `已召回预期工单 ${workOrder.matched || workOrder.expected || ""}` : `未召回预期工单 ${workOrder.expected || ""}`);
+      } else {
+        const partMatch = metric === "part_exact" ? (match.part_exact || match) : (match.part_recall || match);
+        const missing = Array.isArray(partMatch.missing) ? partMatch.missing : [];
+        const matched = Array.isArray(partMatch.matched) ? partMatch.matched : [];
+        const unexpected = Array.isArray(partMatch.unexpected) ? partMatch.unexpected : [];
+        if (matched.length) lines.push(`命中：${matched.map(item => formatExpectedPartText(item.expected)).join("；")}`);
+        if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
+        if (metric === "part_exact" && unexpected.length) lines.push(`额外召回：${unexpected.map(formatRetrievedPartText).join("；")}`);
       }
       return `
-        <div class="match-status ${match.yellow_error ? "warn" : "fail"}">${match.yellow_error ? "备件命中，但预期工单未召回" : "当前结果未通过"}</div>
-        <div class="row-meta">${escapeHtml(lines.join("；") || "召回结果与预期不一致")}</div>
+        <div class="match-status ${metricPassed ? "pass" : "fail"}">${escapeHtml(label)}：${metricPassed ? "正确" : "失败"}</div>
+        <div class="row-meta">${escapeHtml(lines.join("；") || "无可展示的差异")}</div>
       `;
     }
 
@@ -5182,6 +5305,11 @@ def build_redesigned_index_html() -> str:
     $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
+    $("batchMetricSelect").addEventListener("change", () => {
+      appState.batchEval.selectedMetric = $("batchMetricSelect").value;
+      renderBatchEvalPage();
+      saveConfigToLocalStorage();
+    });
     $("query").addEventListener("input", syncActiveQuestionInput);
     window.addEventListener("popstate", () => {
       const shareId = routeBatchEvalShareIdFromPath(window.location.pathname);
@@ -5703,9 +5831,19 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 "headers": batch_eval.get("headers") if isinstance(batch_eval.get("headers"), list) else [],
                 "row_count": row_count,
                 "settings": batch_eval.get("settings") if isinstance(batch_eval.get("settings"), dict) else {},
+                "selected_metric": batch_eval.get("selected_metric") or "part_recall",
                 "question_column": batch_eval.get("question_column"),
+                "work_order_column": batch_eval.get("work_order_column"),
                 "part_columns": batch_eval.get("part_columns") if isinstance(batch_eval.get("part_columns"), dict) else {},
-                "counts": {"total": row_count, "done": 0, "pass": 0, "fail": 0, "error": 0, "skipped": 0},
+                "counts": {
+                    "total": row_count,
+                    "done": 0,
+                    "pass": 0,
+                    "fail": 0,
+                    "error": 0,
+                    "skipped": 0,
+                    "selected_metric": batch_eval.get("selected_metric") or "part_recall",
+                },
                 "rows": [],
                 "updated_at": iso_datetime(datetime.now(timezone.utc)),
             }
@@ -6920,8 +7058,15 @@ def batch_eval_summary(result: dict[str, Any]) -> str:
     failed = int(counts.get("fail") or 0)
     errors = int(counts.get("error") or 0)
     status = str(result.get("status") or "running")
+    metric = str(counts.get("selected_metric") or result.get("selected_metric") or "")
+    metric_names = {
+        "part_recall": "备件召回率",
+        "part_exact": "备件正确率",
+        "work_order_recall": "工单召回率",
+    }
+    metric_text = f"{metric_names.get(metric)} " if metric in metric_names else ""
     warn_text = f" · 黄色 {warned}" if warned else ""
-    return f"{status} · {done}/{total} · 正确 {passed}{warn_text} · 失败 {failed} · 错误 {errors}"
+    return f"{status} · {done}/{total} · {metric_text}正确 {passed}{warn_text} · 失败 {failed} · 错误 {errors}"
 
 
 def max_iso_datetime(left: object, right: object) -> object:
