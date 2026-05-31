@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from waji_rag.web import (
     batch_eval_share_path,
@@ -17,6 +18,7 @@ from waji_rag.web import (
     is_retryable_task_db_error,
     normalize_batch_eval_share_id,
     retry_ingest_payload,
+    shared_config_path,
     shared_config_database,
 )
 from waji_rag.pg_index import DatabaseOptions
@@ -145,6 +147,26 @@ class WebRetryTests(unittest.TestCase):
             os.environ["WAJI_WEB_CONFIG_PATH"] = str(config_path)
             try:
                 self.assertEqual(shared_config_database().database_url, database_url)
+            finally:
+                if previous_path is None:
+                    os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+                else:
+                    os.environ["WAJI_WEB_CONFIG_PATH"] = previous_path
+
+    def test_shared_config_path_prefers_root_web_config(self) -> None:
+        previous_path = os.environ.get("WAJI_WEB_CONFIG_PATH")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root_config = Path(temp_dir) / "web_config.json"
+            legacy_config = Path(temp_dir) / ".git" / "info" / "waji-rag-shared-config.json"
+            root_config.write_text("{}", encoding="utf-8")
+            legacy_config.parent.mkdir(parents=True)
+            legacy_config.write_text("{}", encoding="utf-8")
+            os.environ.pop("WAJI_WEB_CONFIG_PATH", None)
+            try:
+                with mock.patch("waji_rag.web.DEFAULT_WEB_CONFIG_PATH", root_config), mock.patch(
+                    "waji_rag.web.DEFAULT_SHARED_CONFIG_PATH", legacy_config
+                ):
+                    self.assertEqual(shared_config_path(), root_config)
             finally:
                 if previous_path is None:
                     os.environ.pop("WAJI_WEB_CONFIG_PATH", None)

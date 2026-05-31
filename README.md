@@ -102,18 +102,21 @@ docker compose up -d postgres
 python -m waji_rag.cli serve --host 127.0.0.1 --port 8765
 ```
 
-For shared access, keep connection-sensitive settings in a server-side JSON file instead of the browser. Copy `examples/web_config.example.json`, edit the database URL, data directories, model endpoints, keys or key env names, and start the server with:
+For shared access, keep connection-sensitive settings in a server-side JSON file instead of the browser. Copy `web_config.json.example` to `web_config.json`, edit the database URL, data directories, model endpoints, keys or key env names, and start the server. The web server reads `web_config.json` from the project root automatically:
 
 ```bash
-WAJI_WEB_CONFIG_PATH=/absolute/path/to/web_config.json python -m waji_rag.cli serve --host 0.0.0.0 --port 8765
+cp web_config.json.example web_config.json
+python -m waji_rag.cli serve --host 0.0.0.0 --port 8765
 ```
 
 On Windows PowerShell:
 
 ```powershell
-$env:WAJI_WEB_CONFIG_PATH="D:\ACodesTree\waji-rag\web_config.json"
+copy web_config.json.example web_config.json
 python -m waji_rag.cli serve --host 0.0.0.0 --port 8765
 ```
+
+If you want to keep the file somewhere else, set `WAJI_WEB_CONFIG_PATH` to that absolute path before starting the server.
 
 Open:
 

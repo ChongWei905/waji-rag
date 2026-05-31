@@ -13,6 +13,7 @@ data/
 outputs/
 tmp/
 logs/
+web_config.json
 output.md
 waji_wai_table.html
 docs/assets/*-flow.png

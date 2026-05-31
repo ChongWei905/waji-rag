@@ -63,6 +63,7 @@ DEFAULT_QUERY = (
     "用户报修机器风扇皮带异响，请回答有可能是哪些故障导致的，如何解决，"
     "相应故障需要更换备件的详细信息（备件的编号及名称，备件编码，备件数量）"
 )
+DEFAULT_WEB_CONFIG_PATH = PROJECT_ROOT / "web_config.json"
 DEFAULT_SHARED_CONFIG_PATH = PROJECT_ROOT / ".git" / "info" / "waji-rag-shared-config.json"
 BATCH_EVAL_SHARE_ID_LENGTH = 12
 _TASK_SCHEMA_LOCK = threading.Lock()
@@ -5761,9 +5762,11 @@ def shared_config_path() -> Path:
     env_path = str(os.getenv("WAJI_WEB_CONFIG_PATH") or "").strip()
     if env_path:
         return Path(env_path)
-    if DEFAULT_SHARED_CONFIG_PATH.parent.exists():
+    if DEFAULT_WEB_CONFIG_PATH.exists():
+        return DEFAULT_WEB_CONFIG_PATH
+    if DEFAULT_SHARED_CONFIG_PATH.exists():
         return DEFAULT_SHARED_CONFIG_PATH
-    return PROJECT_ROOT / ".waji-rag-shared-config.json"
+    return DEFAULT_WEB_CONFIG_PATH
 
 
 def shared_config_payload() -> dict[str, Any]:
