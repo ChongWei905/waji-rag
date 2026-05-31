@@ -11,6 +11,7 @@ from waji_rag.pg_index import (
     build_documents_for_work_order,
     bulk_insert_rows,
     clear_application_data_with_cursor,
+    filter_hits_by_relative_threshold,
     filter_work_order_hits_by_threshold,
     fetch_part_candidates,
     store_embedding_batch,
@@ -148,6 +149,36 @@ class PgIndexHelpersTests(unittest.TestCase):
         filtered = filter_work_order_hits_by_threshold(hits, min_relative_score=0.45, max_hits=10)
 
         self.assertEqual([hit.doc_id for hit in filtered], ["wo-1", "wo-2"])
+
+    def test_filter_hits_by_relative_threshold_supports_manual_hits(self) -> None:
+        hits = [
+            RetrievalHit(
+                document_id=1,
+                doc_id="manual-fan-belt",
+                doc_type="manual_typical_fault",
+                title="风扇皮带异响",
+                score=8.0,
+                body_preview="检查皮带张紧度。",
+                work_order_id=None,
+                source_path="fan-belt.html",
+                metadata={},
+            ),
+            RetrievalHit(
+                document_id=2,
+                doc_id="manual-aircon-noise",
+                doc_type="manual_typical_fault",
+                title="空调异响",
+                score=3.5,
+                body_preview="检查鼓风机。",
+                work_order_id=None,
+                source_path="aircon.html",
+                metadata={},
+            ),
+        ]
+
+        filtered = filter_hits_by_relative_threshold(hits, min_relative_score=0.55, max_hits=5)
+
+        self.assertEqual([hit.doc_id for hit in filtered], ["manual-fan-belt"])
 
     def test_fetch_part_candidates_returns_all_parts_for_linked_orders(self) -> None:
         cursor = FakeFetchCursor(

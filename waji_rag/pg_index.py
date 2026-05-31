@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -31,8 +32,12 @@ from waji_rag.index_build import (
 )
 from waji_rag.llm import (
     DashScopeRerankClient,
-    build_fallback_answer,
-    generate_diagnostic_answer,
+    build_harness_fallback_answer,
+    extract_answer_facts,
+    generate_harness_answer,
+    judge_work_order_relevance,
+    parse_json_object,
+    select_manual_titles,
 )
 from waji_rag.work_order import WorkOrderParser, WorkOrderRecord, iter_txt_files
 
@@ -43,6 +48,8 @@ DEFAULT_BM25_K1 = 1.5
 DEFAULT_BM25_B = 0.75
 DEFAULT_BM25_BATCH_TERM_ROWS = 100_000
 DEFAULT_SOURCE_CHECKPOINT_FILES = 50
+DEFAULT_WORK_ORDER_FILTER_CONCURRENCY = 8
+MAX_WORK_ORDER_FILTER_CONCURRENCY = 16
 MANUAL_SUFFIXES = {".html", ".htm", ".md", ".markdown"}
 FAULT_CODE_IN_QUERY = re.compile(r"\b[A-Za-z]\d{3,}[A-Za-z0-9_-]*\b")
 APPLICATION_DATA_TABLES = (
@@ -994,6 +1001,12 @@ class PgRetriever:
                 self.config.retrieval.work_order_candidate_top_k,
                 self.config.retrieval.work_order_max_hits,
             )
+        elif channel_name == "manual_typical_faults":
+            candidate_top_k = max(
+                candidate_top_k,
+                self.config.retrieval.manual_candidate_top_k,
+                self.config.retrieval.manual_max_hits,
+            )
         bm25_hits = search_bm25(cur, terms, top_k=candidate_top_k, doc_types=doc_types)
         if mode != "hybrid" or self.embedding_provider is None:
             return self._finalize_channel_hits(
@@ -1083,27 +1096,29 @@ class PgRetriever:
     ) -> list[RetrievalHit]:
         """Apply channel-specific final ranking and limits."""
 
-        if channel_name != "work_orders":
+        if channel_name not in {"work_orders", "manual_typical_faults"}:
             return hits[:top_k]
 
-        filtered = filter_work_order_hits_by_threshold(
-            hits,
-            min_relative_score=self.config.retrieval.work_order_min_relative_score,
-            max_hits=self.config.retrieval.work_order_max_hits,
-        )
+        if channel_name == "work_orders":
+            min_relative_score = self.config.retrieval.work_order_min_relative_score
+            max_hits = self.config.retrieval.work_order_max_hits
+        else:
+            min_relative_score = self.config.retrieval.manual_min_relative_score
+            max_hits = self.config.retrieval.manual_max_hits
+        filtered = filter_hits_by_relative_threshold(hits, min_relative_score=min_relative_score, max_hits=max_hits)
         top_score = hits[0].score if hits else 0.0
         debug_events.append(
             {
-                "channel": "work_orders",
+                "channel": channel_name,
                 "stage": "threshold_filter",
                 "status": "ok",
                 "candidate_count": len(hits),
                 "returned_count": len(filtered),
                 "candidate_top_k": candidate_top_k,
                 "top_score": round(top_score, 6),
-                "min_relative_score": self.config.retrieval.work_order_min_relative_score,
-                "score_threshold": round(top_score * self.config.retrieval.work_order_min_relative_score, 6),
-                "max_hits": self.config.retrieval.work_order_max_hits,
+                "min_relative_score": min_relative_score,
+                "score_threshold": round(top_score * min_relative_score, 6),
+                "max_hits": max_hits,
             }
         )
         return filtered
@@ -1142,9 +1157,15 @@ class RagPipeline:
 
         evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
         part_candidates = list_payload(retrieval.get("part_candidates"))
-        rerank_payload = self._rerank(query, evidence_items, trace)
-        selected_evidence = list(rerank_payload.get("evidence") or evidence_items)
-        answer_payload = self._answer(query, selected_evidence, part_candidates, trace)
+        answer_harness = self._run_answer_harness(
+            query=query,
+            retrieval=retrieval,
+            part_candidates=part_candidates,
+            trace=trace,
+        )
+        final_context = dict_payload(answer_harness.get("final_answer_context"))
+        selected_evidence = list_payload(final_context.get("selected_evidence")) or evidence_items
+        answer_payload = self._answer(query, final_context, trace)
         payload: dict[str, object] = {
             "query": query,
             "answer": answer_payload,
@@ -1152,8 +1173,10 @@ class RagPipeline:
             "rerank": {
                 "enabled": self.config.rerank.enabled,
                 "available": self.config.rerank.is_available(),
-                **{key: value for key, value in rerank_payload.items() if key != "evidence"},
+                "status": "skipped",
+                "reason": "answer_harness_primary_path",
             },
+            "answer_harness": answer_harness,
             "selected_evidence": selected_evidence,
             "part_candidates": part_candidates,
             "trace": trace,
@@ -1165,6 +1188,248 @@ class RagPipeline:
                 "config": self.config.to_dict(),
             }
         return payload
+
+    def _run_answer_harness(
+        self,
+        *,
+        query: str,
+        retrieval: dict[str, object],
+        part_candidates: list[dict[str, object]],
+        trace: list[dict[str, object]],
+    ) -> dict[str, object]:
+        work_order_hits = retrieval_channel_items(retrieval, "work_orders")
+        manual_hits = retrieval_channel_items(retrieval, "manual_typical_faults")
+        fault_code_hits = retrieval_channel_items(retrieval, "manual_fault_codes")
+
+        work_order_started_at = time.time()
+        work_order_filter = self._filter_work_orders(query=query, work_order_hits=work_order_hits, part_candidates=part_candidates)
+        trace.append(
+            stage_event(
+                "work_order_filter",
+                str(work_order_filter.get("status") or "ok"),
+                {
+                    "elapsed_ms": elapsed_ms(work_order_started_at),
+                    "accepted": len(list_payload(work_order_filter.get("accepted"))),
+                    "rejected": len(list_payload(work_order_filter.get("rejected"))),
+                    "unknown": len(list_payload(work_order_filter.get("unknown"))),
+                    "reason": work_order_filter.get("reason"),
+                },
+            )
+        )
+
+        manual_started_at = time.time()
+        manual_filter = self._filter_manuals(query=query, manual_hits=manual_hits)
+        trace.append(
+            stage_event(
+                "manual_filter",
+                str(manual_filter.get("status") or "ok"),
+                {
+                    "elapsed_ms": elapsed_ms(manual_started_at),
+                    "selected": len(list_payload(manual_filter.get("selected"))),
+                    "rejected": len(list_payload(manual_filter.get("rejected"))),
+                    "reason": manual_filter.get("reason"),
+                },
+            )
+        )
+
+        accepted_orders = list_payload(work_order_filter.get("accepted"))
+        selected_manuals = list_payload(manual_filter.get("selected"))
+        selected_parts = parts_from_accepted_orders(accepted_orders)
+        selected_evidence_context = {
+            "fault_code_evidence": fault_code_hits,
+            "work_orders": accepted_orders,
+            "manuals": selected_manuals,
+        }
+
+        facts_started_at = time.time()
+        facts = self._extract_facts(
+            query=query,
+            selected_evidence=selected_evidence_context,
+            selected_parts=selected_parts,
+        )
+        trace.append(
+            stage_event(
+                "fact_extraction",
+                str(facts.get("status") or "ok"),
+                {
+                    "elapsed_ms": elapsed_ms(facts_started_at),
+                    "fault_codes": len(list_payload(facts.get("fault_code_facts"))),
+                    "work_order_groups": len(list_payload(facts.get("work_order_groups"))),
+                    "manual_summaries": len(list_payload(facts.get("manual_summaries"))),
+                    "coded_parts": len(list_payload(facts.get("coded_parts"))),
+                    "reason": facts.get("reason"),
+                },
+            )
+        )
+
+        final_answer_context = build_final_answer_context(
+            query=query,
+            fault_code_hits=fault_code_hits,
+            accepted_orders=accepted_orders,
+            selected_manuals=selected_manuals,
+            facts=facts,
+            selected_parts=selected_parts,
+        )
+        return {
+            "work_order_filter": work_order_filter,
+            "manual_filter": manual_filter,
+            "facts": facts,
+            "final_answer_context": final_answer_context,
+        }
+
+    def _filter_work_orders(
+        self,
+        *,
+        query: str,
+        work_order_hits: list[dict[str, object]],
+        part_candidates: list[dict[str, object]],
+    ) -> dict[str, object]:
+        if not work_order_hits:
+            return {"status": "skipped", "reason": "empty_work_order_hits", "accepted": [], "rejected": [], "unknown": []}
+        if not self.config.llm.enabled or not self.config.llm.is_available():
+            accepted = [
+                work_order_filter_payload(
+                    hit,
+                    parts_for_work_order(part_candidates, work_order_id_from_hit(hit)),
+                    relevance_level="medium",
+                    matched_reason="LLM 未启用或不可用，保留检索召回工单作为 deterministic fallback。",
+                )
+                for hit in work_order_hits
+            ]
+            return {
+                "status": "fallback",
+                "reason": "llm_unavailable",
+                "concurrency": 0,
+                "accepted": accepted,
+                "rejected": [],
+                "unknown": [],
+            }
+
+        max_workers = min(DEFAULT_WORK_ORDER_FILTER_CONCURRENCY, MAX_WORK_ORDER_FILTER_CONCURRENCY, max(len(work_order_hits), 1))
+        indexed_results: dict[int, dict[str, object]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_index = {
+                executor.submit(
+                    self._filter_one_work_order,
+                    query=query,
+                    hit=hit,
+                    linked_parts=parts_for_work_order(part_candidates, work_order_id_from_hit(hit)),
+                ): index
+                for index, hit in enumerate(work_order_hits)
+            }
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    indexed_results[index] = future.result()
+                except Exception as exc:  # noqa: BLE001 - one bad LLM call must not break the harness.
+                    indexed_results[index] = work_order_unknown_payload(work_order_hits[index], error=str(exc))
+
+        accepted: list[dict[str, object]] = []
+        rejected: list[dict[str, object]] = []
+        unknown: list[dict[str, object]] = []
+        for index in range(len(work_order_hits)):
+            item = indexed_results.get(index) or work_order_unknown_payload(work_order_hits[index], error="missing_result")
+            level = clean_string(item.get("relevance_level")).lower()
+            if level in {"high", "medium"} and item.get("related") is not False:
+                accepted.append(item)
+            elif level == "unknown":
+                unknown.append(item)
+            else:
+                rejected.append(item)
+        return {
+            "status": "ok",
+            "concurrency": max_workers,
+            "accepted": accepted,
+            "rejected": rejected,
+            "unknown": unknown,
+        }
+
+    def _filter_one_work_order(
+        self,
+        *,
+        query: str,
+        hit: dict[str, object],
+        linked_parts: list[dict[str, object]],
+    ) -> dict[str, object]:
+        result = judge_work_order_relevance(
+            query=query,
+            work_order_hit=hit,
+            linked_parts=linked_parts,
+            config=self.config.llm,
+        )
+        try:
+            parsed = parse_json_object(result.text)
+        except Exception as exc:  # noqa: BLE001 - parsing failures become observable unknown items.
+            payload = work_order_unknown_payload(hit, error=f"{type(exc).__name__}: {exc}", raw_text=result.text[:800])
+            payload["debug"] = result.debug
+            return payload
+        return normalize_work_order_filter_result(parsed, hit, linked_parts, debug=result.debug)
+
+    def _filter_manuals(self, *, query: str, manual_hits: list[dict[str, object]]) -> dict[str, object]:
+        if not manual_hits:
+            return {"status": "skipped", "reason": "empty_manual_hits", "selected": [], "rejected": []}
+        if not self.config.llm.enabled or not self.config.llm.is_available():
+            return {
+                "status": "fallback",
+                "reason": "llm_unavailable",
+                "selected": [
+                    manual_selection_payload(hit, relevance_level="medium", reason="LLM 未启用或不可用，保留召回手册作为补充证据。")
+                    for hit in manual_hits
+                ],
+                "rejected": [],
+            }
+        result = None
+        try:
+            result = select_manual_titles(query=query, manual_hits=manual_hits, config=self.config.llm)
+            parsed = parse_json_object(result.text)
+            payload = normalize_manual_filter_result(parsed, manual_hits)
+            payload["status"] = "ok"
+            payload["debug"] = result.debug
+            return payload
+        except Exception as exc:  # noqa: BLE001 - manual filtering must degrade.
+            return {
+                "status": "fallback",
+                "reason": "manual_filter_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "raw_text_preview": result.text[:800] if result else "",
+                "selected": [
+                    manual_selection_payload(hit, relevance_level="medium", reason="手册筛选失败，保留召回手册作为补充证据。")
+                    for hit in manual_hits
+                ],
+                "rejected": [],
+            }
+
+    def _extract_facts(
+        self,
+        *,
+        query: str,
+        selected_evidence: dict[str, object],
+        selected_parts: list[dict[str, object]],
+    ) -> dict[str, object]:
+        fallback_facts = build_deterministic_facts(selected_evidence=selected_evidence, selected_parts=selected_parts)
+        if not self.config.llm.enabled or not self.config.llm.is_available():
+            fallback_facts["status"] = "fallback"
+            fallback_facts["reason"] = "llm_unavailable"
+            return fallback_facts
+        result = None
+        try:
+            result = extract_answer_facts(
+                query=query,
+                selected_evidence=selected_evidence,
+                selected_parts=selected_parts,
+                config=self.config.llm,
+            )
+            parsed = parse_json_object(result.text)
+            facts = normalize_answer_facts(parsed, fallback=fallback_facts)
+            facts["status"] = "ok"
+            facts["debug"] = result.debug
+            return facts
+        except Exception as exc:  # noqa: BLE001 - answer facts must degrade.
+            fallback_facts["status"] = "fallback"
+            fallback_facts["reason"] = "fact_extraction_failed"
+            fallback_facts["error"] = f"{type(exc).__name__}: {exc}"
+            fallback_facts["raw_text_preview"] = result.text[:800] if result else ""
+            return fallback_facts
 
     def _rerank(
         self,
@@ -1228,30 +1493,29 @@ class RagPipeline:
     def _answer(
         self,
         query: str,
-        evidence_items: list[dict[str, object]],
-        part_candidates: list[dict[str, object]],
+        final_context: dict[str, object],
         trace: list[dict[str, object]],
     ) -> dict[str, object]:
         if not self.config.answer.enabled:
             trace.append(stage_event("answer", "skipped", {"reason": "disabled"}))
             return {"status": "skipped", "text": ""}
         if not self.config.llm.enabled:
-            text = build_fallback_answer(query=query, evidence_items=evidence_items, part_candidates=part_candidates)
+            text = build_harness_fallback_answer(query=query, final_context=final_context)
             trace.append(stage_event("answer", "fallback", {"reason": "llm_disabled"}))
             return {"status": "fallback", "reason": "llm_disabled", "text": text}
         if not self.config.llm.is_available():
-            text = build_fallback_answer(query=query, evidence_items=evidence_items, part_candidates=part_candidates)
+            text = build_harness_fallback_answer(query=query, final_context=final_context)
             trace.append(stage_event("answer", "fallback", {"reason": "missing_llm_config"}))
             return {"status": "fallback", "reason": "missing_llm_config", "text": text}
 
         started_at = time.time()
         try:
-            result = generate_diagnostic_answer(
+            result = generate_harness_answer(
                 query=query,
-                evidence_items=evidence_items[: self.config.answer.evidence_top_k],
-                part_candidates=part_candidates,
+                final_context=final_context,
                 config=self.config.llm,
             )
+            text = result.text or build_harness_fallback_answer(query=query, final_context=final_context)
             trace.append(
                 stage_event(
                     "answer",
@@ -1263,9 +1527,9 @@ class RagPipeline:
                     },
                 )
             )
-            return {"status": "ok", "text": result.text, "debug": result.debug}
+            return {"status": "ok", "text": text, "debug": result.debug}
         except Exception as exc:  # noqa: BLE001 - generation must degrade.
-            text = build_fallback_answer(query=query, evidence_items=evidence_items, part_candidates=part_candidates)
+            text = build_harness_fallback_answer(query=query, final_context=final_context)
             trace.append(stage_event("answer", "fallback", {"elapsed_ms": elapsed_ms(started_at), "error": str(exc)}))
             return {"status": "fallback", "error": str(exc), "text": text}
 
@@ -2565,6 +2829,17 @@ def filter_work_order_hits_by_threshold(
 ) -> list[RetrievalHit]:
     """Keep work-order hits whose scores are close enough to the best candidate."""
 
+    return filter_hits_by_relative_threshold(hits, min_relative_score=min_relative_score, max_hits=max_hits)
+
+
+def filter_hits_by_relative_threshold(
+    hits: list[RetrievalHit],
+    *,
+    min_relative_score: float,
+    max_hits: int,
+) -> list[RetrievalHit]:
+    """Keep ranked hits whose scores are close enough to the best candidate."""
+
     if not hits or max_hits <= 0:
         return []
     top_score = hits[0].score
@@ -2581,6 +2856,455 @@ def list_payload(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def dict_payload(value: object) -> dict[str, object]:
+    """Return a dict payload from JSON-like data."""
+
+    return value if isinstance(value, dict) else {}
+
+
+def retrieval_channel_items(payload: dict[str, object], channel_name: str) -> list[dict[str, object]]:
+    """Return copied hit dictionaries for one retrieval channel."""
+
+    channels = payload.get("channels")
+    if not isinstance(channels, dict):
+        return []
+    hits = channels.get(channel_name)
+    if not isinstance(hits, list):
+        return []
+    return [dict(item) for item in hits if isinstance(item, dict)]
+
+
+def work_order_id_from_hit(hit: dict[str, object]) -> str:
+    """Extract a stable work-order ID from a retrieval hit."""
+
+    metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+    return clean_string(hit.get("work_order_id") or metadata.get("work_order_id") or hit.get("doc_id"))
+
+
+def parts_for_work_order(parts: list[dict[str, object]], work_order_id: str) -> list[dict[str, object]]:
+    """Return part candidates linked to one work order."""
+
+    if not work_order_id:
+        return []
+    linked: list[dict[str, object]] = []
+    for part in parts:
+        metadata = part.get("metadata") if isinstance(part.get("metadata"), dict) else {}
+        part_order_id = clean_string(part.get("work_order_id") or metadata.get("work_order_id"))
+        if part_order_id == work_order_id:
+            linked.append(part)
+    return linked
+
+
+def parts_for_filtered_orders(parts: list[dict[str, object]], accepted_orders: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return all parts linked to accepted work orders in work-order order."""
+
+    selected: list[dict[str, object]] = []
+    seen_rows: set[tuple[str, str, str, str]] = set()
+    for order in accepted_orders:
+        work_order_id = clean_string(order.get("work_order_id"))
+        for part in parts_for_work_order(parts, work_order_id):
+            compact = part_for_answer(part)
+            row_key = (
+                clean_string(compact.get("source_work_order_id") or compact.get("work_order_id")),
+                clean_string(compact.get("name")),
+                clean_string(compact.get("code")),
+                clean_string(compact.get("quantity")),
+            )
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            selected.append(part)
+    return selected
+
+
+def part_for_answer(part: dict[str, object]) -> dict[str, object]:
+    """Normalize one part row for answer and harness displays."""
+
+    metadata = part.get("metadata") if isinstance(part.get("metadata"), dict) else {}
+    name = clean_string(
+        part.get("name")
+        or part.get("part_name")
+        or part.get("part_number_name")
+        or metadata.get("part_name")
+        or metadata.get("part_number_name")
+    )
+    code = clean_string(part.get("code") or part.get("part_code") or part.get("part_number") or metadata.get("part_code") or metadata.get("part_number"))
+    quantity = clean_string(part.get("quantity") or metadata.get("quantity"))
+    work_order_id = clean_string(part.get("source_work_order_id") or part.get("work_order_id") or metadata.get("work_order_id"))
+    return {
+        "name": name,
+        "code": code,
+        "quantity": quantity,
+        "source_work_order_id": work_order_id,
+        "work_order_id": work_order_id,
+        "source_path": clean_string(part.get("source_path")),
+    }
+
+
+def parts_from_accepted_orders(accepted_orders: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return usable parts selected by work-order filtering."""
+
+    selected: list[dict[str, object]] = []
+    seen_rows: set[tuple[str, str, str, str]] = set()
+    for order in accepted_orders:
+        work_order_id = clean_string(order.get("work_order_id"))
+        source_path = clean_string(order.get("source_path"))
+        for item in list_payload(order.get("usable_parts")):
+            normalized = part_for_answer(item)
+            if not normalized.get("source_work_order_id"):
+                normalized["source_work_order_id"] = work_order_id
+                normalized["work_order_id"] = work_order_id
+            if source_path and not normalized.get("source_path"):
+                normalized["source_path"] = source_path
+            row_key = (
+                clean_string(normalized.get("source_work_order_id")),
+                clean_string(normalized.get("name")),
+                clean_string(normalized.get("code")),
+                clean_string(normalized.get("quantity")),
+            )
+            if row_key in seen_rows or not any(row_key):
+                continue
+            seen_rows.add(row_key)
+            selected.append(normalized)
+    return selected
+
+
+def coded_parts_from_parts(parts: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Build a deduplicated coded-part list from selected structured parts."""
+
+    coded: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for part in parts:
+        normalized = part_for_answer(part)
+        if not normalized.get("code"):
+            continue
+        row_key = (
+            clean_string(normalized.get("name")),
+            clean_string(normalized.get("code")),
+            clean_string(normalized.get("quantity")),
+            clean_string(normalized.get("source_work_order_id")),
+        )
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+        coded.append(normalized)
+    return coded
+
+
+def work_order_filter_payload(
+    hit: dict[str, object],
+    linked_parts: list[dict[str, object]],
+    *,
+    relevance_level: str,
+    matched_reason: str,
+    repair_actions: list[str] | None = None,
+) -> dict[str, object]:
+    """Build one normalized work-order filter item."""
+
+    level = normalize_relevance_level(relevance_level)
+    work_order_id = work_order_id_from_hit(hit)
+    usable_parts = [part_for_answer(part) for part in linked_parts if any(part_for_answer(part).values())]
+    return {
+        "work_order_id": work_order_id,
+        "related": level in {"high", "medium"},
+        "relevance_level": level,
+        "matched_reason": matched_reason,
+        "repair_actions": repair_actions or [],
+        "usable_parts": usable_parts,
+        "source_path": clean_string(hit.get("source_path")),
+        "title": clean_string(hit.get("title")),
+        "score": hit.get("score"),
+        "body_preview": clean_string(hit.get("body_preview")),
+        "hit": hit,
+    }
+
+
+def work_order_unknown_payload(hit: dict[str, object], *, error: str, raw_text: str = "") -> dict[str, object]:
+    """Build an unknown work-order filter item for failed model calls."""
+
+    return {
+        "work_order_id": work_order_id_from_hit(hit),
+        "related": False,
+        "relevance_level": "unknown",
+        "matched_reason": "工单筛选失败，默认不进入最终答案。",
+        "repair_actions": [],
+        "usable_parts": [],
+        "source_path": clean_string(hit.get("source_path")),
+        "title": clean_string(hit.get("title")),
+        "score": hit.get("score"),
+        "body_preview": clean_string(hit.get("body_preview")),
+        "hit": hit,
+        "error": error,
+        "raw_text_preview": raw_text[:800],
+    }
+
+
+def normalize_work_order_filter_result(
+    parsed: dict[str, object],
+    hit: dict[str, object],
+    linked_parts: list[dict[str, object]],
+    *,
+    debug: dict[str, object],
+) -> dict[str, object]:
+    """Normalize one work-order LLM JSON response to the harness schema."""
+
+    level = normalize_relevance_level(parsed.get("relevance_level"))
+    related = parsed.get("related")
+    if not isinstance(related, bool):
+        related = level in {"high", "medium"}
+    if level not in {"high", "medium"}:
+        related = False
+
+    usable_parts = normalize_llm_parts(parsed.get("usable_parts"))
+    if related and not usable_parts:
+        usable_parts = [part_for_answer(part) for part in linked_parts]
+    return {
+        "work_order_id": clean_string(parsed.get("work_order_id") or work_order_id_from_hit(hit)),
+        "related": related,
+        "relevance_level": level,
+        "matched_reason": clean_string(parsed.get("matched_reason")) or "模型未给出原因。",
+        "repair_actions": string_list(parsed.get("repair_actions")),
+        "usable_parts": usable_parts,
+        "source_path": clean_string(parsed.get("source_path") or hit.get("source_path")),
+        "title": clean_string(hit.get("title")),
+        "score": hit.get("score"),
+        "body_preview": clean_string(hit.get("body_preview")),
+        "hit": hit,
+        "debug": debug,
+    }
+
+
+def normalize_relevance_level(value: object) -> str:
+    """Normalize LLM relevance level labels."""
+
+    level = clean_string(value).lower()
+    if level in {"high", "medium", "low", "unrelated", "unknown"}:
+        return level
+    if level in {"相关", "高度相关"}:
+        return "high"
+    if level in {"中等相关", "可能相关"}:
+        return "medium"
+    if level in {"不相关", "无关"}:
+        return "unrelated"
+    return "unknown"
+
+
+def normalize_llm_parts(value: object) -> list[dict[str, object]]:
+    """Normalize part-like JSON items returned by the LLM."""
+
+    parts: list[dict[str, object]] = []
+    for item in list_payload(value):
+        part = {
+            "name": clean_string(item.get("name") or item.get("part_name") or item.get("part_number_name")),
+            "code": clean_string(item.get("code") or item.get("part_code") or item.get("part_number")),
+            "quantity": clean_string(item.get("quantity")),
+            "source_work_order_id": clean_string(item.get("source_work_order_id") or item.get("work_order_id")),
+        }
+        if any(part.values()):
+            parts.append(part)
+    return parts
+
+
+def string_list(value: object) -> list[str]:
+    """Normalize an arbitrary JSON value to a compact string list."""
+
+    if isinstance(value, list):
+        return [clean_string(item) for item in value if clean_string(item)]
+    text = clean_string(value)
+    return [text] if text else []
+
+
+def manual_selection_payload(hit: dict[str, object], *, relevance_level: str, reason: str) -> dict[str, object]:
+    """Build one normalized manual selection item."""
+
+    return {
+        "doc_id": clean_string(hit.get("doc_id")),
+        "title": clean_string(hit.get("title")),
+        "doc_type": clean_string(hit.get("doc_type")),
+        "relevance_level": normalize_relevance_level(relevance_level) if relevance_level != "medium" else "medium",
+        "reason": reason,
+        "source_path": clean_string(hit.get("source_path")),
+        "score": hit.get("score"),
+        "body_preview": clean_string(hit.get("body_preview")),
+        "hit": hit,
+    }
+
+
+def normalize_manual_filter_result(parsed: dict[str, object], manual_hits: list[dict[str, object]]) -> dict[str, object]:
+    """Normalize manual-title selection JSON and map IDs back to original hits."""
+
+    hits_by_doc_id = {clean_string(hit.get("doc_id")): hit for hit in manual_hits}
+    selected_ids: set[str] = set()
+    rejected_ids: set[str] = set()
+    selected: list[dict[str, object]] = []
+    rejected: list[dict[str, object]] = []
+
+    for item in list_payload(parsed.get("selected")):
+        doc_id = clean_string(item.get("doc_id"))
+        hit = hits_by_doc_id.get(doc_id)
+        if not hit:
+            continue
+        level = normalize_relevance_level(item.get("relevance_level") or "medium")
+        if level not in {"high", "medium"}:
+            rejected.append(manual_selection_payload(hit, relevance_level="unrelated", reason=clean_string(item.get("reason")) or "模型未判定为相关。"))
+            rejected_ids.add(doc_id)
+            continue
+        selected.append(manual_selection_payload(hit, relevance_level=level, reason=clean_string(item.get("reason")) or "模型判定相关。"))
+        selected_ids.add(doc_id)
+
+    for item in list_payload(parsed.get("rejected")):
+        doc_id = clean_string(item.get("doc_id"))
+        hit = hits_by_doc_id.get(doc_id)
+        if not hit or doc_id in selected_ids or doc_id in rejected_ids:
+            continue
+        rejected.append(manual_selection_payload(hit, relevance_level="unrelated", reason=clean_string(item.get("reason")) or "模型判定不相关。"))
+        rejected_ids.add(doc_id)
+
+    for hit in manual_hits:
+        doc_id = clean_string(hit.get("doc_id"))
+        if doc_id in selected_ids or doc_id in rejected_ids:
+            continue
+        rejected.append(manual_selection_payload(hit, relevance_level="unrelated", reason="模型未选择该手册标题。"))
+
+    return {"selected": selected, "rejected": rejected}
+
+
+def build_deterministic_facts(
+    *,
+    selected_evidence: dict[str, object],
+    selected_parts: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build harness facts deterministically from selected evidence."""
+
+    fault_code_hits = list_payload(selected_evidence.get("fault_code_evidence"))
+    selected_work_orders = list_payload(selected_evidence.get("work_orders"))
+    selected_manuals = list_payload(selected_evidence.get("manuals"))
+    return {
+        "fault_code_facts": [
+            {
+                "doc_id": hit.get("doc_id"),
+                "title": hit.get("title"),
+                "summary": clean_string(hit.get("body_preview"))[:260],
+                "source_path": hit.get("source_path"),
+                "mentioned_parts": [],
+            }
+            for hit in fault_code_hits
+        ],
+        "work_order_groups": [
+            {
+                "summary": clean_string(order.get("matched_reason"))
+                or "; ".join(string_list(order.get("repair_actions")))
+                or clean_string(order.get("body_preview"))[:220],
+                "repair_actions": string_list(order.get("repair_actions")),
+                "source_work_orders": [order.get("work_order_id")],
+                "parts": order.get("usable_parts") if isinstance(order.get("usable_parts"), list) else [],
+            }
+            for order in selected_work_orders
+        ],
+        "manual_summaries": [
+            {
+                "doc_id": manual.get("doc_id"),
+                "title": manual.get("title"),
+                "summary": clean_string(manual.get("body_preview"))[:260],
+                "source_path": manual.get("source_path"),
+            }
+            for manual in selected_manuals
+        ],
+        "coded_parts": coded_parts_from_parts(selected_parts),
+        "uncoded_possible_parts": [],
+    }
+
+
+def normalize_answer_facts(parsed: dict[str, object], *, fallback: dict[str, object]) -> dict[str, object]:
+    """Normalize LLM-extracted facts while preserving deterministic fallbacks."""
+
+    facts = {
+        "fault_code_facts": list_payload(parsed.get("fault_code_facts")) or list_payload(fallback.get("fault_code_facts")),
+        "work_order_groups": list_payload(parsed.get("work_order_groups")) or list_payload(fallback.get("work_order_groups")),
+        "manual_summaries": list_payload(parsed.get("manual_summaries")) or list_payload(fallback.get("manual_summaries")),
+        "coded_parts": merge_coded_parts(
+            list_payload(fallback.get("coded_parts")),
+            list_payload(parsed.get("coded_parts")),
+        ),
+        "uncoded_possible_parts": list_payload(parsed.get("uncoded_possible_parts")),
+    }
+    return facts
+
+
+def merge_coded_parts(primary: list[dict[str, object]], secondary: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Merge coded-part facts without dropping structured work-order parts."""
+
+    merged: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for part in [*primary, *secondary]:
+        normalized = {
+            "name": clean_string(part.get("name") or part.get("part_name")),
+            "code": clean_string(part.get("code") or part.get("part_code")),
+            "quantity": clean_string(part.get("quantity")),
+            "source_work_order_id": clean_string(part.get("source_work_order_id") or part.get("work_order_id")),
+        }
+        if not normalized.get("code"):
+            continue
+        row_key = (
+            normalized["name"],
+            normalized["code"],
+            normalized["quantity"],
+            normalized["source_work_order_id"],
+        )
+        if row_key in seen:
+            continue
+        seen.add(row_key)
+        merged.append(normalized)
+    return merged
+
+
+def build_final_answer_context(
+    *,
+    query: str,
+    fault_code_hits: list[dict[str, object]],
+    accepted_orders: list[dict[str, object]],
+    selected_manuals: list[dict[str, object]],
+    facts: dict[str, object],
+    selected_parts: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build the final context passed to answer generation."""
+
+    selected_evidence: list[dict[str, object]] = []
+    for hit in fault_code_hits:
+        evidence = dict(hit)
+        evidence["channel"] = "manual_fault_codes"
+        selected_evidence.append(evidence)
+    for order in accepted_orders:
+        hit = dict_payload(order.get("hit"))
+        evidence = dict(hit or order)
+        evidence["channel"] = "work_orders"
+        evidence["filter"] = {
+            "relevance_level": order.get("relevance_level"),
+            "matched_reason": order.get("matched_reason"),
+            "repair_actions": order.get("repair_actions"),
+        }
+        selected_evidence.append(evidence)
+    for manual in selected_manuals:
+        hit = dict_payload(manual.get("hit"))
+        evidence = dict(hit or manual)
+        evidence["channel"] = "manual_typical_faults"
+        evidence["filter"] = {
+            "relevance_level": manual.get("relevance_level"),
+            "reason": manual.get("reason"),
+        }
+        selected_evidence.append(evidence)
+
+    return {
+        "query": query,
+        "fault_code_evidence": fault_code_hits,
+        "selected_work_orders": accepted_orders,
+        "selected_manuals": selected_manuals,
+        "selected_parts": selected_parts,
+        "facts": facts,
+        "selected_evidence": selected_evidence,
+    }
 
 
 def flatten_evidence(payload: dict[str, object], *, limit: int) -> list[dict[str, object]]:

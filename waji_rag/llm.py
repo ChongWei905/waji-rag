@@ -176,6 +176,174 @@ def generate_diagnostic_answer(
     return result
 
 
+def judge_work_order_relevance(
+    *,
+    query: str,
+    work_order_hit: dict[str, object],
+    linked_parts: list[dict[str, object]],
+    config: LLMConfig,
+) -> ModelCallResult:
+    """Ask the LLM whether one retrieved work order is truly relevant."""
+
+    client = OpenAICompatibleChatClient(config)
+    payload = json.dumps(
+        {
+            "query": query,
+            "work_order": compact_json_payload(work_order_hit),
+            "linked_parts": [compact_json_payload(item) for item in linked_parts],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是挖掘机售后维修 RAG 的证据筛选器。你的任务是判断一个历史工单是否能支持当前问题。"
+                "必须谨慎：相同异常词但部件或系统明显不同，应判为 unrelated；只有故障现象、部件、处理过程有直接关联时才判 high 或 medium。"
+                "只返回 JSON，不要使用 Markdown。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请按下面 schema 返回 JSON：\n"
+                "{\n"
+                '  "work_order_id": "...",\n'
+                '  "related": true,\n'
+                '  "relevance_level": "high|medium|low|unrelated|unknown",\n'
+                '  "matched_reason": "...",\n'
+                '  "repair_actions": ["..."],\n'
+                '  "usable_parts": [{"name": "...", "code": "...", "quantity": "..."}],\n'
+                '  "source_path": "..."\n'
+                "}\n\n"
+                f"输入证据：\n{payload}"
+            ),
+        },
+    ]
+    return client.complete(messages, service="harness_work_order_filter", error_prefix="harness work-order filter")
+
+
+def select_manual_titles(
+    *,
+    query: str,
+    manual_hits: list[dict[str, object]],
+    config: LLMConfig,
+) -> ModelCallResult:
+    """Ask the LLM to select truly relevant manual titles from retrieved hits."""
+
+    client = OpenAICompatibleChatClient(config)
+    candidates = [
+        {
+            "doc_id": item.get("doc_id"),
+            "title": item.get("title"),
+            "doc_type": item.get("doc_type"),
+            "source_path": item.get("source_path"),
+            "score": item.get("score"),
+        }
+        for item in manual_hits
+    ]
+    payload = json.dumps({"query": query, "manual_candidates": candidates}, ensure_ascii=False, indent=2)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是挖掘机维修手册召回结果筛选器。只根据标题、doc_id 和路径判断是否真实相关。"
+                "同样叫异响、漏油、动作慢，但部件明显不一致的手册应 rejected。只返回 JSON，不要使用 Markdown。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请返回 JSON：\n"
+                "{\n"
+                '  "selected": [{"doc_id": "...", "relevance_level": "high|medium", "reason": "..."}],\n'
+                '  "rejected": [{"doc_id": "...", "reason": "..."}]\n'
+                "}\n\n"
+                f"输入候选：\n{payload}"
+            ),
+        },
+    ]
+    return client.complete(messages, service="harness_manual_filter", error_prefix="harness manual filter")
+
+
+def extract_answer_facts(
+    *,
+    query: str,
+    selected_evidence: dict[str, object],
+    selected_parts: list[dict[str, object]],
+    config: LLMConfig,
+) -> ModelCallResult:
+    """Ask the LLM to normalize selected evidence into answer facts."""
+
+    client = OpenAICompatibleChatClient(config)
+    payload = json.dumps(
+        {
+            "query": query,
+            "selected_evidence": compact_json_payload(selected_evidence, max_chars=18_000),
+            "selected_parts": [compact_json_payload(item) for item in selected_parts],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是挖掘机维修证据事实整理器。只能从输入证据抽取、归并事实，不要编造备件编码。"
+                "有明确物料编码的备件只能来自历史工单结构化备件。手册或正文里仅提到名称但无编码的，放入 uncoded_possible_parts。"
+                "只返回 JSON，不要使用 Markdown。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请返回 JSON：\n"
+                "{\n"
+                '  "fault_code_facts": [],\n'
+                '  "work_order_groups": [],\n'
+                '  "manual_summaries": [],\n'
+                '  "coded_parts": [],\n'
+                '  "uncoded_possible_parts": []\n'
+                "}\n\n"
+                f"输入证据：\n{payload}"
+            ),
+        },
+    ]
+    return client.complete(messages, service="harness_fact_extraction", error_prefix="harness fact extraction")
+
+
+def generate_harness_answer(
+    *,
+    query: str,
+    final_context: dict[str, object],
+    config: LLMConfig,
+) -> ModelCallResult:
+    """Generate the final answer from harness-approved context."""
+
+    client = OpenAICompatibleChatClient(config)
+    payload = json.dumps({"query": query, "final_context": compact_json_payload(final_context, max_chars=22_000)}, ensure_ascii=False, indent=2)
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是挖掘机售后维修诊断助手。只能基于 final_context 回答，不要编造故障、工单、地址或备件编码。"
+                "必须按固定顺序输出四段：1. 故障码匹配结果；2. 历史工单经验；3. 指导手册补充；4. 本次可能所需备件。"
+                "备件部分先用表格列出有明确编码的备件，再用文字补充无编码的可能备件。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "请根据下面上下文生成中文答案。若某一类证据为空，要明确写“未召回”。"
+                "历史工单备件必须提示：来自历史维修记录，未经过当前设备适配校验。\n\n"
+                f"{payload}"
+            ),
+        },
+    ]
+    return client.complete(messages, service="harness_answer", error_prefix="harness answer")
+
+
 def build_fallback_answer(
     *,
     query: str,
@@ -217,6 +385,65 @@ def build_fallback_answer(
     return "\n".join(lines)
 
 
+def build_harness_fallback_answer(*, query: str, final_context: dict[str, object]) -> str:
+    """Build the fixed-section answer from harness context without calling an LLM."""
+
+    facts = final_context.get("facts") if isinstance(final_context.get("facts"), dict) else {}
+    fault_code_facts = list_payload(facts.get("fault_code_facts") if isinstance(facts, dict) else None)
+    work_order_groups = list_payload(facts.get("work_order_groups") if isinstance(facts, dict) else None)
+    manual_summaries = list_payload(facts.get("manual_summaries") if isinstance(facts, dict) else None)
+    coded_parts = list_payload(facts.get("coded_parts") if isinstance(facts, dict) else None)
+    uncoded_parts = list_payload(facts.get("uncoded_possible_parts") if isinstance(facts, dict) else None)
+
+    lines = [f"问题：{query}", "", "## 1. 故障码匹配结果"]
+    if fault_code_facts:
+        for item in fault_code_facts:
+            lines.append(f"- {item.get('title') or item.get('doc_id')}: {item.get('summary') or '已召回故障码手册证据'}")
+            if item.get("source_path"):
+                lines.append(f"  原文地址：{item.get('source_path')}")
+    else:
+        lines.append("- 未召回故障码精确匹配结果。")
+
+    lines.extend(["", "## 2. 历史工单经验"])
+    if work_order_groups:
+        for group in work_order_groups:
+            lines.append(f"- {group.get('summary') or group.get('repair_action') or '相似历史处理方式'}")
+            source_orders = group.get("source_work_orders")
+            if isinstance(source_orders, list) and source_orders:
+                lines.append(f"  支持工单：{', '.join(str(item) for item in source_orders)}")
+    else:
+        lines.append("- 未保留与当前问题直接相关的历史工单。")
+
+    lines.extend(["", "## 3. 指导手册补充"])
+    if manual_summaries:
+        for item in manual_summaries:
+            lines.append(f"- {item.get('title') or item.get('doc_id')}: {item.get('summary') or '请参考召回手册条目'}")
+            if item.get("source_path"):
+                lines.append(f"  原文地址：{item.get('source_path')}")
+    else:
+        lines.append("- 未保留相关指导手册。")
+
+    lines.extend(["", "## 4. 本次可能所需备件"])
+    if coded_parts:
+        lines.append("| 备件名称 | 备件编码 | 数量 | 来源工单 |")
+        lines.append("| --- | --- | --- | --- |")
+        for part in coded_parts:
+            lines.append(
+                "| "
+                f"{part.get('name') or part.get('part_name') or '未知'} | "
+                f"{part.get('code') or part.get('part_code') or '未提供'} | "
+                f"{part.get('quantity') or '未提供'} | "
+                f"{part.get('source_work_order_id') or part.get('work_order_id') or '未知'} |"
+            )
+        lines.append("")
+        lines.append("以上明确编码备件来自历史维修记录，未经过当前设备适配校验。")
+    else:
+        lines.append("- 未召回带明确编码的备件。")
+    if uncoded_parts:
+        lines.append("- 无编码但可作为排查方向的可能备件：" + "、".join(str(item.get("name") or item.get("part_name") or item) for item in uncoded_parts))
+    return "\n".join(lines)
+
+
 def extract_rerank_results(payload: object) -> list[RerankItem]:
     """Extract rerank results from common DashScope/OpenAI-compatible shapes."""
 
@@ -245,6 +472,56 @@ def extract_rerank_results(payload: object) -> list[RerankItem]:
         )
     results.sort(key=lambda item: (-item.score, item.index))
     return results
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    """Parse a JSON object from plain text or a fenced Markdown response."""
+
+    candidate = strip_json_fence(text.strip())
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        parsed = json.loads(extract_json_slice(candidate))
+    if not isinstance(parsed, dict):
+        raise ValueError("model response JSON is not an object")
+    return parsed
+
+
+def strip_json_fence(text: str) -> str:
+    """Remove a single Markdown JSON fence if the model returned one."""
+
+    match = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.IGNORECASE | re.DOTALL)
+    return match.group(1).strip() if match else text
+
+
+def extract_json_slice(text: str) -> str:
+    """Extract the outermost JSON object slice from mixed model text."""
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("model response does not contain a JSON object")
+    return text[start : end + 1]
+
+
+def compact_json_payload(value: object, *, max_chars: int = 6000) -> object:
+    """Return a JSON-like payload clipped to keep harness prompts bounded."""
+
+    if isinstance(value, dict):
+        return {str(key): compact_json_payload(item, max_chars=max_chars) for key, item in value.items()}
+    if isinstance(value, list):
+        return [compact_json_payload(item, max_chars=max_chars) for item in value]
+    if isinstance(value, str):
+        return value[:max_chars]
+    return value
+
+
+def list_payload(value: object) -> list[dict[str, object]]:
+    """Return dict items from a JSON-like list."""
+
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def post_json(

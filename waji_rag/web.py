@@ -594,6 +594,9 @@ INDEX_HTML = f"""<!doctype html>
       $("workOrderCandidateTopK").value = "50";
       $("workOrderMinRelativeScore").value = "0.45";
       $("workOrderMaxHits").value = "10";
+      $("manualCandidateTopK").value = "30";
+      $("manualMinRelativeScore").value = "0.55";
+      $("manualMaxHits").value = "5";
       $("workOrderLimit").value = "";
       $("manualLimit").value = "";
       $("ingestReset").checked = true;
@@ -1940,6 +1943,18 @@ def build_redesigned_index_html() -> str:
               <input id="evidenceTopK" type="number" min="1" value="4">
             </div>
             <div>
+              <label for="manualCandidateTopK">手册候选上限</label>
+              <input id="manualCandidateTopK" type="number" min="1" value="30">
+            </div>
+            <div>
+              <label for="manualMinRelativeScore">手册相对阈值</label>
+              <input id="manualMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.55">
+            </div>
+            <div>
+              <label for="manualMaxHits">手册最大返回</label>
+              <input id="manualMaxHits" type="number" min="0" value="5">
+            </div>
+            <div>
               <label for="workOrderCandidateTopK">工单候选上限</label>
               <input id="workOrderCandidateTopK" type="number" min="1" value="50">
             </div>
@@ -1979,6 +1994,18 @@ def build_redesigned_index_html() -> str:
               <div>
                 <label for="batchEvalTopK">手册 / 故障码 Top K</label>
                 <input id="batchEvalTopK" type="number" min="1" value="1">
+              </div>
+              <div>
+                <label for="batchEvalManualCandidateTopK">手册候选上限</label>
+                <input id="batchEvalManualCandidateTopK" type="number" min="1" value="30">
+              </div>
+              <div>
+                <label for="batchEvalManualMinRelativeScore">手册相对阈值</label>
+                <input id="batchEvalManualMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.55">
+              </div>
+              <div>
+                <label for="batchEvalManualMaxHits">手册最大返回</label>
+                <input id="batchEvalManualMaxHits" type="number" min="0" value="5">
               </div>
               <div>
                 <label for="batchEvalWorkOrderCandidateTopK">工单候选上限</label>
@@ -2194,8 +2221,10 @@ def build_redesigned_index_html() -> str:
     ];
     const qaStageOrder = [
       ["retrieval", "多路召回", "历史工单、手册、故障码、备件证据分路召回"],
-      ["rerank", "重排", "可选 rerank；失败或关闭则保留原顺序"],
-      ["answer", "答案生成", "用选中证据和备件候选生成最终答复"]
+      ["work_order_filter", "工单筛选", "LLM 并发判断历史工单是否真实相关"],
+      ["manual_filter", "手册筛选", "LLM 根据手册标题筛选相关指导手册"],
+      ["fact_extraction", "事实整理", "归并故障码、工单处理经验、手册摘要和备件"],
+      ["answer", "答案生成", "按固定维修诊断结构生成最终答复"]
     ];
     const batchEvalMetricOptions = [
       ["part_recall", "备件召回率"],
@@ -2228,6 +2257,9 @@ def build_redesigned_index_html() -> str:
         workOrderCandidateTopK: 50,
         workOrderMinRelativeScore: 0.45,
         workOrderMaxHits: 10,
+        manualCandidateTopK: 30,
+        manualMinRelativeScore: 0.55,
+        manualMaxHits: 5,
         running: false
       },
       batchEval: {
@@ -2551,6 +2583,9 @@ def build_redesigned_index_html() -> str:
           work_order_candidate_top_k: $("workOrderCandidateTopK").value ? Number($("workOrderCandidateTopK").value) : 50,
           work_order_min_relative_score: $("workOrderMinRelativeScore").value ? Number($("workOrderMinRelativeScore").value) : 0.45,
           work_order_max_hits: $("workOrderMaxHits").value ? Number($("workOrderMaxHits").value) : 10,
+          manual_candidate_top_k: $("manualCandidateTopK").value ? Number($("manualCandidateTopK").value) : 30,
+          manual_min_relative_score: $("manualMinRelativeScore").value ? Number($("manualMinRelativeScore").value) : 0.55,
+          manual_max_hits: $("manualMaxHits").value ? Number($("manualMaxHits").value) : 5,
           ...retrievalOverrides
         },
         embedding: {
@@ -2862,7 +2897,10 @@ def build_redesigned_index_html() -> str:
         topK: Number(settings && settings.topK ? settings.topK : 1),
         workOrderCandidateTopK: Number(retrieval.work_order_candidate_top_k ?? 50),
         workOrderMinRelativeScore: Number(retrieval.work_order_min_relative_score ?? 0.45),
-        workOrderMaxHits: Number(retrieval.work_order_max_hits ?? 10)
+        workOrderMaxHits: Number(retrieval.work_order_max_hits ?? 10),
+        manualCandidateTopK: Number(retrieval.manual_candidate_top_k ?? 30),
+        manualMinRelativeScore: Number(retrieval.manual_min_relative_score ?? 0.55),
+        manualMaxHits: Number(retrieval.manual_max_hits ?? 5)
       };
     }
 
@@ -3228,6 +3266,9 @@ def build_redesigned_index_html() -> str:
       const workOrderCandidateTopK = numberInputValue("batchEvalWorkOrderCandidateTopK", 50);
       const workOrderMinRelativeScore = numberInputValue("batchEvalWorkOrderMinRelativeScore", 0.45);
       const workOrderMaxHits = numberInputValue("batchEvalWorkOrderMaxHits", 10);
+      const manualCandidateTopK = numberInputValue("batchEvalManualCandidateTopK", 30);
+      const manualMinRelativeScore = numberInputValue("batchEvalManualMinRelativeScore", 0.55);
+      const manualMaxHits = numberInputValue("batchEvalManualMaxHits", 5);
       const concurrency = numberInputValue("batchEvalConcurrency", 4);
       if (!Number.isFinite(topK) || topK < 1) return {ok: false, error: "手册 / 故障码 Top K 必须大于等于 1"};
       if (!Number.isFinite(workOrderCandidateTopK) || workOrderCandidateTopK < 1) return {ok: false, error: "工单候选上限必须大于等于 1"};
@@ -3235,6 +3276,11 @@ def build_redesigned_index_html() -> str:
         return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
       }
       if (!Number.isFinite(workOrderMaxHits) || workOrderMaxHits < 0) return {ok: false, error: "工单最大返回必须大于等于 0"};
+      if (!Number.isFinite(manualCandidateTopK) || manualCandidateTopK < 1) return {ok: false, error: "手册候选上限必须大于等于 1"};
+      if (!Number.isFinite(manualMinRelativeScore) || manualMinRelativeScore < 0 || manualMinRelativeScore > 1) {
+        return {ok: false, error: "手册相对阈值必须在 0 到 1 之间"};
+      }
+      if (!Number.isFinite(manualMaxHits) || manualMaxHits < 0) return {ok: false, error: "手册最大返回必须大于等于 0"};
       if (!Number.isFinite(concurrency) || concurrency < 1) return {ok: false, error: "并发数必须大于等于 1"};
       return {
         ok: true,
@@ -3243,7 +3289,10 @@ def build_redesigned_index_html() -> str:
         retrieval: {
           work_order_candidate_top_k: Math.floor(workOrderCandidateTopK),
           work_order_min_relative_score: workOrderMinRelativeScore,
-          work_order_max_hits: Math.floor(workOrderMaxHits)
+          work_order_max_hits: Math.floor(workOrderMaxHits),
+          manual_candidate_top_k: Math.floor(manualCandidateTopK),
+          manual_min_relative_score: manualMinRelativeScore,
+          manual_max_hits: Math.floor(manualMaxHits)
         }
       };
     }
@@ -3717,13 +3766,19 @@ def build_redesigned_index_html() -> str:
           evidence_top_k: $("evidenceTopK").value,
           work_order_candidate_top_k: $("workOrderCandidateTopK").value,
           work_order_min_relative_score: $("workOrderMinRelativeScore").value,
-          work_order_max_hits: $("workOrderMaxHits").value
+          work_order_max_hits: $("workOrderMaxHits").value,
+          manual_candidate_top_k: $("manualCandidateTopK").value,
+          manual_min_relative_score: $("manualMinRelativeScore").value,
+          manual_max_hits: $("manualMaxHits").value
         },
         batch_eval: {
           top_k: $("batchEvalTopK").value,
           work_order_candidate_top_k: $("batchEvalWorkOrderCandidateTopK").value,
           work_order_min_relative_score: $("batchEvalWorkOrderMinRelativeScore").value,
           work_order_max_hits: $("batchEvalWorkOrderMaxHits").value,
+          manual_candidate_top_k: $("batchEvalManualCandidateTopK").value,
+          manual_min_relative_score: $("batchEvalManualMinRelativeScore").value,
+          manual_max_hits: $("batchEvalManualMaxHits").value,
           concurrency: $("batchEvalConcurrency").value,
           selected_metric: selectedBatchEvalMetric()
         },
@@ -3760,10 +3815,16 @@ def build_redesigned_index_html() -> str:
       setInputValue("workOrderCandidateTopK", ui.work_order_candidate_top_k ?? retrieval.work_order_candidate_top_k);
       setInputValue("workOrderMinRelativeScore", ui.work_order_min_relative_score ?? retrieval.work_order_min_relative_score);
       setInputValue("workOrderMaxHits", ui.work_order_max_hits ?? retrieval.work_order_max_hits);
+      setInputValue("manualCandidateTopK", ui.manual_candidate_top_k ?? retrieval.manual_candidate_top_k);
+      setInputValue("manualMinRelativeScore", ui.manual_min_relative_score ?? retrieval.manual_min_relative_score);
+      setInputValue("manualMaxHits", ui.manual_max_hits ?? retrieval.manual_max_hits);
       setInputValue("batchEvalTopK", batchEval.top_k ?? ui.batch_eval_top_k);
       setInputValue("batchEvalWorkOrderCandidateTopK", batchEval.work_order_candidate_top_k ?? ui.batch_eval_work_order_candidate_top_k);
       setInputValue("batchEvalWorkOrderMinRelativeScore", batchEval.work_order_min_relative_score ?? ui.batch_eval_work_order_min_relative_score);
       setInputValue("batchEvalWorkOrderMaxHits", batchEval.work_order_max_hits ?? ui.batch_eval_work_order_max_hits);
+      setInputValue("batchEvalManualCandidateTopK", batchEval.manual_candidate_top_k ?? ui.batch_eval_manual_candidate_top_k);
+      setInputValue("batchEvalManualMinRelativeScore", batchEval.manual_min_relative_score ?? ui.batch_eval_manual_min_relative_score);
+      setInputValue("batchEvalManualMaxHits", batchEval.manual_max_hits ?? ui.batch_eval_manual_max_hits);
       setInputValue("batchEvalConcurrency", batchEval.concurrency ?? ui.batch_eval_concurrency);
       if (batchEval.selected_metric) appState.batchEval.selectedMetric = batchEval.selected_metric;
       if (ui.question_sidebar_open !== undefined) {
@@ -3883,8 +3944,10 @@ def build_redesigned_index_html() -> str:
         "workOrderLimit", "manualLimit", "maxManualChars",
         "ingestReset", "ingestResume", "query", "topK", "evidenceTopK",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
+        "manualCandidateTopK", "manualMinRelativeScore", "manualMaxHits",
         "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
-        "batchEvalWorkOrderMaxHits", "batchEvalConcurrency",
+        "batchEvalWorkOrderMaxHits", "batchEvalManualCandidateTopK", "batchEvalManualMinRelativeScore",
+        "batchEvalManualMaxHits", "batchEvalConcurrency",
         "enableEmbedding", "enableRerank", "enableLlm"
       ];
       for (const id of ids) {
@@ -4084,14 +4147,14 @@ def build_redesigned_index_html() -> str:
       const batchRow = isBatchEvalRowMode();
       const showAnswer = diagnosticView && !batchRow && stageId === "answer";
       const showRetrieval = diagnosticView && (stageId === "retrieval" || batchRow);
-      const showEvidence = diagnosticView && !batchRow && stageId === "rerank";
+      const showEvidence = diagnosticView && !batchRow && ["work_order_filter", "manual_filter", "fact_extraction"].includes(stageId);
       const showInspector = !batchRow && !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
       $("evidencePanel").classList.toggle("hidden", !showEvidence);
       $("inspectorPanel").classList.toggle("hidden", !showInspector);
       if (showEvidence) {
-        renderSelectedEvidence((appState.lastResult && appState.lastResult.selected_evidence) || []);
+        renderHarnessStage(stageId);
       }
     }
 
@@ -4123,6 +4186,18 @@ def build_redesigned_index_html() -> str:
           <div>
             <label for="batchRetryTopK">手册 / 故障码 Top K</label>
             <input id="batchRetryTopK" type="number" min="1" value="${escapeHtml(values.topK)}" ${disabled}>
+          </div>
+          <div>
+            <label for="batchRetryManualCandidateTopK">手册候选上限</label>
+            <input id="batchRetryManualCandidateTopK" type="number" min="1" value="${escapeHtml(values.manualCandidateTopK)}" ${disabled}>
+          </div>
+          <div>
+            <label for="batchRetryManualMinRelativeScore">手册相对阈值</label>
+            <input id="batchRetryManualMinRelativeScore" type="number" min="0" max="1" step="0.05" value="${escapeHtml(values.manualMinRelativeScore)}" ${disabled}>
+          </div>
+          <div>
+            <label for="batchRetryManualMaxHits">手册最大返回</label>
+            <input id="batchRetryManualMaxHits" type="number" min="0" value="${escapeHtml(values.manualMaxHits)}" ${disabled}>
           </div>
           <div>
             <label for="batchRetryWorkOrderCandidateTopK">工单候选上限</label>
@@ -4286,6 +4361,18 @@ def build_redesigned_index_html() -> str:
         workOrderMaxHits: numericValueFromElement(
           "batchRetryWorkOrderMaxHits",
           appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits
+        ),
+        manualCandidateTopK: numericValueFromElement(
+          "batchRetryManualCandidateTopK",
+          appState.batchRetry.manualCandidateTopK ?? defaults.manualCandidateTopK
+        ),
+        manualMinRelativeScore: numericValueFromElement(
+          "batchRetryManualMinRelativeScore",
+          appState.batchRetry.manualMinRelativeScore ?? defaults.manualMinRelativeScore
+        ),
+        manualMaxHits: numericValueFromElement(
+          "batchRetryManualMaxHits",
+          appState.batchRetry.manualMaxHits ?? defaults.manualMaxHits
         )
       };
     }
@@ -4296,7 +4383,10 @@ def build_redesigned_index_html() -> str:
         topK: appState.batchRetry.topK ?? defaults.topK,
         workOrderCandidateTopK: appState.batchRetry.workOrderCandidateTopK ?? defaults.workOrderCandidateTopK,
         workOrderMinRelativeScore: appState.batchRetry.workOrderMinRelativeScore ?? defaults.workOrderMinRelativeScore,
-        workOrderMaxHits: appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits
+        workOrderMaxHits: appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits,
+        manualCandidateTopK: appState.batchRetry.manualCandidateTopK ?? defaults.manualCandidateTopK,
+        manualMinRelativeScore: appState.batchRetry.manualMinRelativeScore ?? defaults.manualMinRelativeScore,
+        manualMaxHits: appState.batchRetry.manualMaxHits ?? defaults.manualMaxHits
       };
     }
 
@@ -4311,6 +4401,9 @@ def build_redesigned_index_html() -> str:
       if (!button) return;
       const ids = [
         "batchRetryTopK",
+        "batchRetryManualCandidateTopK",
+        "batchRetryManualMinRelativeScore",
+        "batchRetryManualMaxHits",
         "batchRetryWorkOrderCandidateTopK",
         "batchRetryWorkOrderMinRelativeScore",
         "batchRetryWorkOrderMaxHits"
@@ -4332,13 +4425,21 @@ def build_redesigned_index_html() -> str:
         return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
       }
       if (!Number.isFinite(values.workOrderMaxHits) || values.workOrderMaxHits < 0) return {ok: false, error: "工单最大返回必须大于等于 0"};
+      if (!Number.isFinite(values.manualCandidateTopK) || values.manualCandidateTopK < 1) return {ok: false, error: "手册候选上限必须大于等于 1"};
+      if (!Number.isFinite(values.manualMinRelativeScore) || values.manualMinRelativeScore < 0 || values.manualMinRelativeScore > 1) {
+        return {ok: false, error: "手册相对阈值必须在 0 到 1 之间"};
+      }
+      if (!Number.isFinite(values.manualMaxHits) || values.manualMaxHits < 0) return {ok: false, error: "手册最大返回必须大于等于 0"};
       return {
         ok: true,
         topK: Math.floor(values.topK),
         retrieval: {
           work_order_candidate_top_k: Math.floor(values.workOrderCandidateTopK),
           work_order_min_relative_score: values.workOrderMinRelativeScore,
-          work_order_max_hits: Math.floor(values.workOrderMaxHits)
+          work_order_max_hits: Math.floor(values.workOrderMaxHits),
+          manual_candidate_top_k: Math.floor(values.manualCandidateTopK),
+          manual_min_relative_score: values.manualMinRelativeScore,
+          manual_max_hits: Math.floor(values.manualMaxHits)
         }
       };
     }
@@ -4359,6 +4460,9 @@ def build_redesigned_index_html() -> str:
         workOrderCandidateTopK: settings.retrieval.work_order_candidate_top_k,
         workOrderMinRelativeScore: settings.retrieval.work_order_min_relative_score,
         workOrderMaxHits: settings.retrieval.work_order_max_hits,
+        manualCandidateTopK: settings.retrieval.manual_candidate_top_k,
+        manualMinRelativeScore: settings.retrieval.manual_min_relative_score,
+        manualMaxHits: settings.retrieval.manual_max_hits,
         running: true
       };
       renderStageInspector();
@@ -4663,11 +4767,19 @@ def build_redesigned_index_html() -> str:
       const answer = result.answer || {};
       setStageFromTrace(result);
       renderAnswer(answer);
-      renderParts(result.part_candidates || retrieval.part_candidates || []);
+      renderParts(answerPartsForDisplay(result, retrieval));
       renderRetrievalBoard(retrieval);
       renderSelectedEvidence(result.selected_evidence || []);
       if (result.retrieval) setStage("retrieval", "done", result.retrieval, formatRetrievalSummary(result.retrieval));
-      if (result.rerank) setStage("rerank", result.rerank.status || "done", result.rerank, rerankSummary(result.rerank));
+      if (result.answer_harness && result.answer_harness.work_order_filter) {
+        setStage("work_order_filter", result.answer_harness.work_order_filter.status || "done", result.answer_harness.work_order_filter, workOrderFilterSummary(result.answer_harness.work_order_filter));
+      }
+      if (result.answer_harness && result.answer_harness.manual_filter) {
+        setStage("manual_filter", result.answer_harness.manual_filter.status || "done", result.answer_harness.manual_filter, manualFilterSummary(result.answer_harness.manual_filter));
+      }
+      if (result.answer_harness && result.answer_harness.facts) {
+        setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts));
+      }
       if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer));
     }
 
@@ -4692,6 +4804,14 @@ def build_redesigned_index_html() -> str:
 
     function renderAnswer(answer) {
       $("answer").textContent = answer.text || "尚未生成答案。";
+    }
+
+    function answerPartsForDisplay(result, retrieval) {
+      const codedParts = result.answer_harness && result.answer_harness.facts && Array.isArray(result.answer_harness.facts.coded_parts)
+        ? result.answer_harness.facts.coded_parts
+        : [];
+      if (codedParts.length) return codedParts;
+      return result.part_candidates || retrieval.part_candidates || [];
     }
 
     function renderParts(parts) {
@@ -4781,6 +4901,7 @@ def build_redesigned_index_html() -> str:
       const text = String(item.body_preview || item.raw_text || "");
       return {
         name: firstText(
+          item.name,
           item.part_name,
           metadata.part_name,
           item.part_number_name,
@@ -4794,6 +4915,7 @@ def build_redesigned_index_html() -> str:
           extractPartLabel(text, ["新件数量"])
         ) || "未提供",
         code: firstText(
+          item.code,
           item.part_code,
           metadata.part_code,
           extractPartLabel(text, ["新件物料编码", "新件备件编码", "新件配件编码", "新件编码"])
@@ -4836,6 +4958,130 @@ def build_redesigned_index_html() -> str:
       return "";
     }
 
+    function renderHarnessStage(stageId) {
+      const harness = (appState.lastResult && appState.lastResult.answer_harness) || {};
+      if (stageId === "work_order_filter") {
+        $("evidencePanelTitle").textContent = "工单筛选";
+        $("selectedEvidence").innerHTML = renderWorkOrderFilter(harness.work_order_filter || {});
+        return;
+      }
+      if (stageId === "manual_filter") {
+        $("evidencePanelTitle").textContent = "手册筛选";
+        $("selectedEvidence").innerHTML = renderManualFilter(harness.manual_filter || {});
+        return;
+      }
+      if (stageId === "fact_extraction") {
+        $("evidencePanelTitle").textContent = "事实整理";
+        $("selectedEvidence").innerHTML = renderFactExtraction(harness.facts || {});
+      }
+    }
+
+    function renderWorkOrderFilter(payload) {
+      const accepted = payload.accepted || [];
+      const rejected = payload.rejected || [];
+      const unknown = payload.unknown || [];
+      return [
+        renderWorkOrderFilterGroup("Accepted", accepted, "进入最终答案"),
+        renderWorkOrderFilterGroup("Rejected", rejected, "不进入最终答案"),
+        renderWorkOrderFilterGroup("Unknown", unknown, "筛选失败，默认不进入最终答案")
+      ].join("");
+    }
+
+    function renderWorkOrderFilterGroup(title, items, note) {
+      const body = items.length ? items.map(renderWorkOrderFilterItem).join("") : '<div class="empty">暂无</div>';
+      return `
+        <div class="evidence-row">
+          <div class="row-title">${escapeHtml(title)} <span class="pill">${items.length}</span></div>
+          <div class="row-meta">${escapeHtml(note)}</div>
+          <div class="part-box">${body}</div>
+        </div>
+      `;
+    }
+
+    function renderWorkOrderFilterItem(item) {
+      const parts = Array.isArray(item.usable_parts) && item.usable_parts.length
+        ? `<div class="row-meta">关联备件：${item.usable_parts.map(partSummary).map(escapeHtml).join("；")}</div>`
+        : '<div class="row-meta">关联备件：无</div>';
+      const actions = Array.isArray(item.repair_actions) && item.repair_actions.length
+        ? `<div class="hit-preview">${escapeHtml(item.repair_actions.join("；"))}</div>`
+        : "";
+      const error = item.error ? `<div class="row-meta">error=${escapeHtml(item.error)}</div>` : "";
+      return `
+        <div class="hit">
+          <div class="hit-title">${escapeHtml(item.work_order_id || item.title || "未知工单")}</div>
+          <div class="row-meta">level=${escapeHtml(item.relevance_level || "")} · score=${escapeHtml(item.score ?? "")}</div>
+          <div class="row-meta">${escapeHtml(item.matched_reason || "")}</div>
+          <div class="row-meta">${escapeHtml(item.source_path || "")}</div>
+          ${actions}
+          ${parts}
+          ${error}
+        </div>
+      `;
+    }
+
+    function renderManualFilter(payload) {
+      const selected = payload.selected || [];
+      const rejected = payload.rejected || [];
+      return `
+        <div class="evidence-row">
+          <div class="row-title">Selected <span class="pill">${selected.length}</span></div>
+          <div class="part-box">${selected.length ? selected.map(renderManualFilterItem).join("") : '<div class="empty">暂无</div>'}</div>
+        </div>
+        <div class="evidence-row">
+          <div class="row-title">Rejected <span class="pill">${rejected.length}</span></div>
+          <div class="part-box">${rejected.length ? rejected.map(renderManualFilterItem).join("") : '<div class="empty">暂无</div>'}</div>
+        </div>
+      `;
+    }
+
+    function renderManualFilterItem(item) {
+      return `
+        <div class="hit">
+          <div class="hit-title">${escapeHtml(item.title || item.doc_id || "未知手册")}</div>
+          <div class="row-meta">doc_id=${escapeHtml(item.doc_id || "")} · level=${escapeHtml(item.relevance_level || "")} · score=${escapeHtml(item.score ?? "")}</div>
+          <div class="row-meta">${escapeHtml(item.reason || "")}</div>
+          <div class="row-meta">${escapeHtml(item.source_path || "")}</div>
+          <div class="hit-preview">${escapeHtml(item.body_preview || "")}</div>
+        </div>
+      `;
+    }
+
+    function renderFactExtraction(facts) {
+      return `
+        ${renderFactGroup("故障码摘要", facts.fault_code_facts || [])}
+        ${renderFactGroup("工单处理方式归并", facts.work_order_groups || [])}
+        ${renderFactGroup("手册摘要", facts.manual_summaries || [])}
+        <div class="evidence-row">
+          <div class="row-title">备件汇总 JSON</div>
+          <pre class="json-box">${escapeHtml(JSON.stringify({
+            coded_parts: facts.coded_parts || [],
+            uncoded_possible_parts: facts.uncoded_possible_parts || []
+          }, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    function renderFactGroup(title, items) {
+      if (!items.length) {
+        return `
+          <div class="evidence-row">
+            <div class="row-title">${escapeHtml(title)} <span class="pill">0</span></div>
+            <div class="empty">暂无</div>
+          </div>
+        `;
+      }
+      return `
+        <div class="evidence-row">
+          <div class="row-title">${escapeHtml(title)} <span class="pill">${items.length}</span></div>
+          <pre class="json-box">${escapeHtml(JSON.stringify(items, null, 2))}</pre>
+        </div>
+      `;
+    }
+
+    function partSummary(part) {
+      return `${part.name || part.part_name || "未知备件"} / ${part.code || part.part_code || "无编码"} / ${part.quantity || "无数量"}`;
+    }
+
     function renderSelectedEvidence(items) {
       $("evidencePanelTitle").textContent = "答案生成依据";
       if (!items.length) {
@@ -4857,6 +5103,18 @@ def build_redesigned_index_html() -> str:
     function formatRetrievalSummary(retrieval) {
       const channelsPayload = retrieval.channels || {};
       return `mode=${retrieval.mode || ""} · ` + channels.map(([name, label]) => `${label}:${(channelsPayload[name] || []).length}`).join(" · ");
+    }
+
+    function workOrderFilterSummary(payload) {
+      return `accepted=${(payload.accepted || []).length} · rejected=${(payload.rejected || []).length} · unknown=${(payload.unknown || []).length}`;
+    }
+
+    function manualFilterSummary(payload) {
+      return `selected=${(payload.selected || []).length} · rejected=${(payload.rejected || []).length}`;
+    }
+
+    function factSummary(payload) {
+      return `故障码=${(payload.fault_code_facts || []).length} · 工单归并=${(payload.work_order_groups || []).length} · 手册=${(payload.manual_summaries || []).length} · 编码备件=${(payload.coded_parts || []).length}`;
     }
 
     function rerankSummary(rerank) {
@@ -5185,10 +5443,16 @@ def build_redesigned_index_html() -> str:
       $("workOrderCandidateTopK").value = "50";
       $("workOrderMinRelativeScore").value = "0.45";
       $("workOrderMaxHits").value = "10";
+      $("manualCandidateTopK").value = "30";
+      $("manualMinRelativeScore").value = "0.55";
+      $("manualMaxHits").value = "5";
       $("batchEvalTopK").value = "1";
       $("batchEvalWorkOrderCandidateTopK").value = "50";
       $("batchEvalWorkOrderMinRelativeScore").value = "0.45";
       $("batchEvalWorkOrderMaxHits").value = "10";
+      $("batchEvalManualCandidateTopK").value = "30";
+      $("batchEvalManualMinRelativeScore").value = "0.55";
+      $("batchEvalManualMaxHits").value = "5";
       $("batchEvalConcurrency").value = "4";
       $("workOrderLimit").value = "";
       $("manualLimit").value = "";
@@ -6168,7 +6432,14 @@ def safe_browser_config_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     retrieval = object_payload(overrides.get("retrieval")) or {}
     safe_retrieval = {
         key: retrieval[key]
-        for key in ("work_order_candidate_top_k", "work_order_min_relative_score", "work_order_max_hits")
+        for key in (
+            "work_order_candidate_top_k",
+            "work_order_min_relative_score",
+            "work_order_max_hits",
+            "manual_candidate_top_k",
+            "manual_min_relative_score",
+            "manual_max_hits",
+        )
         if key in retrieval
     }
     if safe_retrieval:

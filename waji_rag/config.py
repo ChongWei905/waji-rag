@@ -66,6 +66,9 @@ class RetrievalConfig:
     work_order_candidate_top_k: int = 50
     work_order_min_relative_score: float = 0.45
     work_order_max_hits: int = 10
+    manual_candidate_top_k: int = 30
+    manual_min_relative_score: float = 0.55
+    manual_max_hits: int = 5
 
 
 @dataclass(slots=True)
@@ -210,6 +213,13 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
                 maximum=1.0,
             ),
             work_order_max_hits=max(0, int(retrieval_payload.get("work_order_max_hits", 10))),
+            manual_candidate_top_k=max(1, int(retrieval_payload.get("manual_candidate_top_k", 30))),
+            manual_min_relative_score=clamp_float(
+                retrieval_payload.get("manual_min_relative_score", 0.55),
+                minimum=0.0,
+                maximum=1.0,
+            ),
+            manual_max_hits=max(0, int(retrieval_payload.get("manual_max_hits", 5))),
         ),
         embedding=EmbeddingConfig(
             enabled=as_bool(embedding_payload.get("enabled", False)),

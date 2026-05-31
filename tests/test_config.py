@@ -104,6 +104,9 @@ class ConfigTests(unittest.TestCase):
                     "work_order_candidate_top_k": 80,
                     "work_order_min_relative_score": 1.8,
                     "work_order_max_hits": 12,
+                    "manual_candidate_top_k": 40,
+                    "manual_min_relative_score": -0.3,
+                    "manual_max_hits": 6,
                 }
             }
         )
@@ -111,6 +114,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.retrieval.work_order_candidate_top_k, 80)
         self.assertEqual(config.retrieval.work_order_min_relative_score, 1.0)
         self.assertEqual(config.retrieval.work_order_max_hits, 12)
+        self.assertEqual(config.retrieval.manual_candidate_top_k, 40)
+        self.assertEqual(config.retrieval.manual_min_relative_score, 0.0)
+        self.assertEqual(config.retrieval.manual_max_hits, 6)
 
 
 if __name__ == "__main__":
