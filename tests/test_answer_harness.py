@@ -116,6 +116,57 @@ class AnswerHarnessTests(unittest.TestCase):
         self.assertEqual(context["facts"]["coded_parts"][0]["code"], "PB-001")
         self.assertNotIn(rejected_order["work_order_id"], str(context))
 
+    def test_pipeline_progress_callback_reports_answer_stages(self) -> None:
+        config = AppConfig()
+        pipeline = RagPipeline(DatabaseOptions(database_url="postgresql://demo"), config)
+        retrieval = {
+            "mode": "bm25",
+            "channels": {
+                "work_orders": [
+                    {
+                        "doc_id": "WO-001",
+                        "doc_type": "work_order",
+                        "title": "风扇皮带异响",
+                        "work_order_id": "WO-001",
+                        "source_path": "WO-001.txt",
+                        "body_preview": "更换风扇皮带后异响消失",
+                    }
+                ],
+                "manual_typical_faults": [
+                    {
+                        "doc_id": "MAN-001",
+                        "doc_type": "manual_typical_fault",
+                        "title": "风扇皮带异响",
+                        "source_path": "manual.html",
+                        "body_preview": "检查皮带张紧度和磨损情况",
+                    }
+                ],
+                "manual_fault_codes": [],
+            },
+            "part_candidates": [
+                {
+                    "work_order_id": "WO-001",
+                    "new_part_name": "风扇皮带",
+                    "new_part_code": "PB-001",
+                    "new_part_quantity": "1",
+                }
+            ],
+        }
+        events: list[dict[str, object]] = []
+
+        with patch("waji_rag.pg_index.PgRetriever.retrieve", return_value=retrieval):
+            result = pipeline.run("风扇皮带异响", top_k=1, progress_callback=events.append)
+
+        self.assertEqual(result["answer"]["status"], "fallback")
+        self.assertEqual(
+            [event["active_stage"] for event in events],
+            ["retrieval", "work_order_filter", "manual_filter", "fact_extraction", "answer", "completed"],
+        )
+        self.assertIn("retrieval", events[1]["result"])
+        self.assertIn("work_order_filter", events[2]["result"]["answer_harness"])
+        self.assertIn("manual_filter", events[3]["result"]["answer_harness"])
+        self.assertIn("facts", events[4]["result"]["answer_harness"])
+
 
 if __name__ == "__main__":
     unittest.main()

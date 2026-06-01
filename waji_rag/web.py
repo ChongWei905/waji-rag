@@ -2246,6 +2246,7 @@ def build_redesigned_index_html() -> str:
       questionSidebarOpen: true,
       activeView: "build",
       buildPollTimer: null,
+      answerPollTimer: null,
       batchEvalRuns: [],
       activeBatchEvalTaskId: null,
       activeBatchEvalTask: null,
@@ -2555,6 +2556,9 @@ def build_redesigned_index_html() -> str:
             renderSearchResult(task.result || {});
           } else {
             renderPipelineResult(task.result || {});
+            if (["running", "pause_requested"].includes(task.status)) {
+              startAnswerPolling(task.id, target.id);
+            }
           }
           syncActiveQuestionState();
         }
@@ -4690,6 +4694,10 @@ def build_redesigned_index_html() -> str:
         tab.status = task.status || "answered";
         appState.currentTaskId = task.id;
         renderPipelineResult(task.result || {});
+        if (["running", "pause_requested"].includes(task.status)) {
+          tab.status = "answering";
+          startAnswerPolling(task.id, tab.id);
+        }
         syncActiveQuestionState();
       }
       if (task.status === "failed") {
@@ -4741,6 +4749,58 @@ def build_redesigned_index_html() -> str:
       }
     }
 
+    function startAnswerPolling(taskId, questionTabId) {
+      if (!taskId) return;
+      stopAnswerPolling();
+      pollAnswerTask(taskId, questionTabId);
+      appState.answerPollTimer = window.setInterval(() => {
+        pollAnswerTask(taskId, questionTabId);
+      }, 900);
+    }
+
+    function stopAnswerPolling() {
+      if (appState.answerPollTimer) {
+        window.clearInterval(appState.answerPollTimer);
+        appState.answerPollTimer = null;
+      }
+    }
+
+    async function pollAnswerTask(taskId, questionTabId) {
+      try {
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        const task = data.task;
+        if (!task) return;
+        renderAnswerTaskResult(task, questionTabId);
+        if (!["running", "pause_requested"].includes(task.status)) {
+          stopAnswerPolling();
+          await refreshTasks({quiet: true});
+          await refreshQuestionTabsFromServer({quiet: true});
+          setStatus(`问答任务 #${task.id} ${task.status}`, task.status === "failed" ? "error" : "success");
+        }
+      } catch (error) {
+        stopAnswerPolling();
+        setStatus(String(error), "error");
+        setStage("answer", "error", {error: String(error), task_id: taskId}, "问答轮询失败");
+      }
+    }
+
+    function renderAnswerTaskResult(task, questionTabId) {
+      appState.currentTaskId = task.id;
+      appState.currentTask = task;
+      const targetTab = appState.questionTabs.find(item => item.id === questionTabId);
+      if (targetTab) {
+        targetTab.answerTaskId = task.id;
+        targetTab.status = ["running", "pause_requested"].includes(task.status) ? "answering" : questionStatusFromTask(task, "answered");
+        targetTab.lastResult = task.result && task.result.result ? task.result.result : (task.result || null);
+        targetTab.updatedAt = task.updated_at || targetTab.updatedAt;
+      }
+      if (appState.activeView === "qa" && (!targetTab || appState.activeQuestionTabId === targetTab.id)) {
+        renderPipelineResult(task.result || {});
+        syncActiveQuestionState();
+      }
+      renderQuestionTabs();
+    }
+
     function taskTypeLabel(taskType) {
       return {
         build: "构建",
@@ -4765,6 +4825,8 @@ def build_redesigned_index_html() -> str:
       resetStages(appState.activeView === "batch" ? "batch" : "qa", "retrieval");
       const retrieval = result.retrieval || result;
       const answer = result.answer || {};
+      const activeStage = result.active_stage || response.active_stage || "";
+      const activeSummary = result.active_summary || response.summary || "正在执行";
       setStageFromTrace(result);
       renderAnswer(answer);
       renderParts(answerPartsForDisplay(result, retrieval));
@@ -4781,6 +4843,18 @@ def build_redesigned_index_html() -> str:
         setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts));
       }
       if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer));
+      if (activeStage && activeStage !== "completed") {
+        setStage(activeStage, "active", pipelineStageData(activeStage, result), activeSummary);
+      }
+    }
+
+    function pipelineStageData(stageId, result) {
+      if (stageId === "retrieval") return result.retrieval || result;
+      if (stageId === "work_order_filter") return (result.answer_harness && result.answer_harness.work_order_filter) || {};
+      if (stageId === "manual_filter") return (result.answer_harness && result.answer_harness.manual_filter) || {};
+      if (stageId === "fact_extraction") return (result.answer_harness && result.answer_harness.facts) || {};
+      if (stageId === "answer") return result.answer || {};
+      return result || {};
     }
 
     function setStageFromTrace(result) {
@@ -5292,16 +5366,14 @@ def build_redesigned_index_html() -> str:
         renderQuestionTabs();
         const payload = queryPayload(questionTab.query);
         setStage("retrieval", "active", payload, "分路召回证据");
-        const askResult = await postJson("/api/ask-db", payload);
+        const askResult = await postJson("/api/ask-db", {...payload, async: true});
         appState.currentTaskId = askResult.task_id || appState.currentTaskId;
         questionTab.answerTaskId = askResult.task_id || questionTab.answerTaskId;
-        questionTab.status = "answered";
-        askResult.workflow = {config: preview, init: initResult, ingest: ingestResult};
-        renderPipelineResult(askResult);
+        questionTab.status = "answering";
+        startAnswerPolling(questionTab.answerTaskId, questionTab.id);
         syncActiveQuestionState();
         await refreshTasks({quiet: true});
-        await refreshQuestionTabsFromServer({quiet: true});
-        setStatus("全流程完成", "success");
+        setStatus("问答任务已启动，阶段结果会自动刷新", "success");
       } catch (error) {
         setStatus(String(error), "error");
         const current = appState.selectedStage || "config";
@@ -5352,15 +5424,14 @@ def build_redesigned_index_html() -> str:
         const payload = queryPayload(questionTab.query);
         setStatus("问答中");
         setStage("retrieval", "active", payload, "分路召回证据");
-        const result = await postJson("/api/ask-db", payload);
+        const result = await postJson("/api/ask-db", {...payload, async: true});
         appState.currentTaskId = result.task_id || null;
         questionTab.answerTaskId = result.task_id || questionTab.answerTaskId;
-        questionTab.status = "answered";
-        renderPipelineResult(result);
+        questionTab.status = "answering";
+        startAnswerPolling(questionTab.answerTaskId, questionTab.id);
         syncActiveQuestionState();
         await refreshTasks({quiet: true});
-        await refreshQuestionTabsFromServer({quiet: true});
-        setStatus("问答完成", "success");
+        setStatus("问答任务已启动，阶段结果会自动刷新", "success");
       } catch (error) {
         setStatus(String(error), "error");
         setStage("answer", "error", {error: String(error)}, "问答失败");
@@ -5956,6 +6027,33 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         task_id: int | None = None
         try:
             task_id = create_task(database, "answer", query, task_request_payload(payload))
+            if bool(payload.get("async")):
+                update_task_result(
+                    database,
+                    task_id,
+                    "running",
+                    {
+                        "task_id": task_id,
+                        "summary": "问答任务已启动",
+                        "active_stage": "retrieval",
+                        "result": {
+                            "query": query,
+                            "active_stage": "retrieval",
+                            "active_summary": "正在多路召回证据",
+                            "trace": [],
+                        },
+                    },
+                    "问答任务已启动",
+                )
+                thread = threading.Thread(
+                    target=run_answer_task,
+                    args=(database, task_id, payload),
+                    name=f"waji-answer-{task_id}",
+                    daemon=True,
+                )
+                thread.start()
+                self._send_json({"task_id": task_id, "summary": "问答任务已启动", "status": "running"}, status=HTTPStatus.ACCEPTED)
+                return
             result = run_pg_pipeline(
                 PgPipelineOptions(
                     database=database,
@@ -6615,6 +6713,48 @@ def run_embedding_task(database: DatabaseOptions, task_id: int, payload: dict[st
         )
     except IngestPaused:
         finish_task(database, task_id, "paused", {"task_id": task_id, "summary": "任务已暂停"}, "任务已暂停")
+    except Exception as exc:  # noqa: BLE001 - background task must persist failure.
+        mark_task_failed(database, task_id, exc)
+
+
+def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, Any]) -> None:
+    """Run one answer task in the background and persist per-stage snapshots."""
+
+    query = str(payload.get("query") or "").strip()
+
+    def persist_progress(progress: dict[str, object]) -> None:
+        result = progress.get("result") if isinstance(progress.get("result"), dict) else {}
+        active_stage = str(progress.get("active_stage") or result.get("active_stage") or "")
+        summary = str(progress.get("summary") or result.get("active_summary") or "问答进行中")
+        update_task_result(
+            database,
+            task_id,
+            "running",
+            {
+                "task_id": task_id,
+                "summary": summary,
+                "active_stage": active_stage,
+                "result": result,
+            },
+            summary,
+        )
+
+    try:
+        result = run_pg_pipeline(
+            PgPipelineOptions(
+                database=database,
+                query=query,
+                config_path=config_path_from_payload(payload),
+                config_overrides=config_overrides_from_payload(payload),
+                env_path=env_path_from_payload(payload),
+                top_k=int(payload.get("top_k") or 5),
+                include_debug=bool(payload.get("debug")),
+                progress_callback=persist_progress,
+            )
+        )
+        answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
+        response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
+        finish_task(database, task_id, "completed", response, str(response["summary"]))
     except Exception as exc:  # noqa: BLE001 - background task must persist failure.
         mark_task_failed(database, task_id, exc)
 

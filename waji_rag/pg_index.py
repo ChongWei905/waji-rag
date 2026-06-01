@@ -158,6 +158,7 @@ class PgPipelineOptions:
     env_path: Path | None = None
     top_k: int = 8
     include_debug: bool = True
+    progress_callback: Callable[[dict[str, object]], None] | None = None
 
 
 @dataclass(slots=True)
@@ -1125,7 +1126,7 @@ class PgRetriever:
 
 
 class RagPipeline:
-    """Run retrieve, optional rerank, and optional answer generation."""
+    """Run retrieval, evidence harness filtering, and answer generation."""
 
     def __init__(self, database: DatabaseOptions, config: AppConfig) -> None:
         """Store pipeline dependencies."""
@@ -1133,12 +1134,48 @@ class RagPipeline:
         self.database = database
         self.config = config
 
-    def run(self, query: str, *, top_k: int = 8, include_debug: bool = True) -> dict[str, object]:
+    def run(
+        self,
+        query: str,
+        *,
+        top_k: int = 8,
+        include_debug: bool = True,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
+    ) -> dict[str, object]:
         """Run the full RAG pipeline and return answer, evidence, and debug logs."""
 
         trace: list[dict[str, object]] = []
         started_at = time.time()
         trace.append(stage_event("config", "ok", {"config": self.config.to_dict()}))
+        partial_payload: dict[str, object] = {
+            "query": query,
+            "rerank": {
+                "enabled": self.config.rerank.enabled,
+                "available": self.config.rerank.is_available(),
+                "status": "skipped",
+                "reason": "answer_harness_primary_path",
+            },
+            "trace": trace,
+        }
+
+        def publish(active_stage: str, summary: str) -> None:
+            if progress_callback is None:
+                return
+            snapshot = dict(partial_payload)
+            snapshot["trace"] = list(trace)
+            snapshot["active_stage"] = active_stage
+            snapshot["active_summary"] = summary
+            snapshot["elapsed_seconds"] = round(time.time() - started_at, 3)
+            progress_callback({"active_stage": active_stage, "summary": summary, "result": snapshot})
+
+        def publish_harness(active_stage: str, summary: str, harness_payload: dict[str, object]) -> None:
+            partial_payload["answer_harness"] = harness_payload
+            final_context = dict_payload(harness_payload.get("final_answer_context"))
+            if final_context:
+                partial_payload["selected_evidence"] = list_payload(final_context.get("selected_evidence"))
+            publish(active_stage, summary)
+
+        publish("retrieval", "正在多路召回证据")
         retriever = PgRetriever(self.database, self.config)
         retrieve_started_at = time.time()
         retrieval = retriever.retrieve(query, top_k=top_k, include_debug=include_debug)
@@ -1157,15 +1194,23 @@ class RagPipeline:
 
         evidence_items = flatten_evidence(retrieval, limit=max(self.config.answer.evidence_top_k, top_k))
         part_candidates = list_payload(retrieval.get("part_candidates"))
+        partial_payload["retrieval"] = retrieval
+        partial_payload["part_candidates"] = part_candidates
+        partial_payload["selected_evidence"] = evidence_items
+        publish("work_order_filter", "多路召回完成，正在筛选历史工单")
         answer_harness = self._run_answer_harness(
             query=query,
             retrieval=retrieval,
             part_candidates=part_candidates,
             trace=trace,
+            progress_callback=publish_harness,
         )
         final_context = dict_payload(answer_harness.get("final_answer_context"))
         selected_evidence = list_payload(final_context.get("selected_evidence")) or evidence_items
+        partial_payload["answer_harness"] = answer_harness
+        partial_payload["selected_evidence"] = selected_evidence
         answer_payload = self._answer(query, final_context, trace)
+        partial_payload["answer"] = answer_payload
         payload: dict[str, object] = {
             "query": query,
             "answer": answer_payload,
@@ -1187,6 +1232,8 @@ class RagPipeline:
                 "database_url": redact_database_url(self.database.database_url),
                 "config": self.config.to_dict(),
             }
+        partial_payload.update(payload)
+        publish("completed", "答案生成完成")
         return payload
 
     def _run_answer_harness(
@@ -1196,6 +1243,7 @@ class RagPipeline:
         retrieval: dict[str, object],
         part_candidates: list[dict[str, object]],
         trace: list[dict[str, object]],
+        progress_callback: Callable[[str, str, dict[str, object]], None] | None = None,
     ) -> dict[str, object]:
         work_order_hits = retrieval_channel_items(retrieval, "work_orders")
         manual_hits = retrieval_channel_items(retrieval, "manual_typical_faults")
@@ -1216,6 +1264,9 @@ class RagPipeline:
                 },
             )
         )
+        harness_progress: dict[str, object] = {"work_order_filter": work_order_filter}
+        if progress_callback is not None:
+            progress_callback("manual_filter", "工单筛选完成，正在筛选手册标题", dict(harness_progress))
 
         manual_started_at = time.time()
         manual_filter = self._filter_manuals(query=query, manual_hits=manual_hits)
@@ -1231,6 +1282,9 @@ class RagPipeline:
                 },
             )
         )
+        harness_progress["manual_filter"] = manual_filter
+        if progress_callback is not None:
+            progress_callback("fact_extraction", "手册筛选完成，正在整理答案事实", dict(harness_progress))
 
         accepted_orders = list_payload(work_order_filter.get("accepted"))
         selected_manuals = list_payload(manual_filter.get("selected"))
@@ -1261,6 +1315,7 @@ class RagPipeline:
                 },
             )
         )
+        harness_progress["facts"] = facts
 
         final_answer_context = build_final_answer_context(
             query=query,
@@ -1270,6 +1325,9 @@ class RagPipeline:
             facts=facts,
             selected_parts=selected_parts,
         )
+        harness_progress["final_answer_context"] = final_answer_context
+        if progress_callback is not None:
+            progress_callback("answer", "事实整理完成，正在生成最终答案", dict(harness_progress))
         return {
             "work_order_filter": work_order_filter,
             "manual_filter": manual_filter,
@@ -1561,6 +1619,7 @@ def run_pg_pipeline(options: PgPipelineOptions) -> dict[str, object]:
         options.query,
         top_k=max(options.top_k, 1),
         include_debug=options.include_debug,
+        progress_callback=options.progress_callback,
     )
 
 
