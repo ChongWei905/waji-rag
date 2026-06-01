@@ -1825,11 +1825,11 @@ def build_redesigned_index_html() -> str:
     .batch-sidebar-reopen {
       position: fixed;
       top: 92px;
-      right: 18px;
+      left: 0;
       z-index: 30;
       min-height: 44px;
-      padding: 0 18px;
-      border-radius: 999px;
+      padding: 0 18px 0 16px;
+      border-radius: 0 999px 999px 0;
       color: #fff;
       background: var(--accent);
       border-color: var(--accent-strong);
