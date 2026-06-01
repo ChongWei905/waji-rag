@@ -1822,6 +1822,23 @@ def build_redesigned_index_html() -> str:
       gap: 12px;
       margin-bottom: 12px;
     }
+    .batch-sidebar-reopen {
+      position: fixed;
+      top: 92px;
+      right: 18px;
+      z-index: 30;
+      min-height: 44px;
+      padding: 0 18px;
+      border-radius: 999px;
+      color: #fff;
+      background: var(--accent);
+      border-color: var(--accent-strong);
+      box-shadow: 0 10px 28px rgba(15, 118, 110, .24);
+    }
+    .batch-sidebar-reopen:hover {
+      filter: brightness(.94);
+      box-shadow: 0 12px 32px rgba(15, 118, 110, .32);
+    }
     .batch-eval-run-list {
       display: grid;
       gap: 8px;
@@ -2156,12 +2173,12 @@ def build_redesigned_index_html() -> str:
             <div id="batchEvalStatus" class="row-meta">选择左侧评测问题即可重现对应检索结果。</div>
           </div>
           <div class="actions">
-            <button id="openBatchQuestionSidebarBtn" class="secondary hidden">评测问题</button>
             <button id="backToBatchHomeBtn" class="secondary">返回批量评测</button>
             <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
             <button id="exportBatchEvalBtn" class="secondary" disabled>导出结果</button>
           </div>
         </div>
+        <button id="openBatchQuestionSidebarBtn" class="batch-sidebar-reopen hidden">展开评测问题</button>
         <div class="progress-track"><div id="batchEvalProgressBar" class="progress-bar"></div></div>
         <div id="batchEvalSummary" class="stat-grid"></div>
         <div id="batchEvalResults" class="batch-eval-results"><div class="empty">暂无评测结果</div></div>
