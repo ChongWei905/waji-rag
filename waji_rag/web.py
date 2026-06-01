@@ -73,6 +73,21 @@ _TASK_DB_MAX_ATTEMPTS = 5
 APP_CONFIG_SECTION_KEYS = ("retrieval", "embedding", "rerank", "llm", "answer")
 
 
+def log_runtime_event(message: str) -> None:
+    """Write a timestamped runtime event to the server console."""
+
+    print(f"[waji-rag] {time.strftime('%Y-%m-%d %H:%M:%S')} {message}", flush=True)
+
+
+def short_log_text(value: object, *, limit: int = 90) -> str:
+    """Return compact one-line text for server logs."""
+
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
 INDEX_HTML = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1886,6 +1901,10 @@ def build_redesigned_index_html() -> str:
       border-style: dashed;
       background: var(--soft);
     }
+    .eval-row.running {
+      border-color: #67e8f9;
+      background: #ecfeff;
+    }
     .eval-row-head {
       display: flex;
       justify-content: space-between;
@@ -2373,6 +2392,8 @@ def build_redesigned_index_html() -> str:
       ["work_order_recall", "工单召回率"]
     ];
     const batchEvalAnswerMetricOption = ["answer_part_recall", "回答备件召回率"];
+    const BATCH_EVAL_REQUEST_TIMEOUT_MS = 15 * 60 * 1000;
+    const BATCH_EVAL_POLL_TIMEOUT_MS = 30 * 1000;
     let appState = {
       stages: {},
       selectedStage: "config",
@@ -2412,6 +2433,7 @@ def build_redesigned_index_html() -> str:
         headers: [],
         rows: [],
         results: [],
+        activeRows: [],
         running: false,
         stopRequested: false,
         fileName: "",
@@ -2425,7 +2447,9 @@ def build_redesigned_index_html() -> str:
         selectedMetric: "part_recall",
         questionIndex: null,
         persistPromise: Promise.resolve(),
-        persistError: null
+        persistError: null,
+        activeTimer: null,
+        lastActivePersistAt: 0
       }
     };
 
@@ -3269,6 +3293,90 @@ def build_redesigned_index_html() -> str:
       }[status] || status || "未知";
     }
 
+    function startBatchEvalActiveTimer() {
+      stopBatchEvalActiveTimer();
+      appState.batchEval.activeTimer = window.setInterval(() => {
+        if (!appState.batchEval.running) return;
+        if (appState.batchEval.activeRows && appState.batchEval.activeRows.length) {
+          renderBatchEvalResults(appState.batchEval.results.length, appState.batchEval.rowCount || appState.batchEval.rows.length);
+          const now = Date.now();
+          if (appState.batchEval.taskId && now - Number(appState.batchEval.lastActivePersistAt || 0) > 15000) {
+            appState.batchEval.lastActivePersistAt = now;
+            scheduleBatchEvalPersist("running");
+          }
+        }
+      }, 1000);
+    }
+
+    function stopBatchEvalActiveTimer() {
+      if (appState.batchEval.activeTimer) {
+        window.clearInterval(appState.batchEval.activeTimer);
+        appState.batchEval.activeTimer = null;
+      }
+    }
+
+    function setBatchEvalActive(index, patch = {}) {
+      const activeRows = appState.batchEval.activeRows || [];
+      const existingIndex = activeRows.findIndex(item => item.index === index);
+      if (patch.clear) {
+        if (existingIndex >= 0) activeRows.splice(existingIndex, 1);
+      } else {
+        const now = new Date().toISOString();
+        const existing = existingIndex >= 0 ? activeRows[existingIndex] : {index, startedAt: now};
+        const updated = {...existing, ...patch, index, updatedAt: now};
+        if (!updated.startedAt) updated.startedAt = now;
+        if (existingIndex >= 0) activeRows[existingIndex] = updated;
+        else activeRows.push(updated);
+      }
+      appState.batchEval.activeRows = activeRows;
+      if (appState.batchEval.running) {
+        renderBatchEvalResults(appState.batchEval.results.length, appState.batchEval.rowCount || appState.batchEval.rows.length);
+      }
+    }
+
+    function renderBatchEvalActiveRows() {
+      const activeRows = [...(appState.batchEval.activeRows || [])].sort((left, right) => Number(left.rowNumber || 0) - Number(right.rowNumber || 0));
+      if (!activeRows.length) return "";
+      return activeRows.map(item => `
+        <div class="eval-row running">
+          <div class="eval-row-head">
+            <div class="row-title">#${escapeHtml(item.rowNumber || "")} 运行中 · ${escapeHtml(batchEvalActiveStageLabel(item.stage))}</div>
+            <div class="row-meta">${escapeHtml(batchEvalElapsedText(item.startedAt))}${item.taskId ? ` · task #${escapeHtml(item.taskId)}` : ""}</div>
+          </div>
+          <div class="row-meta">${escapeHtml(item.question || "")}</div>
+          <div class="eval-row-grid">
+            <div class="eval-field"><div class="row-meta">当前阶段</div>${escapeHtml(batchEvalActiveStageLabel(item.stage))}</div>
+            <div class="eval-field"><div class="row-meta">最近反馈</div>${escapeHtml(item.detail || item.summary || "等待响应")}</div>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function batchEvalActiveStageLabel(stage) {
+      return {
+        queued: "排队",
+        search: "检索请求",
+        answer_start: "启动回答",
+        answer_poll: "等待回答",
+        retrieval: "多路召回",
+        work_order_filter: "工单筛选",
+        manual_filter: "手册筛选",
+        fact_extraction: "事实整理",
+        answer: "答案生成",
+        answer_result: "读取回答结果",
+        scoring: "评测匹配"
+      }[stage] || stage || "处理中";
+    }
+
+    function batchEvalElapsedText(startedAt) {
+      if (!startedAt) return "0 秒";
+      const seconds = Math.max(0, Math.floor((Date.now() - new Date(startedAt).getTime()) / 1000));
+      if (seconds < 60) return `${seconds} 秒`;
+      const minutes = Math.floor(seconds / 60);
+      const remain = seconds % 60;
+      return `${minutes} 分 ${remain} 秒`;
+    }
+
     async function runBatchEval() {
       if (appState.batchEval.running) return;
       const rows = appState.batchEval.rows || [];
@@ -3303,9 +3411,11 @@ def build_redesigned_index_html() -> str:
       syncBatchRetryDefaults(settings);
       appState.batchEval.persistPromise = Promise.resolve();
       appState.batchEval.persistError = null;
+      appState.batchEval.lastActivePersistAt = 0;
       appState.batchEval.running = true;
       appState.batchEval.stopRequested = false;
       appState.batchEval.results = [];
+      appState.batchEval.activeRows = [];
       $("runBatchEvalBtn").disabled = true;
       $("stopBatchEvalBtn").disabled = false;
       $("exportBatchEvalBtn").disabled = true;
@@ -3330,6 +3440,7 @@ def build_redesigned_index_html() -> str:
         updateBatchEvalBrowserRoute(appState.activeBatchEvalTask);
       } catch (error) {
         appState.batchEval.running = false;
+        stopBatchEvalActiveTimer();
         $("runBatchEvalBtn").disabled = false;
         $("stopBatchEvalBtn").disabled = true;
         setStatus(`批量评测创建失败：${error}`, "error");
@@ -3348,7 +3459,19 @@ def build_redesigned_index_html() -> str:
         while (true) {
           const index = nextWorkIndex();
           if (index === null) return;
-          const item = await runBatchEvalRow(index, rows[index], questionIndex, partColumns, workOrderColumn, settings);
+          const rowNumber = index + 2;
+          const question = String(rows[index][questionIndex] || "").trim();
+          setBatchEvalActive(index, {rowNumber, question, stage: "queued", detail: "等待发起请求"});
+          const item = await runBatchEvalRow(
+            index,
+            rows[index],
+            questionIndex,
+            partColumns,
+            workOrderColumn,
+            settings,
+            patch => setBatchEvalActive(index, patch)
+          );
+          setBatchEvalActive(index, {clear: true});
           appState.batchEval.results.push(item);
           completed += 1;
           $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · ${batchEvalRunModeLabel(settings.runMode)} · 并发 ${workerCount}`;
@@ -3358,12 +3481,15 @@ def build_redesigned_index_html() -> str:
         }
       };
       try {
+        startBatchEvalActiveTimer();
         await Promise.all(Array.from({length: workerCount}, () => runWorker()));
         const finalStatus = appState.batchEval.stopRequested ? "stopped" : appState.batchEval.results.some(item => item.status === "error") ? "completed_with_errors" : "completed";
         $("batchEvalStatus").textContent = finalStatus === "stopped" ? "评测已停止" : "评测完成";
         await scheduleBatchEvalPersist(finalStatus);
         await refreshBatchEvalRuns({quiet: true});
       } finally {
+        stopBatchEvalActiveTimer();
+        appState.batchEval.activeRows = [];
         appState.batchEval.running = false;
         appState.batchEval.stopRequested = false;
         $("runBatchEvalBtn").disabled = false;
@@ -3424,6 +3550,7 @@ def build_redesigned_index_html() -> str:
         work_order_column: appState.batchEval.workOrderColumn,
         part_columns: appState.batchEval.partColumns || null,
         counts,
+        active_rows: appState.batchEval.activeRows || [],
         rows,
         updated_at: new Date().toISOString()
       };
@@ -3542,12 +3669,13 @@ def build_redesigned_index_html() -> str:
       return value === "" ? fallback : Number(value);
     }
 
-    async function runBatchEvalRow(index, row, questionIndex, partColumns, workOrderColumn, settings) {
+    async function runBatchEvalRow(index, row, questionIndex, partColumns, workOrderColumn, settings, progress = null) {
       const rowNumber = index + 2;
       const question = String(row[questionIndex] || "").trim();
       const expectedParts = buildExpectedParts(row, partColumns);
       const expectedWorkOrderId = expectedWorkOrderIdFromRow(row, workOrderColumn);
       const runMode = settings.runMode === "answer" ? "answer" : "search";
+      const reportProgress = typeof progress === "function" ? progress : () => {};
       if (!question) {
         return {
           rowNumber,
@@ -3565,11 +3693,13 @@ def build_redesigned_index_html() -> str:
       }
       let taskId = null;
       try {
+        reportProgress({rowNumber, question, stage: runMode === "answer" ? "answer_start" : "search", detail: "正在发起请求"});
         const payload = queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false, autoEmbeddingForHybrid: true});
         const response = runMode === "answer"
-          ? await runBatchAnswerTask(payload)
-          : await postJson("/api/search-db", payload);
+          ? await runBatchAnswerTask(payload, reportProgress)
+          : await postJson("/api/search-db", payload, {timeoutMs: BATCH_EVAL_REQUEST_TIMEOUT_MS});
         taskId = response.task_id || null;
+        reportProgress({rowNumber, question, stage: "scoring", taskId, detail: "请求完成，正在计算评测指标"});
         const result = response.result || response;
         const retrieval = runMode === "answer" ? (result.retrieval || result) : result;
         const answer = runMode === "answer" && result.answer && typeof result.answer === "object" ? result.answer : {};
@@ -3611,11 +3741,21 @@ def build_redesigned_index_html() -> str:
       }
     }
 
-    async function runBatchAnswerTask(payload) {
-      const started = await postJson("/api/ask-db", {...payload, async: true});
+    async function runBatchAnswerTask(payload, progress = null) {
+      const reportProgress = typeof progress === "function" ? progress : () => {};
+      const started = await postJson("/api/ask-db", {...payload, async: true}, {timeoutMs: BATCH_EVAL_POLL_TIMEOUT_MS});
       const taskId = started.task_id;
       if (!taskId) throw new Error("回答任务未返回 task_id");
-      const task = await waitForBatchAnswerTask(taskId);
+      reportProgress({stage: "answer_poll", taskId, detail: "回答任务已启动，等待阶段进度"});
+      await waitForBatchAnswerTask(taskId, reportProgress);
+      reportProgress({stage: "answer_result", taskId, detail: "回答完成，正在读取轻量评测结果"});
+      const data = await postJson(
+        "/api/task",
+        taskPayload({task_id: taskId, view: "batch_answer_result"}),
+        {timeoutMs: BATCH_EVAL_POLL_TIMEOUT_MS}
+      );
+      const task = data.task;
+      if (!task) throw new Error(`回答任务不存在：${taskId}`);
       const result = task.result && typeof task.result === "object" ? task.result : {};
       return {
         task_id: task.id || taskId,
@@ -3624,12 +3764,22 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    async function waitForBatchAnswerTask(taskId) {
+    async function waitForBatchAnswerTask(taskId, progress = null) {
+      const reportProgress = typeof progress === "function" ? progress : () => {};
       while (true) {
         if (appState.batchEval.stopRequested) throw new Error("批量评测已停止，当前回答任务未等待完成");
-        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        const data = await postJson(
+          "/api/task",
+          taskPayload({task_id: taskId, view: "status"}),
+          {timeoutMs: BATCH_EVAL_POLL_TIMEOUT_MS}
+        );
         const task = data.task;
         if (!task) throw new Error(`回答任务不存在：${taskId}`);
+        reportProgress({
+          stage: task.active_stage || "answer_poll",
+          taskId,
+          detail: task.summary || task.error || "等待回答任务更新"
+        });
         if (!["running", "pause_requested"].includes(task.status)) {
           if (task.status === "failed") throw new Error(task.error || task.summary || `回答任务 #${taskId} 失败`);
           return task;
@@ -3893,6 +4043,7 @@ def build_redesigned_index_html() -> str:
       const counts = batchEvalCounts(results, metric);
       const metricLabel = batchEvalMetricLabel(metric);
       const runModeLabel = batchEvalRunModeLabel(batchEvalRunModeFromSettings());
+      const activeHtml = renderBatchEvalActiveRows();
       const safeTotal = total || counts.total || results.length;
       const percent = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
       $("batchEvalProgressBar").style.width = `${Math.min(Math.max(percent, 0), 100)}%`;
@@ -3901,6 +4052,7 @@ def build_redesigned_index_html() -> str:
         ["当前指标", metricLabel],
         ["总行数", counts.total],
         ["已评测", counts.done],
+        ["运行中", (appState.batchEval.activeRows || []).length],
         ["正确", counts.pass],
         ["失败", counts.fail],
         ["错误/跳过", `${counts.error} / ${counts.skipped}`],
@@ -3910,11 +4062,12 @@ def build_redesigned_index_html() -> str:
           <div class="row-meta">${escapeHtml(label)}</div>
         </div>
       `).join("");
-      if (!results.length) {
+      if (!results.length && !activeHtml) {
         $("batchEvalResults").innerHTML = '<div class="empty">暂无评测结果</div>';
         return;
       }
-      $("batchEvalResults").innerHTML = orderedBatchEvalResults(results).map(renderBatchEvalRow).join("");
+      const resultHtml = orderedBatchEvalResults(results).map(renderBatchEvalRow).join("");
+      $("batchEvalResults").innerHTML = activeHtml + resultHtml;
     }
 
     function renderBatchEvalRow(item) {
@@ -4324,13 +4477,36 @@ def build_redesigned_index_html() -> str:
       };
     }
 
-    async function postJson(url, payload) {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
+    async function postJson(url, payload, options = {}) {
+      const timeoutMs = Number(options.timeoutMs || 0);
+      const controller = timeoutMs > 0 ? new AbortController() : null;
+      const timeoutId = controller
+        ? window.setTimeout(() => controller.abort(), timeoutMs)
+        : null;
+      let response = null;
+      let text = "";
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload),
+          signal: controller ? controller.signal : undefined
+        });
+        text = await response.text();
+      } catch (error) {
+        if (error && error.name === "AbortError") {
+          throw new Error(`${url} 请求超过 ${Math.round(timeoutMs / 1000)} 秒未返回，已在前端中止等待`);
+        }
+        throw error;
+      } finally {
+        if (timeoutId !== null) window.clearTimeout(timeoutId);
+      }
+      let data = {};
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (error) {
+        throw new Error(`${url} 返回了非 JSON 内容：${text.slice(0, 300)}`);
+      }
       if (!response.ok) {
         const trace = data.traceback ? `\n${String(data.traceback).split("\n").slice(-8).join("\n")}` : "";
         throw new Error(`${data.error || response.statusText}${trace}`);
@@ -6595,6 +6771,8 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         task_id: int | None = None
         try:
             task_id = create_task(database, "search", query, task_request_payload(payload))
+            started_at = time.time()
+            log_runtime_event(f"search task={task_id} started query={short_log_text(query)!r}")
             result = run_pg_search(
                 PgSearchOptions(
                     database=database,
@@ -6608,8 +6786,13 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             )
             response = {"task_id": task_id, "summary": format_search_summary(result), "result": result}
             finish_task(database, task_id, "completed", response, str(response["summary"]))
+            log_runtime_event(
+                f"search task={task_id} completed elapsed_ms={int((time.time() - started_at) * 1000)} "
+                f"summary={short_log_text(response['summary'])!r}"
+            )
             self._send_json(response)
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            log_runtime_event(f"search task={task_id} failed error={type(exc).__name__}: {short_log_text(exc)}")
             task_update_error = mark_task_failed(database, task_id, exc)
             body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
@@ -6628,6 +6811,7 @@ class RagDebugHandler(BaseHTTPRequestHandler):
         response_status = HTTPStatus.OK
         try:
             task_id = create_task(database, "answer", query, task_request_payload(payload))
+            log_runtime_event(f"answer task={task_id} accepted async={bool(payload.get('async'))} query={short_log_text(query)!r}")
             if bool(payload.get("async")):
                 update_task_result(
                     database,
@@ -6655,7 +6839,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 thread.start()
                 response = {"task_id": task_id, "summary": "问答任务已启动", "status": "running"}
                 response_status = HTTPStatus.ACCEPTED
+                log_runtime_event(f"answer task={task_id} background thread started")
             else:
+                started_at = time.time()
                 result = run_pg_pipeline(
                     PgPipelineOptions(
                         database=database,
@@ -6670,7 +6856,12 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
                 response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
                 finish_task(database, task_id, "completed", response, str(response["summary"]))
+                log_runtime_event(
+                    f"answer task={task_id} completed elapsed_ms={int((time.time() - started_at) * 1000)} "
+                    f"summary={short_log_text(response['summary'])!r}"
+                )
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            log_runtime_event(f"answer task={task_id} failed error={type(exc).__name__}: {short_log_text(exc)}")
             task_update_error = mark_task_failed(database, task_id, exc)
             body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
@@ -6703,10 +6894,12 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
                 return
             database = shared_config_database() if payload.get("use_shared_database") else database_from_payload(payload)
-            task = get_task(database, task_id)
+            view = str(payload.get("view") or "")
+            task = get_task_status(database, task_id) if view == "status" else get_task(database, task_id)
             if task is None:
                 self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
                 return
+            task = task_for_view(task, view)
             self._send_json({"task": task})
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             self._send_json({"error": f"{type(exc).__name__}: {exc}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -6855,11 +7048,14 @@ class RagDebugHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+            self.log_error("%s %s client disconnected while sending JSON: %s", self.command, self.path, exc)
 
     def _send_text(self, text: str, *, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = text.encode("utf-8")
@@ -7329,11 +7525,17 @@ def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
     """Run one answer task in the background and persist per-stage snapshots."""
 
     query = str(payload.get("query") or "").strip()
+    started_at = time.time()
+    last_logged_stage = ""
 
     def persist_progress(progress: dict[str, object]) -> None:
+        nonlocal last_logged_stage
         result = progress.get("result") if isinstance(progress.get("result"), dict) else {}
         active_stage = str(progress.get("active_stage") or result.get("active_stage") or "")
         summary = str(progress.get("summary") or result.get("active_summary") or "问答进行中")
+        if active_stage and active_stage != last_logged_stage:
+            last_logged_stage = active_stage
+            log_runtime_event(f"answer task={task_id} stage={active_stage} summary={short_log_text(summary)!r}")
         update_task_result(
             database,
             task_id,
@@ -7348,6 +7550,7 @@ def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
         )
 
     try:
+        log_runtime_event(f"answer task={task_id} running query={short_log_text(query)!r}")
         result = run_pg_pipeline(
             PgPipelineOptions(
                 database=database,
@@ -7363,7 +7566,12 @@ def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
         answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
         response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
         finish_task(database, task_id, "completed", response, str(response["summary"]))
+        log_runtime_event(
+            f"answer task={task_id} completed elapsed_ms={int((time.time() - started_at) * 1000)} "
+            f"summary={short_log_text(response['summary'])!r}"
+        )
     except Exception as exc:  # noqa: BLE001 - background task must persist failure.
+        log_runtime_event(f"answer task={task_id} failed error={type(exc).__name__}: {short_log_text(exc)}")
         mark_task_failed(database, task_id, exc)
 
 
@@ -8047,6 +8255,189 @@ def max_iso_datetime(left: object, right: object) -> object:
     if not right:
         return left
     return right if str(right) > str(left) else left
+
+
+def get_task_status(database: DatabaseOptions, task_id: int) -> dict[str, Any] | None:
+    """Return one workbench task without stored request/result payloads."""
+
+    ensure_task_schema(database)
+    with connect(database.database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    task_type,
+                    status,
+                    query,
+                    summary,
+                    error,
+                    result->>'active_stage' AS active_stage,
+                    created_at,
+                    updated_at
+                FROM rag_tasks
+                WHERE id = %s
+                """,
+                (task_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    if row is None:
+        return None
+    return {
+        "id": int(row[0]),
+        "task_type": row[1],
+        "status": row[2],
+        "query": row[3],
+        "summary": row[4],
+        "error": row[5],
+        "active_stage": row[6],
+        "created_at": iso_datetime(row[7]),
+        "updated_at": iso_datetime(row[8]),
+    }
+
+
+def task_for_view(task: dict[str, Any], view: str) -> dict[str, Any]:
+    """Project a persisted task into the requested API response view."""
+
+    normalized_view = str(view or "").strip()
+    if normalized_view == "status":
+        return task_status_view(task)
+    if normalized_view == "batch_answer_result":
+        return task_batch_answer_result_view(task)
+    return task
+
+
+def task_status_view(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact fields needed by polling clients."""
+
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    return {
+        "id": task.get("id"),
+        "task_type": task.get("task_type"),
+        "status": task.get("status"),
+        "query": task.get("query"),
+        "summary": task.get("summary"),
+        "error": task.get("error"),
+        "active_stage": task.get("active_stage") or result.get("active_stage"),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
+    }
+
+
+def task_batch_answer_result_view(task: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact answer result needed by batch-evaluation scoring."""
+
+    projected = task_status_view(task)
+    stored_result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    pipeline = stored_result.get("result") if isinstance(stored_result.get("result"), dict) else {}
+    projected["result"] = {
+        "task_id": task.get("id"),
+        "summary": stored_result.get("summary") or task.get("summary") or "",
+        "result": compact_pipeline_for_batch_eval(pipeline),
+    }
+    return projected
+
+
+def compact_pipeline_for_batch_eval(pipeline: dict[str, Any]) -> dict[str, Any]:
+    """Keep only answer-task fields required by batch-evaluation matching."""
+
+    if not isinstance(pipeline, dict):
+        return {}
+    retrieval = pipeline.get("retrieval") if isinstance(pipeline.get("retrieval"), dict) else pipeline
+    answer = pipeline.get("answer") if isinstance(pipeline.get("answer"), dict) else {}
+    compact: dict[str, Any] = {
+        "query": pipeline.get("query") or retrieval.get("query") or "",
+        "retrieval": compact_retrieval_for_batch_eval(retrieval),
+        "answer": {
+            "status": answer.get("status") or "",
+            "text": answer.get("text") or "",
+        },
+    }
+    return compact
+
+
+def compact_retrieval_for_batch_eval(retrieval: dict[str, Any]) -> dict[str, Any]:
+    """Keep retrieval fields used by batch-evaluation part and work-order metrics."""
+
+    if not isinstance(retrieval, dict):
+        return {}
+    channels = retrieval.get("channels") if isinstance(retrieval.get("channels"), dict) else {}
+    return {
+        "query": retrieval.get("query") or "",
+        "mode": retrieval.get("mode") or "",
+        "channel_modes": retrieval.get("channel_modes") if isinstance(retrieval.get("channel_modes"), dict) else {},
+        "top_k": retrieval.get("top_k"),
+        "channels": {
+            "work_orders": compact_work_order_hits(channels.get("work_orders")),
+        },
+        "work_orders": compact_work_order_hits(retrieval.get("work_orders")),
+        "part_candidates": compact_part_candidates(retrieval.get("part_candidates")),
+        "part_candidate_source": (
+            retrieval.get("part_candidate_source") if isinstance(retrieval.get("part_candidate_source"), dict) else {}
+        ),
+    }
+
+
+def compact_work_order_hits(value: object) -> list[dict[str, Any]]:
+    """Return work-order hits with only IDs, scores, paths, and short previews."""
+
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for rank, hit in enumerate(value, start=1):
+        if not isinstance(hit, dict):
+            continue
+        metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+        compact.append(
+            {
+                "rank": hit.get("rank") or rank,
+                "doc_id": hit.get("doc_id"),
+                "title": hit.get("title"),
+                "score": hit.get("score"),
+                "work_order_id": hit.get("work_order_id") or metadata.get("work_order_id"),
+                "source_path": hit.get("source_path") or metadata.get("source_path"),
+                "body_preview": compact_text(hit.get("body_preview"), limit=900),
+                "metadata": {
+                    "work_order_id": metadata.get("work_order_id"),
+                    "source_path": metadata.get("source_path"),
+                },
+            }
+        )
+    return compact
+
+
+def compact_part_candidates(value: object) -> list[dict[str, Any]]:
+    """Return linked part candidates with fields used by batch-evaluation matching."""
+
+    if not isinstance(value, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for part in value:
+        if not isinstance(part, dict):
+            continue
+        metadata = part.get("metadata") if isinstance(part.get("metadata"), dict) else {}
+        compact.append(
+            {
+                "part_name": part.get("part_name") or metadata.get("part_name"),
+                "part_number_name": part.get("part_number_name") or metadata.get("part_number_name"),
+                "part_number": part.get("part_number") or metadata.get("part_number"),
+                "part_code": part.get("part_code") or metadata.get("part_code"),
+                "quantity": part.get("quantity") or metadata.get("quantity"),
+                "work_order_id": part.get("work_order_id") or metadata.get("work_order_id"),
+                "source_path": part.get("source_path"),
+            }
+        )
+    return compact
+
+
+def compact_text(value: object, *, limit: int) -> str:
+    """Return a whitespace-normalized preview capped at the requested length."""
+
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
 
 
 def get_task(database: DatabaseOptions, task_id: int) -> dict[str, Any] | None:
