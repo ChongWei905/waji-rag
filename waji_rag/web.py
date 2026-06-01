@@ -2067,8 +2067,16 @@ def build_redesigned_index_html() -> str:
                   <option value="answer">检索 + 回答</option>
                 </select>
               </div>
+              <label class="checkline" for="batchEvalWorkOrderHybrid">
+                <input id="batchEvalWorkOrderHybrid" type="checkbox">
+                <span>历史工单使用 hybrid</span>
+              </label>
+              <label class="checkline" for="batchEvalManualHybrid">
+                <input id="batchEvalManualHybrid" type="checkbox">
+                <span>故障手册使用 hybrid</span>
+              </label>
               <div>
-                <label for="batchEvalTopK">手册 / 故障码 Top K</label>
+                <label for="batchEvalTopK">故障码 Top K</label>
                 <input id="batchEvalTopK" type="number" min="1" value="1">
               </div>
               <div>
@@ -2125,7 +2133,7 @@ def build_redesigned_index_html() -> str:
                 <select id="batchEvalPartQuantityColumn"></select>
               </div>
             </div>
-            <div id="batchEvalHomeStatus" class="row-meta">载入 CSV / XLSX 并配置列、评测模式、检索参数和并发数后点击开始评测。选择“检索 + 回答”会为每一行同步生成最终回答。</div>
+            <div id="batchEvalHomeStatus" class="row-meta">载入 CSV / XLSX 并配置列、评测模式、检索参数和并发数后点击开始评测。手册召回由候选上限、相对阈值和最大返回控制；故障码 Top K 只控制故障码精确匹配返回数。</div>
           </div>
         </div>
         <div class="panel">
@@ -2390,6 +2398,8 @@ def build_redesigned_index_html() -> str:
       activeBatchEvalReplay: null,
       batchRetry: {
         topK: 1,
+        workOrderHybrid: false,
+        manualHybrid: false,
         workOrderCandidateTopK: 50,
         workOrderMinRelativeScore: 0.45,
         workOrderMaxHits: 10,
@@ -2747,6 +2757,7 @@ def build_redesigned_index_html() -> str:
     function configOverrides(options = {}) {
       const retrievalOverrides = options.retrieval && typeof options.retrieval === "object" ? options.retrieval : {};
       const hybridRequested = retrievalOverrides.work_order_mode === "hybrid" || retrievalOverrides.manual_mode === "hybrid";
+      const autoEmbeddingForHybrid = Boolean((options.queryRuntime || options.autoEmbeddingForHybrid) && hybridRequested);
       return {
         retrieval: {
           work_order_candidate_top_k: $("workOrderCandidateTopK").value ? Number($("workOrderCandidateTopK").value) : 50,
@@ -2758,7 +2769,7 @@ def build_redesigned_index_html() -> str:
           ...retrievalOverrides
         },
         embedding: {
-          enabled: $("enableEmbedding").checked || Boolean(options.queryRuntime && hybridRequested)
+          enabled: $("enableEmbedding").checked || autoEmbeddingForHybrid
         },
         rerank: {
           enabled: $("enableRerank").checked,
@@ -3093,7 +3104,9 @@ def build_redesigned_index_html() -> str:
         workOrderMaxHits: Number(retrieval.work_order_max_hits ?? 10),
         manualCandidateTopK: Number(retrieval.manual_candidate_top_k ?? 30),
         manualMinRelativeScore: Number(retrieval.manual_min_relative_score ?? 0.55),
-        manualMaxHits: Number(retrieval.manual_max_hits ?? 5)
+        manualMaxHits: Number(retrieval.manual_max_hits ?? 5),
+        workOrderHybrid: retrieval.work_order_mode === "hybrid" || Boolean(settings && settings.workOrderHybrid === true),
+        manualHybrid: retrieval.manual_mode === "hybrid" || Boolean(settings && settings.manualHybrid === true)
       };
     }
 
@@ -3362,7 +3375,7 @@ def build_redesigned_index_html() -> str:
 
     async function createBatchEvalTask(settings, partColumns, questionIndex, workOrderColumn) {
       const payload = {
-        ...commonPayload({retrieval: settings.retrieval}),
+        ...commonPayload({retrieval: settings.retrieval, autoEmbeddingForHybrid: true}),
         batch_eval: {
           file_name: appState.batchEval.fileName || "未命名表格",
           row_count: appState.batchEval.rows.length,
@@ -3482,6 +3495,8 @@ def build_redesigned_index_html() -> str:
 
     function batchEvalSettings() {
       const runMode = $("batchEvalRunMode").value === "answer" ? "answer" : "search";
+      const workOrderHybrid = $("batchEvalWorkOrderHybrid").checked;
+      const manualHybrid = $("batchEvalManualHybrid").checked;
       const topK = numberInputValue("batchEvalTopK", 1);
       const workOrderCandidateTopK = numberInputValue("batchEvalWorkOrderCandidateTopK", 50);
       const workOrderMinRelativeScore = numberInputValue("batchEvalWorkOrderMinRelativeScore", 0.45);
@@ -3490,7 +3505,7 @@ def build_redesigned_index_html() -> str:
       const manualMinRelativeScore = numberInputValue("batchEvalManualMinRelativeScore", 0.55);
       const manualMaxHits = numberInputValue("batchEvalManualMaxHits", 5);
       const concurrency = numberInputValue("batchEvalConcurrency", 4);
-      if (!Number.isFinite(topK) || topK < 1) return {ok: false, error: "手册 / 故障码 Top K 必须大于等于 1"};
+      if (!Number.isFinite(topK) || topK < 1) return {ok: false, error: "故障码 Top K 必须大于等于 1"};
       if (!Number.isFinite(workOrderCandidateTopK) || workOrderCandidateTopK < 1) return {ok: false, error: "工单候选上限必须大于等于 1"};
       if (!Number.isFinite(workOrderMinRelativeScore) || workOrderMinRelativeScore < 0 || workOrderMinRelativeScore > 1) {
         return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
@@ -3505,9 +3520,13 @@ def build_redesigned_index_html() -> str:
       return {
         ok: true,
         runMode,
+        workOrderHybrid,
+        manualHybrid,
         topK: Math.floor(topK),
         concurrency: Math.min(Math.floor(concurrency), 16),
         retrieval: {
+          work_order_mode: workOrderHybrid ? "hybrid" : "bm25",
+          manual_mode: manualHybrid ? "hybrid" : "bm25",
           work_order_candidate_top_k: Math.floor(workOrderCandidateTopK),
           work_order_min_relative_score: workOrderMinRelativeScore,
           work_order_max_hits: Math.floor(workOrderMaxHits),
@@ -3544,12 +3563,13 @@ def build_redesigned_index_html() -> str:
           message: "问题为空"
         };
       }
+      let taskId = null;
       try {
-        const payload = queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false});
-        const response = await postJson(
-          runMode === "answer" ? "/api/ask-db" : "/api/search-db",
-          payload
-        );
+        const payload = queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false, autoEmbeddingForHybrid: true});
+        const response = runMode === "answer"
+          ? await runBatchAnswerTask(payload)
+          : await postJson("/api/search-db", payload);
+        taskId = response.task_id || null;
         const result = response.result || response;
         const retrieval = runMode === "answer" ? (result.retrieval || result) : result;
         const answer = runMode === "answer" && result.answer && typeof result.answer === "object" ? result.answer : {};
@@ -3563,7 +3583,7 @@ def build_redesigned_index_html() -> str:
           question,
           status: batchEvalStatusFromMatch(match),
           runMode,
-          taskId: response.task_id || null,
+          taskId,
           expectedParts,
           expectedWorkOrderId,
           retrievedParts,
@@ -3579,6 +3599,7 @@ def build_redesigned_index_html() -> str:
           question,
           status: "error",
           runMode,
+          taskId,
           expectedParts,
           expectedWorkOrderId,
           retrievedParts: [],
@@ -3588,6 +3609,37 @@ def build_redesigned_index_html() -> str:
           message: String(error)
         };
       }
+    }
+
+    async function runBatchAnswerTask(payload) {
+      const started = await postJson("/api/ask-db", {...payload, async: true});
+      const taskId = started.task_id;
+      if (!taskId) throw new Error("回答任务未返回 task_id");
+      const task = await waitForBatchAnswerTask(taskId);
+      const result = task.result && typeof task.result === "object" ? task.result : {};
+      return {
+        task_id: task.id || taskId,
+        summary: task.summary || result.summary || "",
+        result: result.result || result
+      };
+    }
+
+    async function waitForBatchAnswerTask(taskId) {
+      while (true) {
+        if (appState.batchEval.stopRequested) throw new Error("批量评测已停止，当前回答任务未等待完成");
+        const data = await postJson("/api/task", taskPayload({task_id: taskId}));
+        const task = data.task;
+        if (!task) throw new Error(`回答任务不存在：${taskId}`);
+        if (!["running", "pause_requested"].includes(task.status)) {
+          if (task.status === "failed") throw new Error(task.error || task.summary || `回答任务 #${taskId} 失败`);
+          return task;
+        }
+        await sleep(1200);
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => window.setTimeout(resolve, ms));
     }
 
     function optionalColumnIndex(id) {
@@ -4038,7 +4090,12 @@ def build_redesigned_index_html() -> str:
         },
         batch_eval: {
           run_mode: $("batchEvalRunMode").value,
+          work_order_hybrid: $("batchEvalWorkOrderHybrid").checked,
+          manual_hybrid: $("batchEvalManualHybrid").checked,
+          work_order_mode: $("batchEvalWorkOrderHybrid").checked ? "hybrid" : "bm25",
+          manual_mode: $("batchEvalManualHybrid").checked ? "hybrid" : "bm25",
           top_k: $("batchEvalTopK").value,
+          fault_code_top_k: $("batchEvalTopK").value,
           work_order_candidate_top_k: $("batchEvalWorkOrderCandidateTopK").value,
           work_order_min_relative_score: $("batchEvalWorkOrderMinRelativeScore").value,
           work_order_max_hits: $("batchEvalWorkOrderMaxHits").value,
@@ -4087,7 +4144,12 @@ def build_redesigned_index_html() -> str:
       setInputValue("manualMinRelativeScore", ui.manual_min_relative_score ?? retrieval.manual_min_relative_score);
       setInputValue("manualMaxHits", ui.manual_max_hits ?? retrieval.manual_max_hits);
       setInputValue("batchEvalRunMode", batchEval.run_mode ?? ui.batch_eval_run_mode);
-      setInputValue("batchEvalTopK", batchEval.top_k ?? ui.batch_eval_top_k);
+      const batchEvalRetrieval = batchEval.retrieval && typeof batchEval.retrieval === "object" ? batchEval.retrieval : {};
+      const batchEvalWorkOrderMode = batchEval.work_order_mode ?? batchEvalRetrieval.work_order_mode ?? ui.batch_eval_work_order_mode;
+      const batchEvalManualMode = batchEval.manual_mode ?? batchEvalRetrieval.manual_mode ?? ui.batch_eval_manual_mode;
+      setCheckboxValue("batchEvalWorkOrderHybrid", batchEval.work_order_hybrid ?? ui.batch_eval_work_order_hybrid ?? (batchEvalWorkOrderMode === "hybrid"));
+      setCheckboxValue("batchEvalManualHybrid", batchEval.manual_hybrid ?? ui.batch_eval_manual_hybrid ?? (batchEvalManualMode === "hybrid"));
+      setInputValue("batchEvalTopK", batchEval.fault_code_top_k ?? batchEval.top_k ?? ui.batch_eval_top_k);
       setInputValue("batchEvalWorkOrderCandidateTopK", batchEval.work_order_candidate_top_k ?? ui.batch_eval_work_order_candidate_top_k);
       setInputValue("batchEvalWorkOrderMinRelativeScore", batchEval.work_order_min_relative_score ?? ui.batch_eval_work_order_min_relative_score);
       setInputValue("batchEvalWorkOrderMaxHits", batchEval.work_order_max_hits ?? ui.batch_eval_work_order_max_hits);
@@ -4219,7 +4281,8 @@ def build_redesigned_index_html() -> str:
         "qaWorkOrderHybrid", "qaManualHybrid",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
         "manualCandidateTopK", "manualMinRelativeScore", "manualMaxHits",
-        "batchEvalRunMode", "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
+        "batchEvalRunMode", "batchEvalWorkOrderHybrid", "batchEvalManualHybrid",
+        "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
         "batchEvalWorkOrderMaxHits", "batchEvalManualCandidateTopK", "batchEvalManualMinRelativeScore",
         "batchEvalManualMaxHits", "batchEvalConcurrency",
         "enableEmbedding", "enableRerank", "enableLlm"
@@ -4254,7 +4317,7 @@ def build_redesigned_index_html() -> str:
       const useQaModes = options.useQaModes !== false;
       const retrievalOverrides = useQaModes ? qaRetrievalOverrides(options.retrieval) : (options.retrieval || {});
       return {
-        ...commonPayload({retrieval: retrievalOverrides, queryRuntime: useQaModes}),
+        ...commonPayload({retrieval: retrievalOverrides, queryRuntime: useQaModes, autoEmbeddingForHybrid: options.autoEmbeddingForHybrid}),
         query: String(query || "").trim(),
         top_k: Number.isFinite(requestedTopK) && requestedTopK > 0 ? requestedTopK : 5,
         debug: true
@@ -4473,8 +4536,16 @@ def build_redesigned_index_html() -> str:
             <div class="row-meta">默认显示本次批量评测使用的原始参数；只有点击按钮才会重跑当前问题检索，不会覆盖原始对错结论${escapeHtml(retryTask)}。</div>
           </div>
         <div class="batch-retry-controls">
+          <label class="checkline" for="batchRetryWorkOrderHybrid">
+            <input id="batchRetryWorkOrderHybrid" type="checkbox" ${values.workOrderHybrid ? "checked" : ""} ${disabled}>
+            <span>历史工单使用 hybrid</span>
+          </label>
+          <label class="checkline" for="batchRetryManualHybrid">
+            <input id="batchRetryManualHybrid" type="checkbox" ${values.manualHybrid ? "checked" : ""} ${disabled}>
+            <span>故障手册使用 hybrid</span>
+          </label>
           <div>
-            <label for="batchRetryTopK">手册 / 故障码 Top K</label>
+            <label for="batchRetryTopK">故障码 Top K</label>
             <input id="batchRetryTopK" type="number" min="1" value="${escapeHtml(values.topK)}" ${disabled}>
           </div>
           <div>
@@ -4664,6 +4735,8 @@ def build_redesigned_index_html() -> str:
       const defaults = batchRetryDefaults();
       return {
         topK: numericValueFromElement("batchRetryTopK", appState.batchRetry.topK ?? defaults.topK),
+        workOrderHybrid: Boolean($("batchRetryWorkOrderHybrid") ? $("batchRetryWorkOrderHybrid").checked : appState.batchRetry.workOrderHybrid ?? defaults.workOrderHybrid),
+        manualHybrid: Boolean($("batchRetryManualHybrid") ? $("batchRetryManualHybrid").checked : appState.batchRetry.manualHybrid ?? defaults.manualHybrid),
         workOrderCandidateTopK: numericValueFromElement(
           "batchRetryWorkOrderCandidateTopK",
           appState.batchRetry.workOrderCandidateTopK ?? defaults.workOrderCandidateTopK
@@ -4695,6 +4768,8 @@ def build_redesigned_index_html() -> str:
       const defaults = batchRetryDefaults();
       return {
         topK: appState.batchRetry.topK ?? defaults.topK,
+        workOrderHybrid: appState.batchRetry.workOrderHybrid ?? defaults.workOrderHybrid,
+        manualHybrid: appState.batchRetry.manualHybrid ?? defaults.manualHybrid,
         workOrderCandidateTopK: appState.batchRetry.workOrderCandidateTopK ?? defaults.workOrderCandidateTopK,
         workOrderMinRelativeScore: appState.batchRetry.workOrderMinRelativeScore ?? defaults.workOrderMinRelativeScore,
         workOrderMaxHits: appState.batchRetry.workOrderMaxHits ?? defaults.workOrderMaxHits,
@@ -4714,6 +4789,8 @@ def build_redesigned_index_html() -> str:
       const button = $("retryBatchQuestionBtn");
       if (!button) return;
       const ids = [
+        "batchRetryWorkOrderHybrid",
+        "batchRetryManualHybrid",
         "batchRetryTopK",
         "batchRetryManualCandidateTopK",
         "batchRetryManualMinRelativeScore",
@@ -4733,7 +4810,7 @@ def build_redesigned_index_html() -> str:
     }
 
     function validateBatchRetryValues(values) {
-      if (!Number.isFinite(values.topK) || values.topK < 1) return {ok: false, error: "Top K 必须大于等于 1"};
+      if (!Number.isFinite(values.topK) || values.topK < 1) return {ok: false, error: "故障码 Top K 必须大于等于 1"};
       if (!Number.isFinite(values.workOrderCandidateTopK) || values.workOrderCandidateTopK < 1) return {ok: false, error: "工单候选上限必须大于等于 1"};
       if (!Number.isFinite(values.workOrderMinRelativeScore) || values.workOrderMinRelativeScore < 0 || values.workOrderMinRelativeScore > 1) {
         return {ok: false, error: "工单相对阈值必须在 0 到 1 之间"};
@@ -4748,6 +4825,8 @@ def build_redesigned_index_html() -> str:
         ok: true,
         topK: Math.floor(values.topK),
         retrieval: {
+          work_order_mode: values.workOrderHybrid ? "hybrid" : "bm25",
+          manual_mode: values.manualHybrid ? "hybrid" : "bm25",
           work_order_candidate_top_k: Math.floor(values.workOrderCandidateTopK),
           work_order_min_relative_score: values.workOrderMinRelativeScore,
           work_order_max_hits: Math.floor(values.workOrderMaxHits),
@@ -4771,6 +4850,8 @@ def build_redesigned_index_html() -> str:
         ...appState.batchRetry,
         ...values,
         topK: settings.topK,
+        workOrderHybrid: settings.retrieval.work_order_mode === "hybrid",
+        manualHybrid: settings.retrieval.manual_mode === "hybrid",
         workOrderCandidateTopK: settings.retrieval.work_order_candidate_top_k,
         workOrderMinRelativeScore: settings.retrieval.work_order_min_relative_score,
         workOrderMaxHits: settings.retrieval.work_order_max_hits,
@@ -4781,7 +4862,7 @@ def build_redesigned_index_html() -> str:
       };
       renderStageInspector();
       try {
-        const payload = queryPayload(item.question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false});
+        const payload = queryPayload(item.question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false, autoEmbeddingForHybrid: true});
         setStatus(`正在重试批量评测第 ${item.rowNumber} 行`);
         setStage("retrieval", "active", payload, "按当前参数重试检索");
         const response = await postJson("/api/search-db", payload);
@@ -6010,6 +6091,8 @@ def build_redesigned_index_html() -> str:
       $("manualMinRelativeScore").value = "0.55";
       $("manualMaxHits").value = "5";
       $("batchEvalRunMode").value = "search";
+      $("batchEvalWorkOrderHybrid").checked = false;
+      $("batchEvalManualHybrid").checked = false;
       $("batchEvalTopK").value = "1";
       $("batchEvalWorkOrderCandidateTopK").value = "50";
       $("batchEvalWorkOrderMinRelativeScore").value = "0.45";
@@ -6534,6 +6617,8 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         database = database_from_payload(payload)
         task_id: int | None = None
+        response: dict[str, object] | None = None
+        response_status = HTTPStatus.OK
         try:
             task_id = create_task(database, "answer", query, task_request_payload(payload))
             if bool(payload.get("async")):
@@ -6561,29 +6646,31 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                     daemon=True,
                 )
                 thread.start()
-                self._send_json({"task_id": task_id, "summary": "问答任务已启动", "status": "running"}, status=HTTPStatus.ACCEPTED)
-                return
-            result = run_pg_pipeline(
-                PgPipelineOptions(
-                    database=database,
-                    query=query,
-                    config_path=config_path_from_payload(payload),
-                    config_overrides=config_overrides_from_payload(payload),
-                    env_path=env_path_from_payload(payload),
-                    top_k=int(payload.get("top_k") or 5),
-                    include_debug=bool(payload.get("debug")),
+                response = {"task_id": task_id, "summary": "问答任务已启动", "status": "running"}
+                response_status = HTTPStatus.ACCEPTED
+            else:
+                result = run_pg_pipeline(
+                    PgPipelineOptions(
+                        database=database,
+                        query=query,
+                        config_path=config_path_from_payload(payload),
+                        config_overrides=config_overrides_from_payload(payload),
+                        env_path=env_path_from_payload(payload),
+                        top_k=int(payload.get("top_k") or 5),
+                        include_debug=bool(payload.get("debug")),
+                    )
                 )
-            )
-            answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
-            response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
-            finish_task(database, task_id, "completed", response, str(response["summary"]))
-            self._send_json(response)
+                answer = result.get("answer") if isinstance(result.get("answer"), dict) else {}
+                response = {"task_id": task_id, "summary": str(answer.get("status") or "ok"), "result": result}
+                finish_task(database, task_id, "completed", response, str(response["summary"]))
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             task_update_error = mark_task_failed(database, task_id, exc)
             body: dict[str, object] = {"task_id": task_id}
             if task_update_error:
                 body["task_update_error"] = task_update_error
             self._send_exception_json(exc, extra=body)
+            return
+        self._send_json(response or {"task_id": task_id}, status=response_status)
 
     def _handle_tasks(self) -> None:
         payload = self._read_json()
