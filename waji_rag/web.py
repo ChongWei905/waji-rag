@@ -1423,6 +1423,81 @@ def build_redesigned_index_html() -> str:
       line-height: 1.62;
       overflow: auto;
     }
+    .answer-box.markdown-body {
+      white-space: normal;
+    }
+    .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 {
+      margin: 10px 0 6px;
+      line-height: 1.35;
+    }
+    .markdown-body h1 { font-size: 20px; }
+    .markdown-body h2 { font-size: 17px; }
+    .markdown-body h3, .markdown-body h4 { font-size: 15px; }
+    .markdown-body p {
+      margin: 0 0 9px;
+    }
+    .markdown-body ul, .markdown-body ol {
+      margin: 0 0 10px 20px;
+      padding: 0;
+    }
+    .markdown-body li {
+      margin: 3px 0;
+    }
+    .markdown-body blockquote {
+      margin: 8px 0;
+      padding: 6px 10px;
+      border-left: 3px solid var(--line-strong);
+      background: #fff;
+      color: var(--muted);
+      border-radius: 6px;
+    }
+    .markdown-body pre {
+      margin: 8px 0 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      overflow: auto;
+      white-space: pre;
+    }
+    .markdown-body code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 4px;
+    }
+    .markdown-body pre code {
+      border: 0;
+      padding: 0;
+      background: transparent;
+    }
+    .markdown-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 8px 0 12px;
+      background: #fff;
+      font-size: 13px;
+    }
+    .markdown-body th, .markdown-body td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .markdown-body th {
+      background: #f8fafc;
+      font-weight: 760;
+    }
+    .markdown-body a {
+      color: var(--accent);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+    .markdown-body a:hover {
+      text-decoration: underline;
+    }
     .part-box {
       display: grid;
       gap: 8px;
@@ -4972,7 +5047,174 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderAnswer(answer) {
-      $("answer").textContent = answer.text || "尚未生成答案。";
+      const text = answer.text || "尚未生成答案。";
+      $("answer").classList.add("markdown-body");
+      $("answer").innerHTML = renderMarkdown(text);
+    }
+
+    function renderMarkdown(markdown) {
+      const lines = String(markdown ?? "").replace(/\r\n?/g, "\n").split("\n");
+      const blocks = [];
+      let index = 0;
+      while (index < lines.length) {
+        const line = lines[index];
+        if (!line.trim()) {
+          index += 1;
+          continue;
+        }
+
+        const fence = line.match(/^\s*```([A-Za-z0-9_-]+)?\s*$/);
+        if (fence) {
+          const language = fence[1] ? ` class="language-${escapeHtml(fence[1])}"` : "";
+          const codeLines = [];
+          index += 1;
+          while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) {
+            codeLines.push(lines[index]);
+            index += 1;
+          }
+          if (index < lines.length) index += 1;
+          blocks.push(`<pre><code${language}>${escapeHtml(codeLines.join("\n"))}</code></pre>`);
+          continue;
+        }
+
+        if (isMarkdownTable(lines, index)) {
+          const header = splitMarkdownTableRow(lines[index]);
+          index += 2;
+          const rows = [];
+          while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+            rows.push(splitMarkdownTableRow(lines[index]));
+            index += 1;
+          }
+          const headerHtml = header.map(cell => `<th>${renderMarkdownInline(cell)}</th>`).join("");
+          const bodyHtml = rows.map(row => {
+            const cells = header.map((_, cellIndex) => row[cellIndex] || "");
+            return `<tr>${cells.map(cell => `<td>${renderMarkdownInline(cell)}</td>`).join("")}</tr>`;
+          }).join("");
+          blocks.push(`<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`);
+          continue;
+        }
+
+        const heading = line.match(/^(#{1,4})\s+(.+)$/);
+        if (heading) {
+          const level = heading[1].length;
+          blocks.push(`<h${level}>${renderMarkdownInline(heading[2])}</h${level}>`);
+          index += 1;
+          continue;
+        }
+
+        if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+          blocks.push("<hr>");
+          index += 1;
+          continue;
+        }
+
+        const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+        if (unordered) {
+          const items = [];
+          while (index < lines.length) {
+            const item = lines[index].match(/^\s*[-*+]\s+(.+)$/);
+            if (!item) break;
+            items.push(`<li>${renderMarkdownInline(item[1])}</li>`);
+            index += 1;
+          }
+          blocks.push(`<ul>${items.join("")}</ul>`);
+          continue;
+        }
+
+        const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+        if (ordered) {
+          const items = [];
+          while (index < lines.length) {
+            const item = lines[index].match(/^\s*\d+[.)]\s+(.+)$/);
+            if (!item) break;
+            items.push(`<li>${renderMarkdownInline(item[1])}</li>`);
+            index += 1;
+          }
+          blocks.push(`<ol>${items.join("")}</ol>`);
+          continue;
+        }
+
+        const quote = line.match(/^\s*>\s?(.+)$/);
+        if (quote) {
+          const quoteLines = [];
+          while (index < lines.length) {
+            const item = lines[index].match(/^\s*>\s?(.+)$/);
+            if (!item) break;
+            quoteLines.push(item[1]);
+            index += 1;
+          }
+          blocks.push(`<blockquote>${renderMarkdownInline(quoteLines.join(" "))}</blockquote>`);
+          continue;
+        }
+
+        const paragraph = [];
+        while (index < lines.length && lines[index].trim() && !isMarkdownBlockStart(lines, index)) {
+          paragraph.push(lines[index].trim());
+          index += 1;
+        }
+        if (paragraph.length) {
+          blocks.push(`<p>${renderMarkdownInline(paragraph.join(" "))}</p>`);
+        } else {
+          blocks.push(`<p>${renderMarkdownInline(line)}</p>`);
+          index += 1;
+        }
+      }
+      return blocks.join("\n");
+    }
+
+    function renderMarkdownInline(value) {
+      const codeTokens = [];
+      let text = String(value ?? "").replace(/`([^`]+)`/g, (_, code) => {
+        const token = `@@CODE_${codeTokens.length}@@`;
+        codeTokens.push(`<code>${escapeHtml(code)}</code>`);
+        return token;
+      });
+      let html = escapeHtml(text);
+      html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const decodedUrl = String(url).replace(/&amp;/g, "&");
+        if (!/^(https?:\/\/|#|\/)/i.test(decodedUrl)) return label;
+        return `<a href="${escapeHtml(decodedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      });
+      html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+      html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+      html = html.replace(/(^|[^\*])\*([^*]+)\*/g, "$1<em>$2</em>");
+      html = html.replace(/(^|[^_])_([^_]+)_/g, "$1<em>$2</em>");
+      codeTokens.forEach((codeHtml, tokenIndex) => {
+        html = html.replaceAll(`@@CODE_${tokenIndex}@@`, codeHtml);
+      });
+      return html;
+    }
+
+    function isMarkdownBlockStart(lines, index) {
+      const line = lines[index] || "";
+      return Boolean(
+        /^\s*```/.test(line)
+        || /^#{1,4}\s+/.test(line)
+        || /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)
+        || /^\s*[-*+]\s+/.test(line)
+        || /^\s*\d+[.)]\s+/.test(line)
+        || /^\s*>\s?/.test(line)
+        || isMarkdownTable(lines, index)
+      );
+    }
+
+    function isMarkdownTable(lines, index) {
+      const line = lines[index] || "";
+      const next = lines[index + 1] || "";
+      return line.includes("|") && isMarkdownTableSeparator(next);
+    }
+
+    function isMarkdownTableSeparator(line) {
+      const cells = splitMarkdownTableRow(line);
+      return cells.length >= 2 && cells.every(cell => /^:?-{3,}:?$/.test(cell));
+    }
+
+    function splitMarkdownTableRow(line) {
+      let text = String(line || "").trim();
+      if (text.startsWith("|")) text = text.slice(1);
+      if (text.endsWith("|")) text = text.slice(0, -1);
+      return text.split("|").map(cell => cell.trim());
     }
 
     function answerPartsForDisplay(result, retrieval) {
