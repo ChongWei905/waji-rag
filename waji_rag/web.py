@@ -968,6 +968,9 @@ def build_redesigned_index_html() -> str:
     .page-shell.batch-home-mode {
       grid-template-columns: minmax(0, 1fr);
     }
+    .page-shell.batch-sidebar-reopen-visible {
+      padding-left: 58px;
+    }
     .page-shell.history-collapsed .question-sidebar {
       display: none;
     }
@@ -1827,13 +1830,17 @@ def build_redesigned_index_html() -> str:
       top: 92px;
       left: 0;
       z-index: 30;
-      min-height: 44px;
-      padding: 0 18px 0 16px;
+      min-width: 44px;
+      min-height: 150px;
+      padding: 14px 8px;
       border-radius: 0 999px 999px 0;
       color: #fff;
       background: var(--accent);
       border-color: var(--accent-strong);
       box-shadow: 0 10px 28px rgba(15, 118, 110, .24);
+      writing-mode: vertical-rl;
+      text-orientation: upright;
+      letter-spacing: 0;
     }
     .batch-sidebar-reopen:hover {
       filter: brightness(.94);
@@ -1959,6 +1966,8 @@ def build_redesigned_index_html() -> str:
     @media (max-width: 760px) {
       header, .header-actions { align-items: stretch; }
       header { flex-direction: column; }
+      .page-shell.batch-sidebar-reopen-visible { padding-left: 50px; }
+      .batch-sidebar-reopen { top: 126px; }
       .query-tools, .retrieval-board, .modal-body, .batch-eval-controls, .batch-retry-controls, .batch-comparison-grid, .eval-row-grid, .batch-home-layout { grid-template-columns: 1fr; }
       .batch-comparison-grid {
         grid-template-areas:
@@ -2670,6 +2679,8 @@ def build_redesigned_index_html() -> str:
         Boolean(appState.activeBatchEvalTaskId) &&
         !appState.questionSidebarOpen;
       batchButton.classList.toggle("hidden", !shouldShowBatchButton);
+      const shell = $("pageShell");
+      if (shell) shell.classList.toggle("batch-sidebar-reopen-visible", shouldShowBatchButton);
     }
 
     function renderBatchMetricSelector(settings = appState.activeBatchEvalTaskId ? appState.batchEval.settings : $("batchEvalRunMode").value) {
