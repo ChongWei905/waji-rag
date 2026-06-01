@@ -1673,6 +1673,15 @@ def build_redesigned_index_html() -> str:
       padding-top: 8px;
       border-top: 1px solid var(--line);
     }
+    .batch-answer-preview {
+      max-height: 260px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 9px;
+      font-size: 13px;
+    }
     .batch-comparison-field .empty {
       padding: 10px;
     }
@@ -1961,7 +1970,6 @@ def build_redesigned_index_html() -> str:
         <label for="batchMetricSelect">评测指标</label>
         <select id="batchMetricSelect">
           <option value="part_recall">备件召回率</option>
-          <option value="part_exact">备件正确率</option>
           <option value="work_order_recall">工单召回率</option>
         </select>
       </div>
@@ -2053,6 +2061,13 @@ def build_redesigned_index_html() -> str:
             </div>
             <div class="batch-eval-controls">
               <div>
+                <label for="batchEvalRunMode">评测模式</label>
+                <select id="batchEvalRunMode">
+                  <option value="search" selected>只检索</option>
+                  <option value="answer">检索 + 回答</option>
+                </select>
+              </div>
+              <div>
                 <label for="batchEvalTopK">手册 / 故障码 Top K</label>
                 <input id="batchEvalTopK" type="number" min="1" value="1">
               </div>
@@ -2110,7 +2125,7 @@ def build_redesigned_index_html() -> str:
                 <select id="batchEvalPartQuantityColumn"></select>
               </div>
             </div>
-            <div id="batchEvalHomeStatus" class="row-meta">载入 CSV / XLSX 并配置列、检索参数和并发数后点击开始评测。</div>
+            <div id="batchEvalHomeStatus" class="row-meta">载入 CSV / XLSX 并配置列、评测模式、检索参数和并发数后点击开始评测。选择“检索 + 回答”会为每一行同步生成最终回答。</div>
           </div>
         </div>
         <div class="panel">
@@ -2345,11 +2360,11 @@ def build_redesigned_index_html() -> str:
       ["fact_extraction", "事实整理", "归并故障码、工单处理经验、手册摘要和备件"],
       ["answer", "答案生成", "按固定维修诊断结构生成最终答复"]
     ];
-    const batchEvalMetricOptions = [
+    const batchEvalBaseMetricOptions = [
       ["part_recall", "备件召回率"],
-      ["part_exact", "备件正确率"],
       ["work_order_recall", "工单召回率"]
     ];
+    const batchEvalAnswerMetricOption = ["answer_part_recall", "回答备件召回率"];
     let appState = {
       stages: {},
       selectedStage: "config",
@@ -2612,11 +2627,40 @@ def build_redesigned_index_html() -> str:
       renderBatchMetricSelector();
     }
 
-    function renderBatchMetricSelector() {
+    function renderBatchMetricSelector(settings = appState.activeBatchEvalTaskId ? appState.batchEval.settings : $("batchEvalRunMode").value) {
       const select = $("batchMetricSelect");
       if (!select) return;
-      const metric = selectedBatchEvalMetric();
+      const options = batchEvalMetricOptionsForSettings(settings);
+      const metric = selectedBatchEvalMetric(settings);
+      select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
       if (select.value !== metric) select.value = metric;
+    }
+
+    function batchEvalMetricOptionsForSettings(settings = appState.batchEval.settings) {
+      const options = [...batchEvalBaseMetricOptions];
+      if (batchEvalRunModeFromSettings(settings) === "answer") options.push(batchEvalAnswerMetricOption);
+      return options;
+    }
+
+    function batchEvalRunModeFromSettings(settings = appState.batchEval.settings) {
+      if (typeof settings === "string") return settings === "answer" ? "answer" : "search";
+      const mode = settings && (settings.runMode || settings.run_mode);
+      if (mode === "answer") return "answer";
+      if (mode === "search") return "search";
+      const selector = $("batchEvalRunMode");
+      return selector && selector.value === "answer" ? "answer" : "search";
+    }
+
+    function batchEvalRunModeFromItem(item) {
+      if (!item) return batchEvalRunModeFromSettings();
+      if (item.runMode === "answer" || item.run_mode === "answer") return "answer";
+      if (item.runMode === "search" || item.run_mode === "search") return "search";
+      if (item.answerText || item.answer_text) return "answer";
+      return batchEvalRunModeFromSettings(item.settings || item.batch_settings || appState.batchEval.settings);
+    }
+
+    function batchEvalRunModeLabel(mode = batchEvalRunModeFromSettings()) {
+      return batchEvalRunModeFromSettings(mode) === "answer" ? "检索+回答" : "只检索";
     }
 
     function questionTabMeta(tab) {
@@ -2930,13 +2974,14 @@ def build_redesigned_index_html() -> str:
         const active = Number(task.id) === Number(appState.activeBatchEvalTaskId);
         const shareId = batchEvalShareId(task);
         const sharePath = shareId ? `/${shareId}` : "生成中";
+        const runModeLabel = batchEvalRunModeLabel((task.result && (task.result.run_mode || task.result.settings)) || "search");
         return `
           <button class="batch-eval-run-card ${escapeHtml(task.status || "")} ${active ? "active" : ""}" data-task-id="${escapeHtml(task.id)}">
             <div class="task-line">
               <span class="task-title">#${escapeHtml(task.id)} ${escapeHtml(batchEvalTaskTitle(task))}</span>
               <span class="pill ${task.status === "completed" ? "ok" : task.status === "failed" || task.status === "completed_with_errors" || task.status === "stopped" ? "warn" : ""}">${escapeHtml(task.status || "")}</span>
             </div>
-            <div class="task-subtitle">${escapeHtml(metricLabel)} · 正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
+            <div class="task-subtitle">${escapeHtml(runModeLabel)} · ${escapeHtml(metricLabel)} · 正确 ${escapeHtml(counts.pass ?? 0)} · 失败 ${escapeHtml(counts.fail ?? 0)} · 错误 ${escapeHtml(counts.error ?? 0)} · 总数 ${escapeHtml(counts.total ?? "-")}</div>
             <div class="row-meta">分享路径：${escapeHtml(sharePath)}</div>
             <div class="row-meta">${escapeHtml(compactTime(task.updated_at || task.created_at))}</div>
           </button>
@@ -3018,7 +3063,10 @@ def build_redesigned_index_html() -> str:
       appState.batchEval.rowCount = Number(result.row_count || result.total || (result.rows || []).length || 0);
       appState.batchEval.results = Array.isArray(result.rows) ? result.rows : [];
       appState.batchEval.shareId = result.share_id || task.share_id || null;
-      appState.batchEval.settings = result.settings || null;
+      appState.batchEval.settings = result.settings || (result.run_mode ? {runMode: result.run_mode} : null);
+      if (appState.batchEval.settings && !appState.batchEval.settings.runMode) {
+        appState.batchEval.settings = {...appState.batchEval.settings, runMode: result.run_mode || "search"};
+      }
       appState.batchEval.partColumns = result.part_columns || null;
       appState.batchEval.workOrderColumn = result.work_order_column ?? null;
       appState.batchEval.selectedMetric = result.selected_metric || appState.batchEval.selectedMetric || "part_recall";
@@ -3106,7 +3154,7 @@ def build_redesigned_index_html() -> str:
         return `
         <button class="question-tab ${escapeHtml(status)} ${Number(item.rowNumber) === Number(appState.activeBatchEvalRowNumber) ? "active" : ""}" data-row-number="${escapeHtml(item.rowNumber)}">
           <div class="question-tab-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(batchEvalStatusText(status))} · ${escapeHtml(questionTitle(item.question || ""))}</div>
-          <div class="question-tab-meta">${escapeHtml(item.taskId ? `检索 #${item.taskId}` : batchEvalReason(item, metric) || "无检索任务")}</div>
+          <div class="question-tab-meta">${escapeHtml(item.taskId ? `${batchEvalRunModeFromItem(item) === "answer" ? "回答" : "检索"} #${item.taskId}` : batchEvalReason(item, metric) || "无检索任务")}</div>
         </button>
       `;
       }).join("");
@@ -3157,8 +3205,8 @@ def build_redesigned_index_html() -> str:
         if (!task) throw new Error(`task not found: ${item.taskId}`);
         appState.currentTaskId = task.id;
         renderBatchOriginalRetrieval(item, task.result && task.result.result ? task.result.result : task.result || {});
-        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalMetricLabel(metric)} ${batchEvalStatusText(metricStatus)} · 当前展示批量评测时的原始召回；点击重试按钮才会重新检索。`;
-        setStatus(`已打开批量评测第 ${item.rowNumber} 行原始召回`, metricStatusKind);
+        $("batchEvalStatus").textContent = `第 ${item.rowNumber} 行 · ${batchEvalMetricLabel(metric)} ${batchEvalStatusText(metricStatus)} · 当前展示批量评测时的原始${batchEvalRunModeFromItem(item) === "answer" ? "回答" : "召回"}；点击重试按钮才会重新检索。`;
+        setStatus(`已打开批量评测第 ${item.rowNumber} 行原始${batchEvalRunModeFromItem(item) === "answer" ? "回答" : "召回"}`, metricStatusKind);
       } catch (error) {
         renderRetrievalBoard({channels: {}, mode: "", top_k: ""});
         renderParts([]);
@@ -3169,13 +3217,33 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderBatchOriginalRetrieval(item, retrieval) {
-      appState.lastResult = retrieval || {};
+      const result = retrieval || {};
+      const retrieved = result.retrieval || result;
+      appState.lastResult = result || {};
       resetStages("batch", "retrieval");
-      setStage("retrieval", "done", appState.lastResult, formatRetrievalSummary(appState.lastResult));
-      renderRetrievalBoard(appState.lastResult);
-      renderParts(appState.lastResult.part_candidates || []);
+      setStage("retrieval", "done", retrieved, formatRetrievalSummary(retrieved), {select: false});
+      if (result.answer_harness && result.answer_harness.work_order_filter) {
+        setStage("work_order_filter", result.answer_harness.work_order_filter.status || "done", result.answer_harness.work_order_filter, workOrderFilterSummary(result.answer_harness.work_order_filter), {select: false});
+      }
+      if (result.answer_harness && result.answer_harness.manual_filter) {
+        setStage("manual_filter", result.answer_harness.manual_filter.status || "done", result.answer_harness.manual_filter, manualFilterSummary(result.answer_harness.manual_filter), {select: false});
+      }
+      if (result.answer_harness && result.answer_harness.facts) {
+        setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts), {select: false});
+      }
+      if (result.answer) {
+        setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer), {select: false});
+        renderAnswer(result.answer);
+      } else {
+        $("answer").classList.remove("markdown-body");
+        $("answer").textContent = `当前展示第 ${item.rowNumber} 行原始召回。`;
+      }
+      selectStage("retrieval");
+      renderStages();
+      renderStageInspector();
+      renderRetrievalBoard(retrieved);
+      renderParts(answerPartsForDisplay(result, retrieved));
       renderSelectedEvidence([]);
-      $("answer").textContent = `当前展示第 ${item.rowNumber} 行原始召回。`;
     }
 
     function batchEvalStatusText(status) {
@@ -3212,6 +3280,9 @@ def build_redesigned_index_html() -> str:
       };
       const workOrderColumn = optionalColumnIndex("batchEvalWorkOrderIdColumn");
       appState.batchEval.settings = settings;
+      if (!batchEvalMetricOptionsForSettings(settings).some(([value]) => value === appState.batchEval.selectedMetric)) {
+        appState.batchEval.selectedMetric = "part_recall";
+      }
       appState.batchEval.partColumns = partColumns;
       appState.batchEval.workOrderColumn = workOrderColumn;
       appState.batchEval.questionIndex = questionIndex;
@@ -3267,7 +3338,7 @@ def build_redesigned_index_html() -> str:
           const item = await runBatchEvalRow(index, rows[index], questionIndex, partColumns, workOrderColumn, settings);
           appState.batchEval.results.push(item);
           completed += 1;
-          $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · 并发 ${workerCount}`;
+          $("batchEvalStatus").textContent = `评测中：${completed} / ${rows.length} · ${batchEvalRunModeLabel(settings.runMode)} · 并发 ${workerCount}`;
           renderBatchEvalResults(completed, rows.length);
           renderBatchEvalQuestionTabs();
           scheduleBatchEvalPersist("running");
@@ -3331,6 +3402,7 @@ def build_redesigned_index_html() -> str:
         status,
         file_name: appState.batchEval.fileName || "未命名表格",
         share_id: appState.batchEval.shareId || null,
+        run_mode: batchEvalRunModeFromSettings(appState.batchEval.settings),
         headers: appState.batchEval.headers || [],
         row_count: appState.batchEval.rowCount || appState.batchEval.rows.length || rows.length,
         settings: appState.batchEval.settings || null,
@@ -3359,42 +3431,44 @@ def build_redesigned_index_html() -> str:
         work_order_required: workOrderRequired,
         work_order_pass: rows.filter(item => item.match && item.match.work_order && item.match.work_order.required && item.match.work_order.correct).length,
         part_recall_pass: rows.filter(item => batchEvalMetricCorrect(item, "part_recall")).length,
-        part_exact_pass: rows.filter(item => batchEvalMetricCorrect(item, "part_exact")).length,
+        answer_part_recall_pass: rows.filter(item => batchEvalMetricCorrect(item, "answer_part_recall")).length,
         selected_metric: metric,
         metric_counts: batchEvalAllMetricCounts(rows)
       };
     }
 
-    function batchEvalPartCorrect(item) {
-      return batchEvalMetricCorrect(item, "part_exact");
-    }
-
-    function selectedBatchEvalMetric() {
+    function selectedBatchEvalMetric(settings = appState.activeBatchEvalTaskId ? appState.batchEval.settings : $("batchEvalRunMode").value) {
       const metric = appState.batchEval && appState.batchEval.selectedMetric ? appState.batchEval.selectedMetric : "part_recall";
-      return batchEvalMetricOptions.some(([value]) => value === metric) ? metric : "part_recall";
+      return batchEvalMetricOptionsForSettings(settings).some(([value]) => value === metric) ? metric : "part_recall";
     }
 
     function batchEvalMetricLabel(metric = selectedBatchEvalMetric()) {
-      const found = batchEvalMetricOptions.find(([value]) => value === metric);
+      const found = [...batchEvalBaseMetricOptions, batchEvalAnswerMetricOption].find(([value]) => value === metric);
       return found ? found[1] : "备件召回率";
     }
 
     function batchEvalMetricStatus(item, metric = selectedBatchEvalMetric()) {
       if (!item) return "fail";
       if (item.status === "error" || item.status === "skipped") return item.status;
+      if (metric === "answer_part_recall" && !batchEvalAnswerMetricAvailable(item)) return "skipped";
       return batchEvalMetricCorrect(item, metric) ? "pass" : "fail";
     }
 
     function batchEvalMetricCorrect(item, metric = selectedBatchEvalMetric()) {
       const match = item && item.match ? item.match : {};
-      if (metric === "part_exact") return Boolean(match.part_exact_correct ?? match.part_correct ?? false);
       if (metric === "work_order_recall") return Boolean(match.work_order ? match.work_order.correct : false);
+      if (metric === "answer_part_recall") return batchEvalAnswerMetricAvailable(item) && Boolean(match.answer_part_recall_correct);
       return Boolean(match.part_recall_correct ?? (Array.isArray(match.missing) && match.missing.length === 0));
+    }
+
+    function batchEvalAnswerMetricAvailable(item) {
+      const match = item && item.match ? item.match : {};
+      return batchEvalRunModeFromItem(item) === "answer" && Boolean(match.answer_part_recall);
     }
 
     function batchEvalAllMetricCounts(rows) {
       const payload = {};
-      for (const [metric] of batchEvalMetricOptions) {
+      for (const [metric] of batchEvalMetricOptionsForSettings()) {
         const statuses = (rows || []).map(item => batchEvalMetricStatus(item, metric));
         payload[metric] = {
           pass: statuses.filter(status => status === "pass").length,
@@ -3407,6 +3481,7 @@ def build_redesigned_index_html() -> str:
     }
 
     function batchEvalSettings() {
+      const runMode = $("batchEvalRunMode").value === "answer" ? "answer" : "search";
       const topK = numberInputValue("batchEvalTopK", 1);
       const workOrderCandidateTopK = numberInputValue("batchEvalWorkOrderCandidateTopK", 50);
       const workOrderMinRelativeScore = numberInputValue("batchEvalWorkOrderMinRelativeScore", 0.45);
@@ -3429,6 +3504,7 @@ def build_redesigned_index_html() -> str:
       if (!Number.isFinite(concurrency) || concurrency < 1) return {ok: false, error: "并发数必须大于等于 1"};
       return {
         ok: true,
+        runMode,
         topK: Math.floor(topK),
         concurrency: Math.min(Math.floor(concurrency), 16),
         retrieval: {
@@ -3452,39 +3528,49 @@ def build_redesigned_index_html() -> str:
       const question = String(row[questionIndex] || "").trim();
       const expectedParts = buildExpectedParts(row, partColumns);
       const expectedWorkOrderId = expectedWorkOrderIdFromRow(row, workOrderColumn);
+      const runMode = settings.runMode === "answer" ? "answer" : "search";
       if (!question) {
         return {
           rowNumber,
           question: "",
           status: "skipped",
+          runMode,
           expectedParts,
           expectedWorkOrderId,
           retrievedParts: [],
           retrievedWorkOrderIds: [],
           retrievedWorkOrders: [],
+          answerText: "",
           message: "问题为空"
         };
       }
       try {
+        const payload = queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false});
         const response = await postJson(
-          "/api/search-db",
-          queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false})
+          runMode === "answer" ? "/api/ask-db" : "/api/search-db",
+          payload
         );
-        const retrieval = response.result || response;
+        const result = response.result || response;
+        const retrieval = runMode === "answer" ? (result.retrieval || result) : result;
+        const answer = runMode === "answer" && result.answer && typeof result.answer === "object" ? result.answer : {};
+        const answerText = String(answer.text || "");
         const retrievedParts = listPartCandidates(retrieval);
         const retrievedWorkOrders = listRetrievedWorkOrders(retrieval);
         const retrievedWorkOrderIds = uniqueWorkOrderIdsFromHits(retrievedWorkOrders);
-        const match = evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds);
+        const match = evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds, answerText, runMode);
         return {
           rowNumber,
           question,
           status: batchEvalStatusFromMatch(match),
+          runMode,
           taskId: response.task_id || null,
           expectedParts,
           expectedWorkOrderId,
           retrievedParts,
           retrievedWorkOrderIds,
           retrievedWorkOrders,
+          answerText,
+          answerStatus: answer.status || "",
           match
         };
       } catch (error) {
@@ -3492,11 +3578,13 @@ def build_redesigned_index_html() -> str:
           rowNumber,
           question,
           status: "error",
+          runMode,
           expectedParts,
           expectedWorkOrderId,
           retrievedParts: [],
           retrievedWorkOrderIds: [],
           retrievedWorkOrders: [],
+          answerText: "",
           message: String(error)
         };
       }
@@ -3602,35 +3690,65 @@ def build_redesigned_index_html() -> str:
       return leaf.replace(/\.[^.]+$/, "").replace(/^wo:/i, "").trim();
     }
 
-    function evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds) {
+    function evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds, answerText = "", runMode = "search") {
       const recallMatch = evaluatePartSetMatch(expectedParts, retrievedParts, expectedPartMatches);
-      const exactMatch = evaluatePartSetMatch(expectedParts, retrievedParts, expectedPartExactMatches);
       const workOrderMatch = evaluateWorkOrderRecall(expectedWorkOrderId, retrievedWorkOrderIds);
+      const answerPartRecall = evaluateAnswerPartRecall(expectedParts, answerText, runMode);
       const partRecallCorrect = recallMatch.missing.length === 0;
-      const partExactCorrect = exactMatch.missing.length === 0 && exactMatch.unexpected.length === 0;
-      const correct = partExactCorrect && workOrderMatch.correct;
+      const correct = partRecallCorrect && workOrderMatch.correct;
       return {
-        ...exactMatch,
+        ...recallMatch,
         correct,
-        part_correct: partExactCorrect,
+        part_correct: partRecallCorrect,
         part_recall_correct: partRecallCorrect,
-        part_exact_correct: partExactCorrect,
+        answer_part_recall_correct: answerPartRecall.correct,
         part_recall: {
           ...recallMatch,
           correct: partRecallCorrect
         },
-        part_exact: {
-          ...exactMatch,
-          correct: partExactCorrect
-        },
+        answer_part_recall: answerPartRecall,
         work_order: workOrderMatch,
         metric_results: {
           part_recall: partRecallCorrect,
-          part_exact: partExactCorrect,
-          work_order_recall: workOrderMatch.correct
+          work_order_recall: workOrderMatch.correct,
+          answer_part_recall: answerPartRecall.correct
         },
-        yellow_error: partExactCorrect && workOrderMatch.required && !workOrderMatch.correct
+        yellow_error: partRecallCorrect && workOrderMatch.required && !workOrderMatch.correct
       };
+    }
+
+    function evaluateAnswerPartRecall(expectedParts, answerText, runMode = "search") {
+      const expected = Array.isArray(expectedParts) ? expectedParts : [];
+      const available = runMode === "answer";
+      if (!available) {
+        return {available: false, required: expected.length > 0, correct: true, matched: [], missing: [], answer_text_preview: ""};
+      }
+      const answerKey = normalizeEvalText(answerText);
+      const matched = [];
+      const missing = [];
+      for (const part of expected) {
+        if (answerContainsExpectedPart(answerKey, part)) {
+          matched.push(part);
+        } else {
+          missing.push(part);
+        }
+      }
+      return {
+        available: true,
+        required: expected.length > 0,
+        correct: missing.length === 0,
+        matched,
+        missing,
+        answer_text_preview: String(answerText || "").slice(0, 500)
+      };
+    }
+
+    function answerContainsExpectedPart(answerKey, expectedPart) {
+      const name = normalizeEvalText(expectedPart && expectedPart.name);
+      const code = normalizeEvalText(expectedPart && expectedPart.code);
+      if (code && answerKey.includes(code)) return true;
+      if (name && answerKey.includes(name)) return true;
+      return !name && !code;
     }
 
     function evaluateWorkOrderRecall(expectedWorkOrderId, retrievedWorkOrderIds) {
@@ -3693,22 +3811,11 @@ def build_redesigned_index_html() -> str:
         && partQuantityMatches(expected.quantity, actual.quantity);
     }
 
-    function expectedPartExactMatches(expected, actual) {
-      return partNameExactMatches(expected.name, actual.name)
-        && partCodeMatches(expected.code, actual.code)
-        && partQuantityMatches(expected.quantity, actual.quantity);
-    }
-
     function partNameMatches(expected, actual) {
       if (!String(expected || "").trim()) return true;
       const left = normalizeEvalText(expected);
       const right = normalizeEvalText(actual);
       return Boolean(left && right && (right.includes(left) || left.includes(right)));
-    }
-
-    function partNameExactMatches(expected, actual) {
-      if (!String(expected || "").trim()) return true;
-      return normalizeEvalText(expected) === normalizeEvalText(actual);
     }
 
     function partCodeMatches(expected, actual) {
@@ -3733,10 +3840,12 @@ def build_redesigned_index_html() -> str:
       const metric = selectedBatchEvalMetric();
       const counts = batchEvalCounts(results, metric);
       const metricLabel = batchEvalMetricLabel(metric);
+      const runModeLabel = batchEvalRunModeLabel(batchEvalRunModeFromSettings());
       const safeTotal = total || counts.total || results.length;
       const percent = safeTotal ? Math.round((done / safeTotal) * 100) : 0;
       $("batchEvalProgressBar").style.width = `${Math.min(Math.max(percent, 0), 100)}%`;
       $("batchEvalSummary").innerHTML = [
+        ["评测模式", runModeLabel],
         ["当前指标", metricLabel],
         ["总行数", counts.total],
         ["已评测", counts.done],
@@ -3767,11 +3876,12 @@ def build_redesigned_index_html() -> str:
         ? item.retrievedWorkOrderIds.map(id => escapeHtml(id)).join("<br>")
         : "未召回历史工单";
       const reason = batchEvalReason(item, metric);
+      const runModeLabel = batchEvalRunModeLabel(batchEvalRunModeFromItem(item));
       return `
         <div class="eval-row ${escapeHtml(status)}">
           <div class="eval-row-head">
             <div class="row-title">#${escapeHtml(item.rowNumber)} ${escapeHtml(statusText)}</div>
-            <div class="row-meta">${escapeHtml(batchEvalMetricLabel(metric))}${item.taskId ? ` · task #${escapeHtml(item.taskId)}` : ""}</div>
+            <div class="row-meta">${escapeHtml(runModeLabel)} · ${escapeHtml(batchEvalMetricLabel(metric))}${item.taskId ? ` · task #${escapeHtml(item.taskId)}` : ""}</div>
           </div>
           <div class="row-meta">${escapeHtml(item.question || "")}</div>
           <div class="eval-row-grid">
@@ -3800,16 +3910,19 @@ def build_redesigned_index_html() -> str:
         }
         return lines.join("；");
       }
-      const partMatch = metric === "part_exact" ? (match.part_exact || match) : (match.part_recall || match);
+      if (metric === "answer_part_recall") {
+        const answerMatch = match.answer_part_recall || {};
+        if (!batchEvalAnswerMetricAvailable(item)) return "当前评测模式未生成最终回答";
+        if (Array.isArray(answerMatch.missing) && answerMatch.missing.length) {
+          lines.push(`最终回答未包含：${answerMatch.missing.map(formatExpectedPartText).join("；")}`);
+        }
+        return lines.join("；") || "最终回答已包含全部预期备件";
+      }
+      const partMatch = match.part_recall || match;
       if (Array.isArray(partMatch.missing) && partMatch.missing.length) {
         lines.push(`未命中备件：${partMatch.missing.map(formatExpectedPartText).join("；")}`);
       }
-      if (metric === "part_exact" && partMatch.unexpected_count) {
-        const unexpected = Array.isArray(partMatch.unexpected) ? partMatch.unexpected : [];
-        if (unexpected.length) lines.push(`额外召回备件：${unexpected.map(formatRetrievedPartText).join("；")}`);
-      }
       if (!lines.length && metric === "part_recall") return "预期备件均已召回";
-      if (!lines.length && metric === "part_exact") return "预期备件与召回备件一致";
       return lines.join("；");
     }
 
@@ -3853,32 +3966,37 @@ def build_redesigned_index_html() -> str:
       const metric = selectedBatchEvalMetric();
       const rows = [[
         "row",
+        "run_mode",
         "selected_metric",
         "selected_metric_status",
         "question",
         "expected_work_order_id",
         "retrieved_work_order_ids",
         "part_recall_match",
-        "part_exact_match",
         "work_order_recall_match",
+        "answer_part_recall_match",
         "expected_parts",
         "retrieved_parts",
+        "final_answer",
         "message"
       ]];
       for (const item of orderedBatchEvalResults()) {
         const match = item.match || {};
+        const answerMetricStatus = batchEvalMetricStatus(item, "answer_part_recall");
         rows.push([
           item.rowNumber,
+          batchEvalRunModeFromItem(item),
           metric,
           batchEvalMetricStatus(item, metric),
           item.question || "",
           item.expectedWorkOrderId || "",
           (item.retrievedWorkOrderIds || []).join(" | "),
           batchEvalMetricCorrect(item, "part_recall") ? "pass" : "fail",
-          batchEvalMetricCorrect(item, "part_exact") ? "pass" : "fail",
           batchEvalMetricCorrect(item, "work_order_recall") ? "pass" : "fail",
+          answerMetricStatus === "skipped" ? "" : answerMetricStatus,
           (item.expectedParts || []).map(formatExpectedPartText).join(" | ") || "期望不召回备件",
           (item.retrievedParts || []).map(formatRetrievedPartText).join(" | "),
+          item.answerText || item.answer_text || "",
           batchEvalReason(item, metric),
         ]);
       }
@@ -3919,6 +4037,7 @@ def build_redesigned_index_html() -> str:
           manual_max_hits: $("manualMaxHits").value
         },
         batch_eval: {
+          run_mode: $("batchEvalRunMode").value,
           top_k: $("batchEvalTopK").value,
           work_order_candidate_top_k: $("batchEvalWorkOrderCandidateTopK").value,
           work_order_min_relative_score: $("batchEvalWorkOrderMinRelativeScore").value,
@@ -3967,6 +4086,7 @@ def build_redesigned_index_html() -> str:
       setInputValue("manualCandidateTopK", ui.manual_candidate_top_k ?? retrieval.manual_candidate_top_k);
       setInputValue("manualMinRelativeScore", ui.manual_min_relative_score ?? retrieval.manual_min_relative_score);
       setInputValue("manualMaxHits", ui.manual_max_hits ?? retrieval.manual_max_hits);
+      setInputValue("batchEvalRunMode", batchEval.run_mode ?? ui.batch_eval_run_mode);
       setInputValue("batchEvalTopK", batchEval.top_k ?? ui.batch_eval_top_k);
       setInputValue("batchEvalWorkOrderCandidateTopK", batchEval.work_order_candidate_top_k ?? ui.batch_eval_work_order_candidate_top_k);
       setInputValue("batchEvalWorkOrderMinRelativeScore", batchEval.work_order_min_relative_score ?? ui.batch_eval_work_order_min_relative_score);
@@ -3976,6 +4096,9 @@ def build_redesigned_index_html() -> str:
       setInputValue("batchEvalManualMaxHits", batchEval.manual_max_hits ?? ui.batch_eval_manual_max_hits);
       setInputValue("batchEvalConcurrency", batchEval.concurrency ?? ui.batch_eval_concurrency);
       if (batchEval.selected_metric) appState.batchEval.selectedMetric = batchEval.selected_metric;
+      if (!batchEvalMetricOptionsForSettings($("batchEvalRunMode").value).some(([value]) => value === appState.batchEval.selectedMetric)) {
+        appState.batchEval.selectedMetric = "part_recall";
+      }
       if (ui.question_sidebar_open !== undefined) {
         setQuestionSidebar(Boolean(ui.question_sidebar_open), {save: false});
       }
@@ -4096,7 +4219,7 @@ def build_redesigned_index_html() -> str:
         "qaWorkOrderHybrid", "qaManualHybrid",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
         "manualCandidateTopK", "manualMinRelativeScore", "manualMaxHits",
-        "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
+        "batchEvalRunMode", "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
         "batchEvalWorkOrderMaxHits", "batchEvalManualCandidateTopK", "batchEvalManualMinRelativeScore",
         "batchEvalManualMaxHits", "batchEvalConcurrency",
         "enableEmbedding", "enableRerank", "enableLlm"
@@ -4311,8 +4434,9 @@ def build_redesigned_index_html() -> str:
     function renderVisiblePanels(stageId) {
       const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
       const batchRow = isBatchEvalRowMode();
-      const showAnswer = diagnosticView && !batchRow && stageId === "answer";
-      const showRetrieval = diagnosticView && (stageId === "retrieval" || batchRow);
+      const batchAnswerRow = batchRow && batchEvalRunModeFromItem(activeBatchEvalRow()) === "answer";
+      const showAnswer = diagnosticView && stageId === "answer" && (!batchRow || batchAnswerRow);
+      const showRetrieval = diagnosticView && (stageId === "retrieval" || (batchRow && !showAnswer));
       const showEvidence = diagnosticView && !batchRow && ["work_order_filter", "manual_filter", "fact_extraction"].includes(stageId);
       const showInspector = !batchRow && !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
@@ -4395,12 +4519,14 @@ def build_redesigned_index_html() -> str:
       appState.activeBatchEvalReplay = {
         rowNumber: item.rowNumber,
         source,
+        runMode: "search",
         expectedParts,
         expectedWorkOrderId,
         retrievedParts,
         retrievedWorkOrderIds,
         retrievedWorkOrders,
-        match: evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds)
+        answerText: "",
+        match: evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds, "", "search")
       };
     }
 
@@ -4412,15 +4538,21 @@ def build_redesigned_index_html() -> str:
       const expectedWorkOrderId = item.expectedWorkOrderId || "";
       const retrievedWorkOrderIds = Array.isArray(item.retrievedWorkOrderIds) ? item.retrievedWorkOrderIds : [];
       const retrievedWorkOrders = Array.isArray(item.retrievedWorkOrders) ? item.retrievedWorkOrders : [];
-      const match = item.match || evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds);
+      const runMode = batchEvalRunModeFromItem(item);
+      const answerText = String(item.answerText || item.answer_text || "");
+      const match = item.match && (runMode !== "answer" || item.match.answer_part_recall)
+        ? item.match
+        : evaluateBatchEvalMatch(expectedParts, retrievedParts, expectedWorkOrderId, retrievedWorkOrderIds, answerText, runMode);
       return {
         rowNumber: item.rowNumber,
         source: "原始评测",
+        runMode,
         expectedParts,
         expectedWorkOrderId,
         retrievedParts,
         retrievedWorkOrderIds,
         retrievedWorkOrders,
+        answerText,
         match
       };
     }
@@ -4468,23 +4600,29 @@ def build_redesigned_index_html() -> str:
             </div>
             <div class="batch-comparison-field batch-comparison-summary">
               <div class="row-title">指标结论</div>
-              ${renderBatchEvalMetricConclusions(comparison.match)}
+              ${renderBatchEvalMetricConclusions(comparison.match, comparison.runMode)}
+              ${comparison.answerText ? `
+                <div class="metric-conclusion">
+                  <div class="row-title">最终回答</div>
+                  <div class="batch-answer-preview markdown-body">${renderMarkdown(comparison.answerText)}</div>
+                </div>
+              ` : ""}
             </div>
           </div>
         </div>
       `;
     }
 
-    function renderBatchEvalMetricConclusions(match) {
-      return batchEvalMetricOptions.map(([metric]) => `
+    function renderBatchEvalMetricConclusions(match, runMode = "search") {
+      return batchEvalMetricOptionsForSettings(runMode).map(([metric]) => `
         <div class="metric-conclusion">
-          ${renderBatchEvalMatchSummary(match, metric)}
+          ${renderBatchEvalMatchSummary(match, metric, runMode)}
         </div>
       `).join("");
     }
 
-    function renderBatchEvalMatchSummary(match, metric = selectedBatchEvalMetric()) {
-      const metricPassed = batchEvalMetricCorrect({match}, metric);
+    function renderBatchEvalMatchSummary(match, metric = selectedBatchEvalMetric(), runMode = "search") {
+      const metricPassed = batchEvalMetricCorrect({match, runMode}, metric);
       const label = batchEvalMetricLabel(metric);
       const workOrder = match.work_order || {};
       const lines = [];
@@ -4494,16 +4632,26 @@ def build_redesigned_index_html() -> str:
         } else {
           lines.push(workOrder.correct ? `已召回预期工单 ${workOrder.matched || workOrder.expected || ""}` : `未召回预期工单 ${workOrder.expected || ""}`);
         }
+      } else if (metric === "answer_part_recall") {
+        const answerMatch = match.answer_part_recall || {};
+        if (!answerMatch.available) {
+          lines.push("当前评测未生成最终回答");
+        } else if (!answerMatch.required) {
+          lines.push("未配置预期备件，默认通过");
+        } else {
+          const matched = Array.isArray(answerMatch.matched) ? answerMatch.matched : [];
+          const missing = Array.isArray(answerMatch.missing) ? answerMatch.missing : [];
+          if (matched.length) lines.push(`回答已包含：${matched.map(formatExpectedPartText).join("；")}`);
+          if (missing.length) lines.push(`回答未包含：${missing.map(formatExpectedPartText).join("；")}`);
+        }
       } else {
-        const partMatch = metric === "part_exact" ? (match.part_exact || match) : (match.part_recall || match);
+        const partMatch = match.part_recall || match;
         const missing = Array.isArray(partMatch.missing) ? partMatch.missing : [];
         const matched = Array.isArray(partMatch.matched) ? partMatch.matched : [];
-        const unexpected = Array.isArray(partMatch.unexpected) ? partMatch.unexpected : [];
         if (matched.length) lines.push(`命中：${matched.map(item => formatExpectedPartText(item.expected)).join("；")}`);
         if (missing.length) lines.push(`未命中：${missing.map(formatExpectedPartText).join("；")}`);
-        if (metric === "part_exact" && unexpected.length) lines.push(`额外召回：${unexpected.map(formatRetrievedPartText).join("；")}`);
-        if (!matched.length && !missing.length && (metric === "part_recall" || !unexpected.length)) {
-          lines.push(metric === "part_recall" ? "未配置预期备件，默认通过" : "预期与召回备件均为空");
+        if (!matched.length && !missing.length) {
+          lines.push("未配置预期备件，默认通过");
         }
       }
       return `
@@ -5861,6 +6009,7 @@ def build_redesigned_index_html() -> str:
       $("manualCandidateTopK").value = "30";
       $("manualMinRelativeScore").value = "0.55";
       $("manualMaxHits").value = "5";
+      $("batchEvalRunMode").value = "search";
       $("batchEvalTopK").value = "1";
       $("batchEvalWorkOrderCandidateTopK").value = "50";
       $("batchEvalWorkOrderMinRelativeScore").value = "0.45";
@@ -5947,6 +6096,13 @@ def build_redesigned_index_html() -> str:
     $("batchMetricSelect").addEventListener("change", () => {
       appState.batchEval.selectedMetric = $("batchMetricSelect").value;
       renderBatchEvalPage();
+      saveConfigToLocalStorage();
+    });
+    $("batchEvalRunMode").addEventListener("change", () => {
+      if (!batchEvalMetricOptionsForSettings($("batchEvalRunMode").value).some(([value]) => value === appState.batchEval.selectedMetric)) {
+        appState.batchEval.selectedMetric = "part_recall";
+      }
+      renderBatchMetricSelector();
       saveConfigToLocalStorage();
     });
     $("query").addEventListener("input", syncActiveQuestionInput);
@@ -6486,6 +6642,8 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             batch_eval = object_payload(payload.get("batch_eval")) or {}
             file_name = str(batch_eval.get("file_name") or "未命名表格")
             row_count = int(batch_eval.get("row_count") or 0)
+            settings = batch_eval.get("settings") if isinstance(batch_eval.get("settings"), dict) else {}
+            run_mode = str(settings.get("runMode") or settings.get("run_mode") or batch_eval.get("run_mode") or "search")
             query = f"{file_name} · {row_count} 行"
             share_id = generate_unique_batch_eval_share_id(database)
             task_id = create_task(database, "batch_eval", query, task_request_payload(payload))
@@ -6494,9 +6652,10 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                 "status": "running",
                 "file_name": file_name,
                 "share_id": share_id,
+                "run_mode": run_mode,
                 "headers": batch_eval.get("headers") if isinstance(batch_eval.get("headers"), list) else [],
                 "row_count": row_count,
-                "settings": batch_eval.get("settings") if isinstance(batch_eval.get("settings"), dict) else {},
+                "settings": settings,
                 "selected_metric": batch_eval.get("selected_metric") or "part_recall",
                 "question_column": batch_eval.get("question_column"),
                 "work_order_column": batch_eval.get("work_order_column"),
@@ -7778,8 +7937,8 @@ def batch_eval_summary(result: dict[str, Any]) -> str:
     metric = str(counts.get("selected_metric") or result.get("selected_metric") or "")
     metric_names = {
         "part_recall": "备件召回率",
-        "part_exact": "备件正确率",
         "work_order_recall": "工单召回率",
+        "answer_part_recall": "回答备件召回率",
     }
     metric_text = f"{metric_names.get(metric)} " if metric in metric_names else ""
     warn_text = f" · 黄色 {warned}" if warned else ""
