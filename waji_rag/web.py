@@ -1098,11 +1098,20 @@ def build_redesigned_index_html() -> str:
     }
     .query-tools {
       display: grid;
-      grid-template-columns: 1fr 1fr;
       gap: 10px;
+      align-content: end;
     }
     .query-tools .query-actions {
-      grid-column: 1 / -1;
+      justify-content: flex-start;
+    }
+    .qa-config-summary {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--soft);
+      color: var(--muted);
+      padding: 9px 10px;
+      font-size: 12px;
+      line-height: 1.45;
     }
     .status {
       min-height: 36px;
@@ -1339,6 +1348,10 @@ def build_redesigned_index_html() -> str:
     .stage-node.active {
       border-color: #5eead4;
       background: var(--accent-soft);
+    }
+    .stage-node.selected {
+      outline: 2px solid #0f766e;
+      outline-offset: 2px;
     }
     .stage-node.done {
       border-color: #bbf7d0;
@@ -1656,6 +1669,9 @@ def build_redesigned_index_html() -> str:
     .batch-eval-modal {
       width: min(1180px, 100%);
     }
+    .qa-config-modal {
+      width: min(780px, 100%);
+    }
     .modal-head, .modal-foot {
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
@@ -1934,39 +1950,9 @@ def build_redesigned_index_html() -> str:
             <textarea id="query">__DEFAULT_QUERY_TEXT__</textarea>
           </div>
           <div class="query-tools">
-            <div>
-              <label for="topK">手册 / 故障码 Top K</label>
-              <input id="topK" type="number" min="1" value="1">
-            </div>
-            <div>
-              <label for="evidenceTopK">答案证据数</label>
-              <input id="evidenceTopK" type="number" min="1" value="4">
-            </div>
-            <div>
-              <label for="manualCandidateTopK">手册候选上限</label>
-              <input id="manualCandidateTopK" type="number" min="1" value="30">
-            </div>
-            <div>
-              <label for="manualMinRelativeScore">手册相对阈值</label>
-              <input id="manualMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.55">
-            </div>
-            <div>
-              <label for="manualMaxHits">手册最大返回</label>
-              <input id="manualMaxHits" type="number" min="0" value="5">
-            </div>
-            <div>
-              <label for="workOrderCandidateTopK">工单候选上限</label>
-              <input id="workOrderCandidateTopK" type="number" min="1" value="50">
-            </div>
-            <div>
-              <label for="workOrderMinRelativeScore">工单相对阈值</label>
-              <input id="workOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
-            </div>
-            <div>
-              <label for="workOrderMaxHits">工单最大返回</label>
-              <input id="workOrderMaxHits" type="number" min="0" value="10">
-            </div>
+            <div id="qaConfigSummary" class="qa-config-summary">回答参数尚未载入。</div>
             <div class="query-actions">
+              <button id="openQaConfigBtn" class="secondary">回答参数</button>
               <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
               <button id="runQuestionAnswerBtn">回答当前问题</button>
             </div>
@@ -2195,6 +2181,64 @@ def build_redesigned_index_html() -> str:
     </div>
   </div>
 
+  <div id="qaConfigModal" class="modal-backdrop">
+    <div class="modal qa-config-modal">
+      <div class="modal-head">
+        <h2>回答参数</h2>
+        <button id="closeQaConfigBtn" class="ghost">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div class="full part-box">
+          <div class="row-title">检索方式</div>
+          <div class="row-meta">工单和故障手册可以分别选择是否使用 hybrid。勾选后本次检索会尝试启用 embedding；如果服务端没有可用 embedding，会自动退回 BM25。</div>
+        </div>
+        <label class="checkline" for="qaWorkOrderHybrid">
+          <input id="qaWorkOrderHybrid" type="checkbox">
+          <span>历史工单使用 hybrid</span>
+        </label>
+        <label class="checkline" for="qaManualHybrid">
+          <input id="qaManualHybrid" type="checkbox">
+          <span>故障手册使用 hybrid</span>
+        </label>
+        <div>
+          <label for="topK">手册 / 故障码 Top K</label>
+          <input id="topK" type="number" min="1" value="1">
+        </div>
+        <div>
+          <label for="evidenceTopK">答案证据数</label>
+          <input id="evidenceTopK" type="number" min="1" value="4">
+        </div>
+        <div>
+          <label for="manualCandidateTopK">手册候选上限</label>
+          <input id="manualCandidateTopK" type="number" min="1" value="30">
+        </div>
+        <div>
+          <label for="manualMinRelativeScore">手册相对阈值</label>
+          <input id="manualMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.55">
+        </div>
+        <div>
+          <label for="manualMaxHits">手册最大返回</label>
+          <input id="manualMaxHits" type="number" min="0" value="5">
+        </div>
+        <div>
+          <label for="workOrderCandidateTopK">工单候选上限</label>
+          <input id="workOrderCandidateTopK" type="number" min="1" value="50">
+        </div>
+        <div>
+          <label for="workOrderMinRelativeScore">工单相对阈值</label>
+          <input id="workOrderMinRelativeScore" type="number" min="0" max="1" step="0.05" value="0.45">
+        </div>
+        <div>
+          <label for="workOrderMaxHits">工单最大返回</label>
+          <input id="workOrderMaxHits" type="number" min="0" value="10">
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button id="saveQaConfigBtn">保存回答参数</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const demoWorkOrderDir = __DEMO_WORK_ORDER_DIR_JSON__;
@@ -2247,6 +2291,7 @@ def build_redesigned_index_html() -> str:
       activeView: "build",
       buildPollTimer: null,
       answerPollTimer: null,
+      stageSelectionLocked: false,
       batchEvalRuns: [],
       activeBatchEvalTaskId: null,
       activeBatchEvalTask: null,
@@ -2582,6 +2627,7 @@ def build_redesigned_index_html() -> str:
 
     function configOverrides(options = {}) {
       const retrievalOverrides = options.retrieval && typeof options.retrieval === "object" ? options.retrieval : {};
+      const hybridRequested = retrievalOverrides.work_order_mode === "hybrid" || retrievalOverrides.manual_mode === "hybrid";
       return {
         retrieval: {
           work_order_candidate_top_k: $("workOrderCandidateTopK").value ? Number($("workOrderCandidateTopK").value) : 50,
@@ -2593,7 +2639,7 @@ def build_redesigned_index_html() -> str:
           ...retrievalOverrides
         },
         embedding: {
-          enabled: $("enableEmbedding").checked
+          enabled: $("enableEmbedding").checked || Boolean(options.queryRuntime && hybridRequested)
         },
         rerank: {
           enabled: $("enableRerank").checked,
@@ -2608,6 +2654,26 @@ def build_redesigned_index_html() -> str:
           include_debug: true
         }
       };
+    }
+
+    function qaRetrievalOverrides(overrides = {}) {
+      return {
+        work_order_mode: $("qaWorkOrderHybrid").checked ? "hybrid" : "bm25",
+        manual_mode: $("qaManualHybrid").checked ? "hybrid" : "bm25",
+        ...overrides
+      };
+    }
+
+    function updateQaConfigSummary() {
+      const workOrderMode = $("qaWorkOrderHybrid").checked ? "hybrid" : "BM25";
+      const manualMode = $("qaManualHybrid").checked ? "hybrid" : "BM25";
+      $("qaConfigSummary").textContent = [
+        `工单=${workOrderMode}`,
+        `手册=${manualMode}`,
+        `工单候选=${$("workOrderCandidateTopK").value || 50}`,
+        `手册候选=${$("manualCandidateTopK").value || 30}`,
+        `答案证据=${$("evidenceTopK").value || 4}`
+      ].join(" · ");
     }
 
     function commonPayload(options = {}) {
@@ -3327,7 +3393,7 @@ def build_redesigned_index_html() -> str:
       try {
         const response = await postJson(
           "/api/search-db",
-          queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval})
+          queryPayload(question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false})
         );
         const retrieval = response.result || response;
         const retrievedParts = listPartCandidates(retrieval);
@@ -3768,6 +3834,8 @@ def build_redesigned_index_html() -> str:
           question_sidebar_open: appState.questionSidebarOpen,
           top_k: $("topK").value,
           evidence_top_k: $("evidenceTopK").value,
+          qa_work_order_hybrid: $("qaWorkOrderHybrid").checked,
+          qa_manual_hybrid: $("qaManualHybrid").checked,
           work_order_candidate_top_k: $("workOrderCandidateTopK").value,
           work_order_min_relative_score: $("workOrderMinRelativeScore").value,
           work_order_max_hits: $("workOrderMaxHits").value,
@@ -3816,6 +3884,8 @@ def build_redesigned_index_html() -> str:
       setInputValue("topK", ui.top_k);
       setInputValue("evidenceTopK", ui.evidence_top_k);
       const retrieval = config.retrieval || {};
+      setCheckboxValue("qaWorkOrderHybrid", ui.qa_work_order_hybrid ?? retrieval.work_order_mode === "hybrid");
+      setCheckboxValue("qaManualHybrid", ui.qa_manual_hybrid ?? retrieval.manual_mode === "hybrid");
       setInputValue("workOrderCandidateTopK", ui.work_order_candidate_top_k ?? retrieval.work_order_candidate_top_k);
       setInputValue("workOrderMinRelativeScore", ui.work_order_min_relative_score ?? retrieval.work_order_min_relative_score);
       setInputValue("workOrderMaxHits", ui.work_order_max_hits ?? retrieval.work_order_max_hits);
@@ -3845,6 +3915,7 @@ def build_redesigned_index_html() -> str:
       setCheckboxValue("enableLlm", llm.enabled);
 
       if (ui.active_view) switchView(["qa", "batch"].includes(ui.active_view) ? ui.active_view : "build");
+      updateQaConfigSummary();
       if (!options.silent) setStatus("配置已导入", "success");
     }
 
@@ -3947,6 +4018,7 @@ def build_redesigned_index_html() -> str:
       const ids = [
         "workOrderLimit", "manualLimit", "maxManualChars",
         "ingestReset", "ingestResume", "query", "topK", "evidenceTopK",
+        "qaWorkOrderHybrid", "qaManualHybrid",
         "workOrderCandidateTopK", "workOrderMinRelativeScore", "workOrderMaxHits",
         "manualCandidateTopK", "manualMinRelativeScore", "manualMaxHits",
         "batchEvalTopK", "batchEvalWorkOrderCandidateTopK", "batchEvalWorkOrderMinRelativeScore",
@@ -3957,8 +4029,14 @@ def build_redesigned_index_html() -> str:
       for (const id of ids) {
         const element = $(id);
         if (!element) continue;
-        element.addEventListener("change", saveConfigToLocalStorage);
-        element.addEventListener("input", saveConfigToLocalStorage);
+        element.addEventListener("change", () => {
+          updateQaConfigSummary();
+          saveConfigToLocalStorage();
+        });
+        element.addEventListener("input", () => {
+          updateQaConfigSummary();
+          saveConfigToLocalStorage();
+        });
       }
     }
 
@@ -3975,8 +4053,10 @@ def build_redesigned_index_html() -> str:
 
     function queryPayload(query = $("query").value, options = {}) {
       const requestedTopK = options.topK !== undefined ? Number(options.topK) : ($("topK").value ? Number($("topK").value) : 5);
+      const useQaModes = options.useQaModes !== false;
+      const retrievalOverrides = useQaModes ? qaRetrievalOverrides(options.retrieval) : (options.retrieval || {});
       return {
-        ...commonPayload({retrieval: options.retrieval}),
+        ...commonPayload({retrieval: retrievalOverrides, queryRuntime: useQaModes}),
         query: String(query || "").trim(),
         top_k: Number.isFinite(requestedTopK) && requestedTopK > 0 ? requestedTopK : 5,
         debug: true
@@ -4071,23 +4151,31 @@ def build_redesigned_index_html() -> str:
       saveConfigToLocalStorage();
     }
 
-    function setStage(id, status, data = null, summary = "") {
+    function selectStage(id, options = {}) {
       if (!stageIdSetForView(appState.activeView).has(id)) return;
-      appState.stages[id] = {status, data, summary};
       appState.selectedStage = id;
+      if (options.manual) appState.stageSelectionLocked = true;
       if (appState.activeView === "build") {
-        appState.buildStages = appState.stages;
         appState.buildSelectedStage = appState.selectedStage;
       }
+    }
+
+    function setStage(id, status, data = null, summary = "", options = {}) {
+      if (!stageIdSetForView(appState.activeView).has(id)) return;
+      appState.stages[id] = {status, data, summary};
+      if (options.select !== false) selectStage(id);
+      if (appState.activeView === "build") appState.buildStages = appState.stages;
       renderStages();
       renderStageInspector();
       syncActiveQuestionState();
     }
 
-    function resetStages(view = appState.activeView, selectedStage = null) {
+    function resetStages(view = appState.activeView, selectedStage = null, options = {}) {
+      const previousLock = appState.stageSelectionLocked;
       const state = createStageState(view, selectedStage);
       appState.stages = state.stages;
       appState.selectedStage = state.selectedStage;
+      appState.stageSelectionLocked = options.preserveStageLock ? previousLock : false;
       if (view === "build") {
         appState.buildStages = state.stages;
         appState.buildSelectedStage = state.selectedStage;
@@ -4104,7 +4192,7 @@ def build_redesigned_index_html() -> str:
       for (const [id, title, note] of stageOrderForView(appState.activeView)) {
         const state = appState.stages[id] || {status: "pending", summary: ""};
         const button = document.createElement("button");
-        button.className = `stage-node ${state.status || "pending"} ${appState.selectedStage === id ? "active" : ""}`;
+        button.className = `stage-node ${state.status || "pending"} ${appState.selectedStage === id ? "selected" : ""}`;
         button.innerHTML = `
           <div class="stage-title">
             <span>${escapeHtml(title)}</span>
@@ -4113,8 +4201,7 @@ def build_redesigned_index_html() -> str:
           <div class="stage-note">${escapeHtml(state.summary || note)}</div>
         `;
         button.addEventListener("click", () => {
-          appState.selectedStage = id;
-          if (appState.activeView === "build") appState.buildSelectedStage = id;
+          selectStage(id, {manual: true});
           syncActiveQuestionState();
           renderStages();
           renderStageInspector();
@@ -4471,7 +4558,7 @@ def build_redesigned_index_html() -> str:
       };
       renderStageInspector();
       try {
-        const payload = queryPayload(item.question, {topK: settings.topK, retrieval: settings.retrieval});
+        const payload = queryPayload(item.question, {topK: settings.topK, retrieval: settings.retrieval, useQaModes: false});
         setStatus(`正在重试批量评测第 ${item.rowNumber} 行`);
         setStage("retrieval", "active", payload, "按当前参数重试检索");
         const response = await postJson("/api/search-db", payload);
@@ -4822,29 +4909,37 @@ def build_redesigned_index_html() -> str:
     function renderPipelineResult(response) {
       const result = response.result || response;
       appState.lastResult = result;
-      resetStages(appState.activeView === "batch" ? "batch" : "qa", "retrieval");
+      const stageView = appState.activeView === "batch" ? "batch" : "qa";
+      const selectedBeforeRefresh = stageIdSetForView(stageView).has(appState.selectedStage) ? appState.selectedStage : "retrieval";
+      resetStages(stageView, selectedBeforeRefresh, {preserveStageLock: true});
       const retrieval = result.retrieval || result;
       const answer = result.answer || {};
       const activeStage = result.active_stage || response.active_stage || "";
       const activeSummary = result.active_summary || response.summary || "正在执行";
-      setStageFromTrace(result);
+      setStageFromTrace(result, {select: false});
       renderAnswer(answer);
       renderParts(answerPartsForDisplay(result, retrieval));
       renderRetrievalBoard(retrieval);
       renderSelectedEvidence(result.selected_evidence || []);
-      if (result.retrieval) setStage("retrieval", "done", result.retrieval, formatRetrievalSummary(result.retrieval));
+      if (result.retrieval) setStage("retrieval", "done", result.retrieval, formatRetrievalSummary(result.retrieval), {select: false});
       if (result.answer_harness && result.answer_harness.work_order_filter) {
-        setStage("work_order_filter", result.answer_harness.work_order_filter.status || "done", result.answer_harness.work_order_filter, workOrderFilterSummary(result.answer_harness.work_order_filter));
+        setStage("work_order_filter", result.answer_harness.work_order_filter.status || "done", result.answer_harness.work_order_filter, workOrderFilterSummary(result.answer_harness.work_order_filter), {select: false});
       }
       if (result.answer_harness && result.answer_harness.manual_filter) {
-        setStage("manual_filter", result.answer_harness.manual_filter.status || "done", result.answer_harness.manual_filter, manualFilterSummary(result.answer_harness.manual_filter));
+        setStage("manual_filter", result.answer_harness.manual_filter.status || "done", result.answer_harness.manual_filter, manualFilterSummary(result.answer_harness.manual_filter), {select: false});
       }
       if (result.answer_harness && result.answer_harness.facts) {
-        setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts));
+        setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts), {select: false});
       }
-      if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer));
+      if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer), {select: false});
       if (activeStage && activeStage !== "completed") {
-        setStage(activeStage, "active", pipelineStageData(activeStage, result), activeSummary);
+        setStage(activeStage, "active", pipelineStageData(activeStage, result), activeSummary, {select: false});
+        if (!appState.stageSelectionLocked) {
+          selectStage(activeStage);
+          renderStages();
+          renderStageInspector();
+          syncActiveQuestionState();
+        }
       }
     }
 
@@ -4857,11 +4952,11 @@ def build_redesigned_index_html() -> str:
       return result || {};
     }
 
-    function setStageFromTrace(result) {
+    function setStageFromTrace(result, options = {}) {
       if (!Array.isArray(result.trace)) return;
       for (const item of result.trace) {
         if (!item || !item.stage) continue;
-        setStage(item.stage, normalizeStatus(item.status), item, JSON.stringify(item.details || {}).slice(0, 120));
+        setStage(item.stage, normalizeStatus(item.status), item, JSON.stringify(item.details || {}).slice(0, 120), options);
       }
     }
 
@@ -4922,7 +5017,8 @@ def build_redesigned_index_html() -> str:
         const count = Array.isArray(source.linked_work_order_ids) ? source.linked_work_order_ids.length : 0;
         return `仅工单关联备件 · work_orders=${count}`;
       }
-      return `mode=${retrieval.mode || ""} · top_k=${retrieval.top_k || ""}`;
+      const channelModes = retrieval.channel_modes || {};
+      return `mode=${channelModes[name] || retrieval.mode || ""} · top_k=${retrieval.top_k || ""}`;
     }
 
     function renderHit(hit, index) {
@@ -5176,7 +5272,11 @@ def build_redesigned_index_html() -> str:
 
     function formatRetrievalSummary(retrieval) {
       const channelsPayload = retrieval.channels || {};
-      return `mode=${retrieval.mode || ""} · ` + channels.map(([name, label]) => `${label}:${(channelsPayload[name] || []).length}`).join(" · ");
+      const channelModes = retrieval.channel_modes || {};
+      const modeText = channelModes.work_orders || channelModes.manual_typical_faults
+        ? `工单=${channelModes.work_orders || retrieval.mode || ""} · 手册=${channelModes.manual_typical_faults || retrieval.mode || ""}`
+        : `mode=${retrieval.mode || ""}`;
+      return `${modeText} · ` + channels.map(([name, label]) => `${label}:${(channelsPayload[name] || []).length}`).join(" · ");
     }
 
     function workOrderFilterSummary(payload) {
@@ -5511,6 +5611,8 @@ def build_redesigned_index_html() -> str:
       $("query").value = defaultQuery;
       $("topK").value = "1";
       $("evidenceTopK").value = "4";
+      $("qaWorkOrderHybrid").checked = false;
+      $("qaManualHybrid").checked = false;
       $("workOrderCandidateTopK").value = "50";
       $("workOrderMinRelativeScore").value = "0.45";
       $("workOrderMaxHits").value = "10";
@@ -5532,6 +5634,7 @@ def build_redesigned_index_html() -> str:
       $("enableEmbedding").checked = false;
       $("enableRerank").checked = false;
       $("enableLlm").checked = false;
+      updateQaConfigSummary();
       if (options.save !== false) saveConfigToLocalStorage();
       setStatus("已加载默认页面参数", "success");
     }
@@ -5550,6 +5653,14 @@ def build_redesigned_index_html() -> str:
 
     $("openConfigBtn").addEventListener("click", () => $("configModal").classList.add("open"));
     $("closeConfigBtn").addEventListener("click", () => $("configModal").classList.remove("open"));
+    $("openQaConfigBtn").addEventListener("click", () => $("qaConfigModal").classList.add("open"));
+    $("closeQaConfigBtn").addEventListener("click", () => $("qaConfigModal").classList.remove("open"));
+    $("saveQaConfigBtn").addEventListener("click", () => {
+      updateQaConfigSummary();
+      saveConfigToLocalStorage();
+      $("qaConfigModal").classList.remove("open");
+      setStatus("回答参数已保存", "success");
+    });
     $("openBatchEvalBtn").addEventListener("click", openBatchEvalHome);
     $("batchEvalCsv").addEventListener("change", loadBatchEvalCsv);
     $("runBatchEvalBtn").addEventListener("click", () => runBatchEval());
@@ -6531,6 +6642,8 @@ def safe_browser_config_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     safe_retrieval = {
         key: retrieval[key]
         for key in (
+            "work_order_mode",
+            "manual_mode",
             "work_order_candidate_top_k",
             "work_order_min_relative_score",
             "work_order_max_hits",

@@ -60,6 +60,8 @@ class RetrievalConfig:
     """Configuration for BM25 and optional hybrid retrieval."""
 
     mode: str = "auto"
+    work_order_mode: str = "auto"
+    manual_mode: str = "auto"
     bm25_top_k: int = 20
     vector_top_k: int = 20
     hybrid_alpha: float = 0.75
@@ -145,7 +147,23 @@ class AppConfig:
     def retrieval_mode(self) -> str:
         """Resolve the effective retrieval mode."""
 
-        requested = self.retrieval.mode.lower().strip()
+        return self.resolve_retrieval_mode(self.retrieval.mode)
+
+    def retrieval_mode_for(self, channel_name: str) -> str:
+        """Resolve the effective retrieval mode for one evidence channel."""
+
+        if channel_name == "work_orders":
+            return self.resolve_retrieval_mode(self.retrieval.work_order_mode, fallback_mode=self.retrieval.mode)
+        if channel_name in {"manual_typical_faults", "manual_fault_codes"}:
+            return self.resolve_retrieval_mode(self.retrieval.manual_mode, fallback_mode=self.retrieval.mode)
+        return self.retrieval_mode()
+
+    def resolve_retrieval_mode(self, requested_mode: str, *, fallback_mode: str = "auto") -> str:
+        """Resolve one requested retrieval mode to bm25 or hybrid."""
+
+        requested = requested_mode.lower().strip()
+        if requested == "auto":
+            requested = fallback_mode.lower().strip()
         if requested == "bm25":
             return "bm25"
         if requested == "hybrid":
@@ -203,6 +221,8 @@ def config_from_payload(payload: dict[str, Any], *, env_values: dict[str, str] |
     return AppConfig(
         retrieval=RetrievalConfig(
             mode=str(retrieval_payload.get("mode", "auto")),
+            work_order_mode=str(retrieval_payload.get("work_order_mode", "auto")),
+            manual_mode=str(retrieval_payload.get("manual_mode", "auto")),
             bm25_top_k=int(retrieval_payload.get("bm25_top_k", 20)),
             vector_top_k=int(retrieval_payload.get("vector_top_k", 20)),
             hybrid_alpha=float(retrieval_payload.get("hybrid_alpha", 0.75)),

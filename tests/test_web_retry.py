@@ -213,6 +213,11 @@ class WebRetryTests(unittest.TestCase):
                 overrides = config_overrides_from_payload(
                     {
                         "config_overrides": {
+                            "retrieval": {
+                                "work_order_mode": "hybrid",
+                                "manual_mode": "bm25",
+                                "mode": "hybrid",
+                            },
                             "embedding": {
                                 "enabled": False,
                                 "base_url": "http://browser.example/v1",
@@ -223,6 +228,9 @@ class WebRetryTests(unittest.TestCase):
                         }
                     }
                 )
+                self.assertEqual(overrides["retrieval"]["work_order_mode"], "hybrid")
+                self.assertEqual(overrides["retrieval"]["manual_mode"], "bm25")
+                self.assertNotIn("mode", overrides["retrieval"])
                 self.assertFalse(overrides["embedding"]["enabled"])
                 self.assertEqual(overrides["embedding"]["base_url"], "http://10.0.0.8:8888/v1")
                 self.assertEqual(overrides["embedding"]["api_key"], "server-secret")

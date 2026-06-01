@@ -867,6 +867,8 @@ class PgRetriever:
             raise ValueError("query must not be empty")
 
         effective_mode = self.config.retrieval_mode()
+        work_order_mode = self.config.retrieval_mode_for("work_orders")
+        manual_mode = self.config.retrieval_mode_for("manual_typical_faults")
         retrieval_events: list[dict[str, object]] = []
         terms = unique_terms(tokenize_text(query))
         channels: dict[str, list[RetrievalHit]] = {}
@@ -878,7 +880,7 @@ class PgRetriever:
                     terms,
                     top_k=top_k,
                     doc_types=["work_order"],
-                    mode=effective_mode,
+                    mode=work_order_mode,
                     channel_name="work_orders",
                     debug_events=retrieval_events,
                 )
@@ -888,7 +890,7 @@ class PgRetriever:
                     terms,
                     top_k=top_k,
                     doc_types=["manual_typical_fault"],
-                    mode=effective_mode,
+                    mode=manual_mode,
                     channel_name="manual_typical_faults",
                     debug_events=retrieval_events,
                 )
@@ -897,7 +899,7 @@ class PgRetriever:
                     query,
                     terms,
                     top_k=top_k,
-                    mode=effective_mode,
+                    mode=manual_mode,
                     debug_events=retrieval_events,
                 )
                 retrieval_events.append(
@@ -929,6 +931,11 @@ class PgRetriever:
         payload: dict[str, object] = {
             "query": query,
             "mode": effective_mode,
+            "channel_modes": {
+                "work_orders": work_order_mode,
+                "manual_typical_faults": manual_mode,
+                "manual_fault_codes": manual_mode,
+            },
             "top_k": top_k,
             "channels": channel_payloads,
             "part_candidates": part_candidates,

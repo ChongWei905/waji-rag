@@ -101,6 +101,8 @@ class ConfigTests(unittest.TestCase):
         config = config_from_payload(
             {
                 "retrieval": {
+                    "work_order_mode": "hybrid",
+                    "manual_mode": "bm25",
                     "work_order_candidate_top_k": 80,
                     "work_order_min_relative_score": 1.8,
                     "work_order_max_hits": 12,
@@ -117,6 +119,38 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.retrieval.manual_candidate_top_k, 40)
         self.assertEqual(config.retrieval.manual_min_relative_score, 0.0)
         self.assertEqual(config.retrieval.manual_max_hits, 6)
+        self.assertEqual(config.retrieval.work_order_mode, "hybrid")
+        self.assertEqual(config.retrieval.manual_mode, "bm25")
+
+    def test_channel_retrieval_modes_fall_back_without_embedding(self) -> None:
+        config = config_from_payload(
+            {
+                "retrieval": {
+                    "mode": "bm25",
+                    "work_order_mode": "hybrid",
+                    "manual_mode": "bm25",
+                },
+                "embedding": {"enabled": False, "provider": "vllm", "base_url": "http://127.0.0.1:8888/v1"},
+            }
+        )
+
+        self.assertEqual(config.retrieval_mode_for("work_orders"), "bm25")
+        self.assertEqual(config.retrieval_mode_for("manual_typical_faults"), "bm25")
+
+    def test_channel_retrieval_modes_can_split_hybrid_and_bm25(self) -> None:
+        config = config_from_payload(
+            {
+                "retrieval": {
+                    "mode": "bm25",
+                    "work_order_mode": "hybrid",
+                    "manual_mode": "bm25",
+                },
+                "embedding": {"enabled": True, "provider": "vllm", "base_url": "http://127.0.0.1:8888/v1"},
+            }
+        )
+
+        self.assertEqual(config.retrieval_mode_for("work_orders"), "hybrid")
+        self.assertEqual(config.retrieval_mode_for("manual_typical_faults"), "bm25")
 
 
 if __name__ == "__main__":
