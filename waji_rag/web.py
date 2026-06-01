@@ -1148,12 +1148,6 @@ def build_redesigned_index_html() -> str:
       background: #fff1f2;
       border-color: #fecdd3;
     }
-    .view-tabs {
-      display: flex;
-      gap: 8px;
-      margin-top: 12px;
-      flex-wrap: wrap;
-    }
     .view-tab {
       color: var(--ink);
       background: #fff;
@@ -1967,15 +1961,10 @@ def build_redesigned_index_html() -> str:
       <div id="version" class="meta">loading</div>
     </div>
     <div class="header-actions">
-      <button id="runBuildBtn" class="secondary">构建</button>
-      <button id="runSearchBtn" class="secondary">检索</button>
-      <button id="runAnswerBtn" class="secondary">回答</button>
-      <button id="runFullFlowBtn">全流程</button>
-      <button id="openBatchEvalBtn" class="secondary">批量评测</button>
-      <button id="openQuestionSidebarHeaderBtn" class="secondary">回答历史</button>
-      <button id="openHistoryBtn" class="secondary">历史任务</button>
+      <button id="buildViewBtn" class="view-tab active">索引构建</button>
+      <button id="qaViewBtn" class="view-tab">检索与回答</button>
+      <button id="batchViewBtn" class="view-tab">批量评测</button>
       <button id="openConfigBtn" class="secondary">配置</button>
-      <button id="doctorBtn" class="ghost">环境检查</button>
     </div>
   </header>
 
@@ -1997,19 +1986,14 @@ def build_redesigned_index_html() -> str:
     </aside>
 
     <main>
-    <div class="view-tabs">
-      <button id="buildViewBtn" class="view-tab active">索引构建</button>
-      <button id="qaViewBtn" class="view-tab">检索与回答</button>
-      <button id="batchViewBtn" class="view-tab">批量评测</button>
-    </div>
-
-    <div id="status" class="status">页面已载入。可以单独运行“构建 / 检索 / 回答”，也可以运行“全流程”。</div>
+    <div id="status" class="status">页面已载入。请选择索引构建、检索与回答或批量评测。</div>
 
     <section id="buildView" class="view active">
       <div class="panel">
         <div class="panel-title-row">
           <h2>索引构建</h2>
           <div class="actions">
+            <button id="runBuildBtn" class="secondary">开始构建</button>
             <button id="resumeBuildBtn" class="secondary">继续构建</button>
             <button id="retryFailedBtn" class="secondary">重试失败条目</button>
             <button id="runEmbeddingBtn" class="secondary">补Embedding</button>
@@ -2172,6 +2156,7 @@ def build_redesigned_index_html() -> str:
             <div id="batchEvalStatus" class="row-meta">选择左侧评测问题即可重现对应检索结果。</div>
           </div>
           <div class="actions">
+            <button id="openBatchQuestionSidebarBtn" class="secondary hidden">评测问题</button>
             <button id="backToBatchHomeBtn" class="secondary">返回批量评测</button>
             <button id="stopBatchEvalBtn" class="secondary" disabled>停止</button>
             <button id="exportBatchEvalBtn" class="secondary" disabled>导出结果</button>
@@ -2645,20 +2630,29 @@ def build_redesigned_index_html() -> str:
       appState.questionSidebarOpen = Boolean(open);
       const shell = $("pageShell");
       if (shell) shell.classList.toggle("history-collapsed", !appState.questionSidebarOpen);
-      const headerButton = $("openQuestionSidebarHeaderBtn");
-      if (headerButton) headerButton.style.display = appState.questionSidebarOpen ? "none" : "";
+      updateQuestionSidebarOpenButtons();
       if (options.save !== false) saveConfigToLocalStorage();
     }
 
     function updateSidebarChrome() {
       const isBatch = appState.activeView === "batch";
       $("questionSidebarTitle").textContent = isBatch ? "本次评测问题" : "历史回答";
-      $("openQuestionSidebarHeaderBtn").textContent = isBatch ? "评测问题" : "回答历史";
       $("openQuestionSidebarBtn").textContent = isBatch ? "评测问题" : "历史回答";
       $("newQuestionBtn").classList.toggle("hidden", isBatch);
       const metricSelector = $("batchMetricSelector");
       if (metricSelector) metricSelector.classList.toggle("hidden", !isBatch);
+      updateQuestionSidebarOpenButtons();
       renderBatchMetricSelector();
+    }
+
+    function updateQuestionSidebarOpenButtons() {
+      const batchButton = $("openBatchQuestionSidebarBtn");
+      if (!batchButton) return;
+      const shouldShowBatchButton =
+        appState.activeView === "batch" &&
+        Boolean(appState.activeBatchEvalTaskId) &&
+        !appState.questionSidebarOpen;
+      batchButton.classList.toggle("hidden", !shouldShowBatchButton);
     }
 
     function renderBatchMetricSelector(settings = appState.activeBatchEvalTaskId ? appState.batchEval.settings : $("batchEvalRunMode").value) {
@@ -6318,7 +6312,6 @@ def build_redesigned_index_html() -> str:
       $("qaConfigModal").classList.remove("open");
       setStatus("回答参数已保存", "success");
     });
-    $("openBatchEvalBtn").addEventListener("click", openBatchEvalHome);
     $("batchEvalCsv").addEventListener("change", loadBatchEvalCsv);
     $("runBatchEvalBtn").addEventListener("click", () => runBatchEval());
     $("stopBatchEvalBtn").addEventListener("click", () => {
@@ -6329,10 +6322,6 @@ def build_redesigned_index_html() -> str:
     $("refreshBatchEvalRunsBtn").addEventListener("click", () => refreshBatchEvalRuns());
     $("backToBatchHomeBtn").addEventListener("click", () => {
       openBatchEvalHome();
-    });
-    $("openHistoryBtn").addEventListener("click", async () => {
-      $("taskHistoryModal").classList.add("open");
-      await refreshTasks({quiet: true});
     });
     $("closeHistoryBtn").addEventListener("click", () => $("taskHistoryModal").classList.remove("open"));
     $("saveConfigBtn").addEventListener("click", async () => {
@@ -6355,8 +6344,8 @@ def build_redesigned_index_html() -> str:
       switchView("qa");
     });
     $("batchViewBtn").addEventListener("click", openBatchEvalHome);
-    $("openQuestionSidebarHeaderBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("openQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
+    $("openBatchQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(true));
     $("closeQuestionSidebarBtn").addEventListener("click", () => setQuestionSidebar(false));
     $("newQuestionBtn").addEventListener("click", createNewQuestionTab);
     $("batchMetricSelect").addEventListener("change", () => {
@@ -6386,26 +6375,13 @@ def build_redesigned_index_html() -> str:
       await refreshQuestionTabsFromServer();
     });
     $("clearDataBtn").addEventListener("click", () => clearData($("clearDataBtn")));
+    $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
     $("resumeBuildBtn").addEventListener("click", () => runResumeBuild($("resumeBuildBtn")));
     $("retryFailedBtn").addEventListener("click", () => retryFailedItems($("retryFailedBtn")));
     $("runEmbeddingBtn").addEventListener("click", () => runEmbeddingBackfill($("runEmbeddingBtn")));
     $("pauseTaskBtn").addEventListener("click", () => pauseCurrentTask($("pauseTaskBtn")));
-    $("runBuildBtn").addEventListener("click", () => runBuild($("runBuildBtn")));
-    $("runSearchBtn").addEventListener("click", () => runSearch($("runSearchBtn")));
-    $("runAnswerBtn").addEventListener("click", () => runAsk($("runAnswerBtn")));
     $("runQuestionSearchBtn").addEventListener("click", () => runSearch($("runQuestionSearchBtn")));
     $("runQuestionAnswerBtn").addEventListener("click", () => runAsk($("runQuestionAnswerBtn")));
-    $("runFullFlowBtn").addEventListener("click", () => runFullFlow($("runFullFlowBtn")));
-    $("doctorBtn").addEventListener("click", async () => {
-      try {
-        switchView("build");
-        const result = await getJson("/api/doctor");
-        setStage("config", "done", result, "环境检查完成");
-        setStatus("环境检查完成", "success");
-      } catch (error) {
-        setStatus(String(error), "error");
-      }
-    });
 
     async function initializeWorkbench() {
       getJson("/api/doctor").then(data => {
