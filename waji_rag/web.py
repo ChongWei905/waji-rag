@@ -4357,13 +4357,19 @@ def build_redesigned_index_html() -> str:
       const isBatchHome = appState.activeView === "batch" && !appState.activeBatchEvalTaskId;
       const isBatchOverview = appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber === null;
       const isBatchRow = isBatchEvalRowMode();
+      const isBatchAnswerRow = isBatchAnswerEvalRowMode();
       $("pageShell").classList.toggle("batch-home-mode", isBatchHome);
       $("workspace").classList.toggle("hidden", isBatchHome || isBatchOverview);
-      $("workspace").classList.toggle("batch-row-mode", isBatchRow);
+      $("workspace").classList.toggle("batch-row-mode", isBatchRow && !isBatchAnswerRow);
+      $("workspace").classList.toggle("batch-answer-row-mode", isBatchAnswerRow);
     }
 
     function isBatchEvalRowMode() {
       return appState.activeView === "batch" && Boolean(appState.activeBatchEvalTaskId) && appState.activeBatchEvalRowNumber !== null;
+    }
+
+    function isBatchAnswerEvalRowMode() {
+      return isBatchEvalRowMode() && batchEvalRunModeFromItem(activeBatchEvalRow()) === "answer";
     }
 
     function switchView(view) {
@@ -4497,11 +4503,12 @@ def build_redesigned_index_html() -> str:
     function renderVisiblePanels(stageId) {
       const diagnosticView = appState.activeView === "qa" || appState.activeView === "batch";
       const batchRow = isBatchEvalRowMode();
-      const batchAnswerRow = batchRow && batchEvalRunModeFromItem(activeBatchEvalRow()) === "answer";
+      const batchAnswerRow = isBatchAnswerEvalRowMode();
+      const evidenceStage = ["work_order_filter", "manual_filter", "fact_extraction"].includes(stageId);
       const showAnswer = diagnosticView && stageId === "answer" && (!batchRow || batchAnswerRow);
-      const showRetrieval = diagnosticView && (stageId === "retrieval" || (batchRow && !showAnswer));
-      const showEvidence = diagnosticView && !batchRow && ["work_order_filter", "manual_filter", "fact_extraction"].includes(stageId);
-      const showInspector = !batchRow && !showAnswer && !showRetrieval && !showEvidence;
+      const showRetrieval = diagnosticView && (stageId === "retrieval" || (batchRow && !batchAnswerRow && !showAnswer));
+      const showEvidence = diagnosticView && evidenceStage && (!batchRow || batchAnswerRow);
+      const showInspector = !showAnswer && !showRetrieval && !showEvidence;
       $("answerPanel").classList.toggle("hidden", !showAnswer);
       $("retrievalPanel").classList.toggle("hidden", !showRetrieval);
       $("evidencePanel").classList.toggle("hidden", !showEvidence);
