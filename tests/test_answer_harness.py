@@ -4,9 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from waji_rag.config import AppConfig, LLMConfig
-from waji_rag.llm import ModelCallResult, parse_json_object
+from waji_rag.llm import ModelCallResult, ModelProviderError, parse_json_object
 from waji_rag.pg_index import (
     DatabaseOptions,
+    PipelinePaused,
     RagPipeline,
     build_deterministic_facts,
     build_final_answer_context,
@@ -27,7 +28,7 @@ class HarnessJsonTests(unittest.TestCase):
 
 
 class AnswerHarnessTests(unittest.TestCase):
-    def test_work_order_filter_marks_failed_model_call_unknown(self) -> None:
+    def test_work_order_filter_marks_model_json_parse_failure_unknown(self) -> None:
         config = AppConfig(
             llm=LLMConfig(
                 enabled=True,
@@ -57,7 +58,7 @@ class AnswerHarnessTests(unittest.TestCase):
         def fake_judge(**kwargs: object) -> ModelCallResult:
             work_order = kwargs["work_order_hit"]
             if isinstance(work_order, dict) and work_order.get("work_order_id") == "WO-002":
-                raise RuntimeError("model timeout")
+                return ModelCallResult(text="not json", debug={"model": "fake-chat"})
             return ModelCallResult(
                 text=(
                     '{"work_order_id":"WO-001","related":true,"relevance_level":"high",'
@@ -75,6 +76,25 @@ class AnswerHarnessTests(unittest.TestCase):
         self.assertEqual([item["work_order_id"] for item in payload["accepted"]], ["WO-001"])
         self.assertEqual([item["work_order_id"] for item in payload["unknown"]], ["WO-002"])
         self.assertEqual(payload["unknown"][0]["relevance_level"], "unknown")
+
+    def test_work_order_filter_pauses_on_model_provider_error(self) -> None:
+        config = AppConfig(
+            llm=LLMConfig(
+                enabled=True,
+                provider="vllm",
+                model="fake-chat",
+                base_url="http://127.0.0.1:9999/v1",
+            )
+        )
+        pipeline = RagPipeline(DatabaseOptions(database_url="postgresql://demo"), config)
+        hits = [{"doc_id": "WO-001", "doc_type": "work_order", "title": "风扇皮带异响", "work_order_id": "WO-001"}]
+
+        with patch("waji_rag.pg_index.judge_work_order_relevance", side_effect=ModelProviderError("model timeout")):
+            with self.assertRaises(PipelinePaused) as raised:
+                pipeline._filter_work_orders(query="风扇皮带异响", work_order_hits=hits, part_candidates=[])
+
+        self.assertEqual(raised.exception.stage, "work_order_filter")
+        self.assertEqual(raised.exception.reason, "llm_api_failed")
 
     def test_final_context_keeps_fault_codes_and_selected_order_parts(self) -> None:
         accepted_order = work_order_filter_payload(
@@ -155,12 +175,15 @@ class AnswerHarnessTests(unittest.TestCase):
         events: list[dict[str, object]] = []
 
         with patch("waji_rag.pg_index.PgRetriever.retrieve", return_value=retrieval):
-            result = pipeline.run("风扇皮带异响", top_k=1, progress_callback=events.append)
+            with self.assertRaises(PipelinePaused) as raised:
+                pipeline.run("风扇皮带异响", top_k=1, progress_callback=events.append)
 
-        self.assertEqual(result["answer"]["status"], "fallback")
+        self.assertEqual(raised.exception.stage, "answer")
+        self.assertEqual(raised.exception.reason, "llm_disabled")
+        self.assertEqual(raised.exception.partial_result["answer"]["status"], "paused")
         self.assertEqual(
             [event["active_stage"] for event in events],
-            ["retrieval", "work_order_filter", "manual_filter", "fact_extraction", "answer", "completed"],
+            ["retrieval", "work_order_filter", "manual_filter", "fact_extraction", "answer", "answer"],
         )
         self.assertIn("retrieval", events[1]["result"])
         self.assertIn("work_order_filter", events[2]["result"]["answer_harness"])

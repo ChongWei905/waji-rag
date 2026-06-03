@@ -36,6 +36,7 @@ from waji_rag.config import (
 from waji_rag.pg_index import (
     DatabaseOptions,
     IngestPaused,
+    PipelinePaused,
     PgEmbeddingBackfill,
     PgEmbeddingOptions,
     PgIngestBuilder,
@@ -1369,7 +1370,7 @@ def build_redesigned_index_html() -> str:
       border-color: #bbf7d0;
       background: #f0fdf4;
     }
-    .stage-node.fallback, .stage-node.skipped, .stage-node.filtered {
+    .stage-node.fallback, .stage-node.skipped, .stage-node.filtered, .stage-node.paused {
       border-color: #fed7aa;
       background: #fffbeb;
     }
@@ -2067,6 +2068,7 @@ def build_redesigned_index_html() -> str:
               <button id="openQaConfigBtn" class="secondary">回答参数</button>
               <button id="runQuestionSearchBtn" class="secondary">检索当前问题</button>
               <button id="runQuestionAnswerBtn">回答当前问题</button>
+              <button id="retryAnswerTaskBtn" class="secondary hidden">继续/重试回答</button>
             </div>
           </div>
         </section>
@@ -2587,6 +2589,23 @@ def build_redesigned_index_html() -> str:
       tab.lastResult = appState.lastResult;
       tab.updatedAt = new Date().toISOString();
       renderQuestionTabs();
+      updateAnswerRetryButton();
+    }
+
+    function activePausedAnswerTask() {
+      const task = appState.currentTask;
+      if (!task || task.task_type !== "answer" || task.status !== "paused") return null;
+      const tab = activeQuestionTab();
+      if (tab && tab.answerTaskId && Number(tab.answerTaskId) !== Number(task.id)) return null;
+      return task;
+    }
+
+    function updateAnswerRetryButton() {
+      const button = $("retryAnswerTaskBtn");
+      if (!button) return;
+      const canRetry = Boolean(activePausedAnswerTask());
+      button.classList.toggle("hidden", !canRetry);
+      button.disabled = !canRetry;
     }
 
     function activateQuestionTab(tabId, options = {}) {
@@ -2614,6 +2633,7 @@ def build_redesigned_index_html() -> str:
       renderStageInspector();
       renderQuestionResult(tab);
       if (options.loadPersisted !== false) loadPersistedQuestionResult(tab);
+      updateAnswerRetryButton();
       saveConfigToLocalStorage();
     }
 
@@ -4661,7 +4681,7 @@ def build_redesigned_index_html() -> str:
         button.innerHTML = `
           <div class="stage-title">
             <span>${escapeHtml(title)}</span>
-            <span class="pill ${state.status === "done" ? "ok" : state.status === "fallback" || state.status === "skipped" || state.status === "filtered" ? "warn" : ""}">${escapeHtml(state.status || "pending")}</span>
+            <span class="pill ${state.status === "done" ? "ok" : ["fallback", "skipped", "filtered", "paused"].includes(state.status) ? "warn" : ""}">${escapeHtml(state.status || "pending")}</span>
           </div>
           <div class="stage-note">${escapeHtml(state.summary || note)}</div>
         `;
@@ -5371,7 +5391,8 @@ def build_redesigned_index_html() -> str:
           stopAnswerPolling();
           await refreshTasks({quiet: true});
           await refreshQuestionTabsFromServer({quiet: true});
-          setStatus(`问答任务 #${task.id} ${task.status}`, task.status === "failed" ? "error" : "success");
+          setStatus(`问答任务 #${task.id} ${task.status}`, task.status === "failed" ? "error" : "");
+          updateAnswerRetryButton();
         }
       } catch (error) {
         stopAnswerPolling();
@@ -5395,6 +5416,7 @@ def build_redesigned_index_html() -> str:
         syncActiveQuestionState();
       }
       renderQuestionTabs();
+      updateAnswerRetryButton();
     }
 
     function taskTypeLabel(taskType) {
@@ -5440,9 +5462,12 @@ def build_redesigned_index_html() -> str:
       if (result.answer_harness && result.answer_harness.facts) {
         setStage("fact_extraction", result.answer_harness.facts.status || "done", result.answer_harness.facts, factSummary(result.answer_harness.facts), {select: false});
       }
-      if (result.answer) setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer), {select: false});
+      if (result.answer && (result.answer.status !== "paused" || activeStage === "answer")) {
+        setStage("answer", result.answer.status || "done", result.answer, answerSummary(result.answer), {select: false});
+      }
       if (activeStage && activeStage !== "completed") {
-        setStage(activeStage, "active", pipelineStageData(activeStage, result), activeSummary, {select: false});
+        const activeStatus = answer.status === "paused" ? "paused" : "active";
+        setStage(activeStage, activeStatus, pipelineStageData(activeStage, result), activeSummary, {select: false});
         if (!appState.stageSelectionLocked) {
           selectStage(activeStage);
           renderStages();
@@ -5481,7 +5506,9 @@ def build_redesigned_index_html() -> str:
     }
 
     function renderAnswer(answer) {
-      const text = answer.text || "尚未生成答案。";
+      const text = answer.status === "paused"
+        ? `答案生成已暂停。\n\n原因：${answer.reason || "llm_api_failed"}\n\n错误：${answer.error || "请检查 LLM 配置或服务状态，然后点击“继续/重试回答”。"}`
+        : (answer.text || "尚未生成答案。");
       $("answer").classList.add("markdown-body");
       $("answer").innerHTML = renderMarkdown(text);
     }
@@ -5973,7 +6000,9 @@ def build_redesigned_index_html() -> str:
     }
 
     function answerSummary(answer) {
-      return `status=${answer.status || ""}` + (answer.debug && answer.debug.model ? ` · model=${answer.debug.model}` : "");
+      return `status=${answer.status || ""}`
+        + (answer.reason ? ` · reason=${answer.reason}` : "")
+        + (answer.debug && answer.debug.model ? ` · model=${answer.debug.model}` : "");
     }
 
     function normalizeStatus(status) {
@@ -6197,6 +6226,8 @@ def build_redesigned_index_html() -> str:
         resetStages("qa", "retrieval");
         questionTab.status = "answering";
         renderQuestionTabs();
+        appState.currentTask = null;
+        updateAnswerRetryButton();
         const payload = queryPayload(questionTab.query);
         setStatus("问答中");
         setStage("retrieval", "active", payload, "分路召回证据");
@@ -6213,6 +6244,37 @@ def build_redesigned_index_html() -> str:
         setStage("answer", "error", {error: String(error)}, "问答失败");
       } finally {
         button.disabled = false;
+      }
+    }
+
+    async function retryCurrentAnswerTask(button) {
+      const pausedTask = activePausedAnswerTask();
+      if (!pausedTask) {
+        setStatus("当前问题没有可继续/重试的暂停回答任务", "error");
+        updateAnswerRetryButton();
+        return;
+      }
+      button.disabled = true;
+      try {
+        const tab = activeQuestionTab() || ensureQuestionTabForQuery(pausedTask.query || $("query").value, {loadPersisted: false});
+        setStatus("正在启动回答重试任务");
+        const result = await postJson("/api/retry-answer-task", taskPayload({task_id: pausedTask.id}));
+        tab.answerTaskId = result.task_id || tab.answerTaskId;
+        tab.status = "answering";
+        tab.updatedAt = new Date().toISOString();
+        appState.currentTaskId = result.task_id || null;
+        appState.currentTask = {id: result.task_id, task_type: "answer", status: "running", query: tab.query};
+        resetStages("qa", "retrieval");
+        setStage("retrieval", "active", {task_id: result.task_id, source_task_id: pausedTask.id}, "回答重试任务已启动");
+        renderQuestionTabs();
+        updateAnswerRetryButton();
+        startAnswerPolling(tab.answerTaskId, tab.id);
+        await refreshTasks({quiet: true});
+        setStatus("回答重试任务已启动，阶段结果会自动刷新", "success");
+      } catch (error) {
+        setStatus(`回答重试失败：${error}`, "error");
+      } finally {
+        updateAnswerRetryButton();
       }
     }
 
@@ -6410,6 +6472,7 @@ def build_redesigned_index_html() -> str:
     $("pauseTaskBtn").addEventListener("click", () => pauseCurrentTask($("pauseTaskBtn")));
     $("runQuestionSearchBtn").addEventListener("click", () => runSearch($("runQuestionSearchBtn")));
     $("runQuestionAnswerBtn").addEventListener("click", () => runAsk($("runQuestionAnswerBtn")));
+    $("retryAnswerTaskBtn").addEventListener("click", () => retryCurrentAnswerTask($("retryAnswerTaskBtn")));
 
     async function initializeWorkbench() {
       getJson("/api/doctor").then(data => {
@@ -6522,6 +6585,9 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/ask-db":
             self._handle_ask_db()
+            return
+        if parsed.path == "/api/retry-answer-task":
+            self._handle_retry_answer_task()
             return
         if parsed.path == "/api/tasks":
             self._handle_tasks()
@@ -6817,23 +6883,7 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             task_id = create_task(database, "answer", query, task_request_payload(payload))
             log_runtime_event(f"answer task={task_id} accepted async={bool(payload.get('async'))} query={short_log_text(query)!r}")
             if bool(payload.get("async")):
-                update_task_result(
-                    database,
-                    task_id,
-                    "running",
-                    {
-                        "task_id": task_id,
-                        "summary": "问答任务已启动",
-                        "active_stage": "retrieval",
-                        "result": {
-                            "query": query,
-                            "active_stage": "retrieval",
-                            "active_summary": "正在多路召回证据",
-                            "trace": [],
-                        },
-                    },
-                    "问答任务已启动",
-                )
+                initialize_answer_task(database, task_id, query)
                 thread = threading.Thread(
                     target=run_answer_task,
                     args=(database, task_id, payload),
@@ -6864,6 +6914,13 @@ class RagDebugHandler(BaseHTTPRequestHandler):
                     f"answer task={task_id} completed elapsed_ms={int((time.time() - started_at) * 1000)} "
                     f"summary={short_log_text(response['summary'])!r}"
                 )
+        except PipelinePaused as exc:
+            if task_id is not None:
+                response = pause_answer_task_for_retry(database, task_id, exc)
+                response_status = HTTPStatus.ACCEPTED
+                log_runtime_event(f"answer task={task_id} paused stage={exc.stage} reason={exc.reason} error={short_log_text(exc.error)!r}")
+            else:
+                raise
         except Exception as exc:  # noqa: BLE001 - local debug endpoint.
             log_runtime_event(f"answer task={task_id} failed error={type(exc).__name__}: {short_log_text(exc)}")
             task_update_error = mark_task_failed(database, task_id, exc)
@@ -6873,6 +6930,45 @@ class RagDebugHandler(BaseHTTPRequestHandler):
             self._send_exception_json(exc, extra=body)
             return
         self._send_json(response or {"task_id": task_id}, status=response_status)
+
+    def _handle_retry_answer_task(self) -> None:
+        payload = self._read_json()
+        database = database_from_payload(payload)
+        try:
+            source_task_id = int(payload.get("task_id") or 0)
+            if source_task_id <= 0:
+                self._send_json({"error": "task_id is required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            source_task = get_task(database, source_task_id)
+            if source_task is None:
+                self._send_json({"error": "task not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            if source_task.get("task_type") != "answer":
+                self._send_json({"error": "selected task is not an answer task"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            query = str(source_task.get("query") or "").strip()
+            if not query:
+                self._send_json({"error": "answer task has no query"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            source_request = source_task.get("request") if isinstance(source_task.get("request"), dict) else {}
+            retry_payload = dict(source_request)
+            retry_payload.update({"query": query, "async": True, "retry_source_task_id": source_task_id})
+            task_id = create_task(database, "answer", query, task_request_payload(retry_payload))
+            initialize_answer_task(database, task_id, query, summary="回答重试任务已启动")
+            thread = threading.Thread(
+                target=run_answer_task,
+                args=(database, task_id, retry_payload),
+                name=f"waji-answer-retry-{task_id}",
+                daemon=True,
+            )
+            thread.start()
+            log_runtime_event(f"answer retry task={task_id} source={source_task_id} query={short_log_text(query)!r}")
+            self._send_json(
+                {"task_id": task_id, "source_task_id": source_task_id, "summary": "回答重试任务已启动", "status": "running"},
+                status=HTTPStatus.ACCEPTED,
+            )
+        except Exception as exc:  # noqa: BLE001 - local debug endpoint.
+            self._send_exception_json(exc)
 
     def _handle_tasks(self) -> None:
         payload = self._read_json()
@@ -7525,6 +7621,62 @@ def run_embedding_task(database: DatabaseOptions, task_id: int, payload: dict[st
         mark_task_failed(database, task_id, exc)
 
 
+def initialize_answer_task(database: DatabaseOptions, task_id: int, query: str, *, summary: str = "问答任务已启动") -> None:
+    """Persist the initial observable state for a background answer task."""
+
+    update_task_result(
+        database,
+        task_id,
+        "running",
+        {
+            "task_id": task_id,
+            "summary": summary,
+            "active_stage": "retrieval",
+            "result": {
+                "query": query,
+                "active_stage": "retrieval",
+                "active_summary": "正在多路召回证据",
+                "trace": [],
+            },
+        },
+        summary,
+    )
+
+
+def pause_answer_task_for_retry(database: DatabaseOptions, task_id: int, exc: PipelinePaused) -> dict[str, Any]:
+    """Persist a paused answer task with the latest pipeline snapshot."""
+
+    summary = str(exc)
+    partial_result = dict(exc.partial_result or {})
+    if not partial_result:
+        partial_result = {
+            "active_stage": exc.stage,
+            "active_summary": summary,
+            "answer": {"status": "paused", "reason": exc.reason, "error": exc.error, "text": ""},
+            "trace": [stage_event_payload(exc.stage, "paused", {"reason": exc.reason, "error": exc.error})],
+        }
+    partial_result["active_stage"] = exc.stage
+    partial_result["active_summary"] = summary
+    partial_result["answer"] = {"status": "paused", "reason": exc.reason, "error": exc.error, "text": ""}
+    response = {
+        "task_id": task_id,
+        "summary": summary,
+        "active_stage": exc.stage,
+        "paused_reason": exc.reason,
+        "retryable": True,
+        "error": exc.error,
+        "result": partial_result,
+    }
+    finish_task(database, task_id, "paused", response, summary, error=exc.error)
+    return response
+
+
+def stage_event_payload(stage: str, status: str, details: dict[str, object]) -> dict[str, object]:
+    """Return a minimal stage event for web-only fallback snapshots."""
+
+    return {"stage": stage, "status": status, "details": details}
+
+
 def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, Any]) -> None:
     """Run one answer task in the background and persist per-stage snapshots."""
 
@@ -7573,6 +7725,12 @@ def run_answer_task(database: DatabaseOptions, task_id: int, payload: dict[str, 
         log_runtime_event(
             f"answer task={task_id} completed elapsed_ms={int((time.time() - started_at) * 1000)} "
             f"summary={short_log_text(response['summary'])!r}"
+        )
+    except PipelinePaused as exc:
+        pause_answer_task_for_retry(database, task_id, exc)
+        log_runtime_event(
+            f"answer task={task_id} paused elapsed_ms={int((time.time() - started_at) * 1000)} "
+            f"stage={exc.stage} reason={exc.reason} error={short_log_text(exc.error)!r}"
         )
     except Exception as exc:  # noqa: BLE001 - background task must persist failure.
         log_runtime_event(f"answer task={task_id} failed error={type(exc).__name__}: {short_log_text(exc)}")

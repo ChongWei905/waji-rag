@@ -32,10 +32,10 @@ from waji_rag.index_build import (
 )
 from waji_rag.llm import (
     DashScopeRerankClient,
-    build_harness_fallback_answer,
     extract_answer_facts,
     generate_harness_answer,
     judge_work_order_relevance,
+    ModelProviderError,
     parse_json_object,
     select_manual_titles,
 )
@@ -242,6 +242,27 @@ class SourceCompletion:
 
 class IngestPaused(RuntimeError):
     """Raised when an ingest or embedding task is paused by user request."""
+
+
+class PipelinePaused(RuntimeError):
+    """Raised when the answer pipeline pauses and waits for a user retry."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        reason: str,
+        message: str,
+        error: str | None = None,
+        partial_result: dict[str, object] | None = None,
+    ) -> None:
+        """Store pause metadata and the latest observable pipeline snapshot."""
+
+        super().__init__(message)
+        self.stage = stage
+        self.reason = reason
+        self.error = error or message
+        self.partial_result = partial_result or {}
 
 
 class PgSchemaManager:
@@ -1182,6 +1203,19 @@ class RagPipeline:
                 partial_payload["selected_evidence"] = list_payload(final_context.get("selected_evidence"))
             publish(active_stage, summary)
 
+        def pause_pipeline(exc: PipelinePaused) -> None:
+            summary = str(exc)
+            paused_answer = {"status": "paused", "reason": exc.reason, "error": exc.error, "text": ""}
+            trace.append(stage_event(exc.stage, "paused", {"reason": exc.reason, "error": exc.error}))
+            partial_payload["answer"] = paused_answer
+            partial_payload["trace"] = trace
+            partial_payload["active_stage"] = exc.stage
+            partial_payload["active_summary"] = summary
+            partial_payload["elapsed_seconds"] = round(time.time() - started_at, 3)
+            exc.partial_result = dict(partial_payload)
+            if progress_callback is not None:
+                progress_callback({"active_stage": exc.stage, "summary": summary, "result": dict(partial_payload)})
+
         publish("retrieval", "正在多路召回证据")
         retriever = PgRetriever(self.database, self.config)
         retrieve_started_at = time.time()
@@ -1205,18 +1239,22 @@ class RagPipeline:
         partial_payload["part_candidates"] = part_candidates
         partial_payload["selected_evidence"] = evidence_items
         publish("work_order_filter", "多路召回完成，正在筛选历史工单")
-        answer_harness = self._run_answer_harness(
-            query=query,
-            retrieval=retrieval,
-            part_candidates=part_candidates,
-            trace=trace,
-            progress_callback=publish_harness,
-        )
-        final_context = dict_payload(answer_harness.get("final_answer_context"))
-        selected_evidence = list_payload(final_context.get("selected_evidence")) or evidence_items
-        partial_payload["answer_harness"] = answer_harness
-        partial_payload["selected_evidence"] = selected_evidence
-        answer_payload = self._answer(query, final_context, trace)
+        try:
+            answer_harness = self._run_answer_harness(
+                query=query,
+                retrieval=retrieval,
+                part_candidates=part_candidates,
+                trace=trace,
+                progress_callback=publish_harness,
+            )
+            final_context = dict_payload(answer_harness.get("final_answer_context"))
+            selected_evidence = list_payload(final_context.get("selected_evidence")) or evidence_items
+            partial_payload["answer_harness"] = answer_harness
+            partial_payload["selected_evidence"] = selected_evidence
+            answer_payload = self._answer(query, final_context, trace)
+        except PipelinePaused as exc:
+            pause_pipeline(exc)
+            raise
         partial_payload["answer"] = answer_payload
         payload: dict[str, object] = {
             "query": query,
@@ -1386,6 +1424,13 @@ class RagPipeline:
                 index = future_to_index[future]
                 try:
                     indexed_results[index] = future.result()
+                except ModelProviderError as exc:
+                    raise PipelinePaused(
+                        stage="work_order_filter",
+                        reason="llm_api_failed",
+                        message=f"工单筛选 LLM API 调用失败，任务已暂停：{exc}",
+                        error=str(exc),
+                    ) from exc
                 except Exception as exc:  # noqa: BLE001 - one bad LLM call must not break the harness.
                     indexed_results[index] = work_order_unknown_payload(work_order_hits[index], error=str(exc))
 
@@ -1443,9 +1488,16 @@ class RagPipeline:
                 ],
                 "rejected": [],
             }
-        result = None
         try:
             result = select_manual_titles(query=query, manual_hits=manual_hits, config=self.config.llm)
+        except ModelProviderError as exc:
+            raise PipelinePaused(
+                stage="manual_filter",
+                reason="llm_api_failed",
+                message=f"手册筛选 LLM API 调用失败，任务已暂停：{exc}",
+                error=str(exc),
+            ) from exc
+        try:
             parsed = parse_json_object(result.text)
             payload = normalize_manual_filter_result(parsed, manual_hits)
             payload["status"] = "ok"
@@ -1456,7 +1508,7 @@ class RagPipeline:
                 "status": "fallback",
                 "reason": "manual_filter_failed",
                 "error": f"{type(exc).__name__}: {exc}",
-                "raw_text_preview": result.text[:800] if result else "",
+                "raw_text_preview": result.text[:800],
                 "selected": [
                     manual_selection_payload(hit, relevance_level="medium", reason="手册筛选失败，保留召回手册作为补充证据。")
                     for hit in manual_hits
@@ -1476,7 +1528,6 @@ class RagPipeline:
             fallback_facts["status"] = "fallback"
             fallback_facts["reason"] = "llm_unavailable"
             return fallback_facts
-        result = None
         try:
             result = extract_answer_facts(
                 query=query,
@@ -1484,6 +1535,14 @@ class RagPipeline:
                 selected_parts=selected_parts,
                 config=self.config.llm,
             )
+        except ModelProviderError as exc:
+            raise PipelinePaused(
+                stage="fact_extraction",
+                reason="llm_api_failed",
+                message=f"事实整理 LLM API 调用失败，任务已暂停：{exc}",
+                error=str(exc),
+            ) from exc
+        try:
             parsed = parse_json_object(result.text)
             facts = normalize_answer_facts(parsed, fallback=fallback_facts)
             facts["status"] = "ok"
@@ -1493,7 +1552,7 @@ class RagPipeline:
             fallback_facts["status"] = "fallback"
             fallback_facts["reason"] = "fact_extraction_failed"
             fallback_facts["error"] = f"{type(exc).__name__}: {exc}"
-            fallback_facts["raw_text_preview"] = result.text[:800] if result else ""
+            fallback_facts["raw_text_preview"] = result.text[:800]
             return fallback_facts
 
     def _rerank(
@@ -1565,13 +1624,17 @@ class RagPipeline:
             trace.append(stage_event("answer", "skipped", {"reason": "disabled"}))
             return {"status": "skipped", "text": ""}
         if not self.config.llm.enabled:
-            text = build_harness_fallback_answer(query=query, final_context=final_context)
-            trace.append(stage_event("answer", "fallback", {"reason": "llm_disabled"}))
-            return {"status": "fallback", "reason": "llm_disabled", "text": text}
+            raise PipelinePaused(
+                stage="answer",
+                reason="llm_disabled",
+                message="LLM 未启用，答案生成已暂停；启用 LLM 后可继续/重试。",
+            )
         if not self.config.llm.is_available():
-            text = build_harness_fallback_answer(query=query, final_context=final_context)
-            trace.append(stage_event("answer", "fallback", {"reason": "missing_llm_config"}))
-            return {"status": "fallback", "reason": "missing_llm_config", "text": text}
+            raise PipelinePaused(
+                stage="answer",
+                reason="missing_llm_config",
+                message="LLM 配置不完整，答案生成已暂停；补齐配置后可继续/重试。",
+            )
 
         started_at = time.time()
         try:
@@ -1580,7 +1643,13 @@ class RagPipeline:
                 final_context=final_context,
                 config=self.config.llm,
             )
-            text = result.text or build_harness_fallback_answer(query=query, final_context=final_context)
+            text = result.text
+            if not text:
+                raise PipelinePaused(
+                    stage="answer",
+                    reason="empty_llm_response",
+                    message="LLM 返回空答案，答案生成已暂停；可继续/重试。",
+                )
             trace.append(
                 stage_event(
                     "answer",
@@ -1593,10 +1662,15 @@ class RagPipeline:
                 )
             )
             return {"status": "ok", "text": text, "debug": result.debug}
-        except Exception as exc:  # noqa: BLE001 - generation must degrade.
-            text = build_harness_fallback_answer(query=query, final_context=final_context)
-            trace.append(stage_event("answer", "fallback", {"elapsed_ms": elapsed_ms(started_at), "error": str(exc)}))
-            return {"status": "fallback", "error": str(exc), "text": text}
+        except PipelinePaused:
+            raise
+        except Exception as exc:  # noqa: BLE001 - answer generation failures pause for user retry.
+            raise PipelinePaused(
+                stage="answer",
+                reason="llm_api_failed" if isinstance(exc, ModelProviderError) else "answer_generation_failed",
+                message=f"答案生成 LLM 调用失败，任务已暂停：{exc}",
+                error=str(exc),
+            ) from exc
 
 
 def run_pg_search(options: PgSearchOptions) -> dict[str, object]:

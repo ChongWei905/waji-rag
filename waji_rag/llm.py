@@ -23,6 +23,10 @@ class ModelCallResult:
     debug: dict[str, object]
 
 
+class ModelProviderError(RuntimeError):
+    """Raised when a model provider request or response fails."""
+
+
 @dataclass(slots=True)
 class RerankItem:
     """One reranked document result."""
@@ -76,7 +80,7 @@ class OpenAICompatibleChatClient:
         elapsed_ms = int((time.time() - started_at) * 1000)
         choices = response.get("choices") if isinstance(response, dict) else None
         if not isinstance(choices, list) or not choices:
-            raise RuntimeError("chat endpoint returned no choices")
+            raise ModelProviderError("chat endpoint returned no choices")
         first_choice = choices[0]
         message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
         text = str(message.get("content") or "") if isinstance(message, dict) else ""
@@ -581,7 +585,7 @@ def post_json(
             response={"body_preview": body[:1000]},
             error=f"HTTP {exc.code}",
         )
-        raise RuntimeError(f"{error_prefix} HTTP {exc.code}: {body[:500]}") from exc
+        raise ModelProviderError(f"{error_prefix} HTTP {exc.code}: {body[:500]}") from exc
     except urllib.error.URLError as exc:
         append_model_api_request_log(
             enabled=log_requests_enabled,
@@ -597,7 +601,7 @@ def post_json(
             status="request_error",
             error=str(exc),
         )
-        raise RuntimeError(f"{error_prefix} request failed: {exc}") from exc
+        raise ModelProviderError(f"{error_prefix} request failed: {exc}") from exc
 
     try:
         parsed = json.loads(body)
@@ -619,7 +623,7 @@ def post_json(
             response={"body_preview": body[:1000]},
             error=str(exc),
         )
-        raise RuntimeError(f"{error_prefix} endpoint returned invalid JSON: {compact}") from exc
+        raise ModelProviderError(f"{error_prefix} endpoint returned invalid JSON: {compact}") from exc
     if not isinstance(parsed, dict):
         append_model_api_request_log(
             enabled=log_requests_enabled,
@@ -637,7 +641,7 @@ def post_json(
             response=parsed,
             error="non-object JSON payload",
         )
-        raise RuntimeError(f"{error_prefix} endpoint returned a non-object JSON payload")
+        raise ModelProviderError(f"{error_prefix} endpoint returned a non-object JSON payload")
     append_model_api_request_log(
         enabled=log_requests_enabled,
         log_path=request_log_path,
